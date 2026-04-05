@@ -6,8 +6,8 @@
 use crate::server::RequestHandler;
 use crate::wire::Status;
 use bytes::Bytes;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, warn};
 
 /// Supported write-consistency modes.
@@ -107,12 +107,7 @@ impl<H: RequestHandler> ConsistencyEnforcer<H> {
     /// and wait until `required_acks` have responded.  Here we simulate by
     /// calling the inner handler once (the leader ack) and then checking the
     /// quorum requirement against the available replica count.
-    async fn enforce_write(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        data: Bytes,
-    ) -> Result<(), Status> {
+    async fn enforce_write(&self, volume_id: u64, offset: u64, data: Bytes) -> Result<(), Status> {
         let needed = self.required_acks();
 
         debug!(
@@ -129,11 +124,7 @@ impl<H: RequestHandler> ConsistencyEnforcer<H> {
         let acks: u32 = self.replica_count; // optimistic: assume all replicas ack
 
         if acks < needed {
-            warn!(
-                acks,
-                needed,
-                "not enough replica acknowledgements"
-            );
+            warn!(acks, needed, "not enough replica acknowledgements");
             return Err(Status::NoQuorum);
         }
 
@@ -143,21 +134,11 @@ impl<H: RequestHandler> ConsistencyEnforcer<H> {
 }
 
 impl<H: RequestHandler> RequestHandler for ConsistencyEnforcer<H> {
-    async fn handle_read(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        length: u32,
-    ) -> Result<Bytes, Status> {
+    async fn handle_read(&self, volume_id: u64, offset: u64, length: u32) -> Result<Bytes, Status> {
         self.inner.handle_read(volume_id, offset, length).await
     }
 
-    async fn handle_write(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        data: Bytes,
-    ) -> Result<(), Status> {
+    async fn handle_write(&self, volume_id: u64, offset: u64, data: Bytes) -> Result<(), Status> {
         self.enforce_write(volume_id, offset, data).await
     }
 
@@ -165,12 +146,7 @@ impl<H: RequestHandler> RequestHandler for ConsistencyEnforcer<H> {
         self.inner.handle_flush(volume_id).await
     }
 
-    async fn handle_trim(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        length: u32,
-    ) -> Result<(), Status> {
+    async fn handle_trim(&self, volume_id: u64, offset: u64, length: u32) -> Result<(), Status> {
         self.inner.handle_trim(volume_id, offset, length).await
     }
 }
@@ -267,9 +243,18 @@ mod tests {
 
     #[test]
     fn test_write_consistency_from_str() {
-        assert_eq!("all".parse::<WriteConsistency>().unwrap(), WriteConsistency::All);
-        assert_eq!("MAJORITY".parse::<WriteConsistency>().unwrap(), WriteConsistency::Majority);
-        assert_eq!("Single".parse::<WriteConsistency>().unwrap(), WriteConsistency::Single);
+        assert_eq!(
+            "all".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::All
+        );
+        assert_eq!(
+            "MAJORITY".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::Majority
+        );
+        assert_eq!(
+            "Single".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::Single
+        );
         assert!("bad".parse::<WriteConsistency>().is_err());
     }
 
@@ -301,8 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enforcer_write_majority() {
-        let enforcer =
-            ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::Majority, 3);
+        let enforcer = ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::Majority, 3);
         let result = enforcer
             .handle_write(1, 0, Bytes::from(vec![0xAA; 4]))
             .await;
@@ -322,8 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enforcer_write_single() {
-        let enforcer =
-            ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::Single, 3);
+        let enforcer = ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::Single, 3);
         let result = enforcer
             .handle_write(1, 0, Bytes::from(vec![0xCC; 4]))
             .await;
@@ -346,8 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enforcer_flush_passthrough() {
-        let enforcer =
-            ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::All, 3);
+        let enforcer = ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::All, 3);
         assert!(enforcer.handle_flush(1).await.is_ok());
     }
 
@@ -361,8 +343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enforcer_write_then_read() {
-        let enforcer =
-            ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::Majority, 3);
+        let enforcer = ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::Majority, 3);
         enforcer
             .handle_write(1, 0, Bytes::from(vec![0x01, 0x02, 0x03, 0x04]))
             .await
@@ -373,8 +354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_enforcer_multiple_writes_counter() {
-        let enforcer =
-            ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::All, 3);
+        let enforcer = ConsistencyEnforcer::new(MemHandler::new(), WriteConsistency::All, 3);
         for i in 0..5 {
             enforcer
                 .handle_write(1, i * 4, Bytes::from(vec![0xAA; 4]))

@@ -20,7 +20,9 @@ fn running_cluster(node_count: usize) -> TestCluster {
 #[tokio::test]
 #[ignore]
 async fn mount_write_kill_remount_verify() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
@@ -33,16 +35,24 @@ async fn mount_write_kill_remount_verify() {
 #[tokio::test]
 #[ignore]
 async fn mount_partition_leader_failover() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
     let injector = FaultInjector::new(&cluster);
-    injector.inject(&Fault::NetworkPartition { from: 0, to: 1 }).await.unwrap();
+    injector
+        .inject(&Fault::NetworkPartition { from: 0, to: 1 })
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let health = Checker::check_blockyard_running(&cluster, 5).await;
     assert!(health.passed, "{}", health.summary());
 
-    injector.inject(&Fault::NetworkHeal { from: 0, to: 1 }).await.unwrap();
+    injector
+        .inject(&Fault::NetworkHeal { from: 0, to: 1 })
+        .await
+        .unwrap();
 }

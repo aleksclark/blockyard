@@ -1,4 +1,5 @@
 use crate::cluster_client::ClusterClient;
+use crate::nbd::NbdServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::info;
@@ -8,6 +9,7 @@ pub struct UblkClient {
     device_path: Option<String>,
     cluster: Option<Arc<ClusterClient>>,
     backend: MountBackend,
+    nbd_server: Option<Arc<NbdServer>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,10 @@ impl std::fmt::Display for MountBackend {
     }
 }
 
+/// Default volume size when the cluster hasn't told us the real value yet.
+/// 1 GiB — the NBD device needs a concrete size to negotiate.
+const DEFAULT_NBD_VOLUME_SIZE: u64 = 1024 * 1024 * 1024;
+
 impl UblkClient {
     pub fn new(volume_name: String) -> Self {
         Self {
@@ -43,6 +49,7 @@ impl UblkClient {
             device_path: None,
             cluster: None,
             backend: MountBackend::Ublk,
+            nbd_server: None,
         }
     }
 
@@ -72,26 +79,91 @@ impl UblkClient {
     }
 
     pub async fn mount(&mut self, device: Option<&str>) -> blockyard_common::Result<String> {
-        let dev = match self.backend {
-            MountBackend::Ublk => device.unwrap_or("/dev/ublkb0").to_string(),
-            MountBackend::Nbd => device.unwrap_or("/dev/nbd0").to_string(),
-        };
+        match self.backend {
+            MountBackend::Ublk => {
+                let dev = device.unwrap_or("/dev/ublkb0").to_string();
+                info!(
+                    volume = %self.volume_name,
+                    device = %dev,
+                    backend = %self.backend,
+                    "mounting volume"
+                );
+                self.device_path = Some(dev.clone());
+                Ok(dev)
+            }
+            MountBackend::Nbd => {
+                // Parse device id from the provided path or default to 0.
+                let (dev_id, dev_path) = match device {
+                    Some(p) => {
+                        let id = parse_nbd_device_id(p).unwrap_or(0);
+                        (id, p.to_string())
+                    }
+                    None => (0, "/dev/nbd0".to_string()),
+                };
 
-        info!(
-            volume = %self.volume_name,
-            device = %dev,
-            backend = %self.backend,
-            "mounting volume"
-        );
+                info!(
+                    volume = %self.volume_name,
+                    device = %dev_path,
+                    backend = %self.backend,
+                    "mounting volume via NBD"
+                );
 
-        self.device_path = Some(dev.clone());
-        Ok(dev)
+                // Start the NBD TCP server.
+                let nbd = Arc::new(NbdServer::new(dev_id, DEFAULT_NBD_VOLUME_SIZE));
+                nbd.start().await?;
+                let port = nbd.listen_port().ok_or_else(|| {
+                    blockyard_common::Error::Protocol("NBD server did not bind".to_string())
+                })?;
+
+                // Run nbd-client to attach the kernel device.
+                let output = tokio::process::Command::new("nbd-client")
+                    .args([
+                        "-N",
+                        crate::nbd::EXPORT_NAME,
+                        "localhost",
+                        &port.to_string(),
+                        &dev_path,
+                    ])
+                    .output()
+                    .await;
+
+                match output {
+                    Ok(o) if o.status.success() => {
+                        info!(device = %dev_path, port, "nbd-client connected");
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        tracing::warn!(
+                            device = %dev_path,
+                            error = %stderr,
+                            "nbd-client failed to connect (device may not be available)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            device = %dev_path,
+                            error = %e,
+                            "nbd-client binary not found — NBD server is running but device not attached"
+                        );
+                    }
+                }
+
+                self.nbd_server = Some(nbd);
+                self.device_path = Some(dev_path.clone());
+                Ok(dev_path)
+            }
+        }
     }
 
     pub async fn unmount(&mut self) -> blockyard_common::Result<()> {
         if let Some(dev) = &self.device_path {
             info!(device = %dev, "unmounting device");
         }
+
+        if let Some(nbd) = self.nbd_server.take() {
+            nbd.stop().await?;
+        }
+
         self.device_path = None;
         Ok(())
     }
@@ -99,6 +171,13 @@ impl UblkClient {
     pub fn is_mounted(&self) -> bool {
         self.device_path.is_some()
     }
+}
+
+/// Extract the numeric device id from a path like `/dev/nbd7`.
+fn parse_nbd_device_id(path: &str) -> Option<u32> {
+    let name = path.rsplit('/').next()?;
+    let digits = name.trim_start_matches("nbd");
+    digits.parse().ok()
 }
 
 #[cfg(test)]
@@ -148,6 +227,10 @@ mod tests {
         let mut client = UblkClient::new("vol-1".into()).with_backend(MountBackend::Nbd);
         let dev = client.mount(None).await.unwrap();
         assert_eq!(dev, "/dev/nbd0");
+        // The NBD server should be running even though nbd-client may not be available.
+        assert!(client.nbd_server.is_some());
+        // Clean up.
+        client.unmount().await.unwrap();
     }
 
     #[tokio::test]
@@ -177,5 +260,13 @@ mod tests {
     fn test_mount_backend_display() {
         assert_eq!(MountBackend::Ublk.to_string(), "ublk");
         assert_eq!(MountBackend::Nbd.to_string(), "nbd");
+    }
+
+    #[test]
+    fn test_parse_nbd_device_id() {
+        assert_eq!(parse_nbd_device_id("/dev/nbd0"), Some(0));
+        assert_eq!(parse_nbd_device_id("/dev/nbd15"), Some(15));
+        assert_eq!(parse_nbd_device_id("/dev/nbd"), None);
+        assert_eq!(parse_nbd_device_id("/dev/sda1"), None);
     }
 }

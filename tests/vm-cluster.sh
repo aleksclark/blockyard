@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGES_DIR="$SCRIPT_DIR/images"
 WORK_DIR="$SCRIPT_DIR/.work"
-BASE_IMAGE="$IMAGES_DIR/ubuntu-noble.img"
+BASE_IMAGE="$IMAGES_DIR/fedora-42-cloud.qcow2"
 NODE_COUNT="${2:-5}"
 
 SSH_PORT_BASE=2200
@@ -62,6 +62,8 @@ write_files:
 
 runcmd:
   - sysctl -p /etc/sysctl.d/99-blockyard.conf
+  - modprobe ublk_drv || true
+  - modprobe nbd || true
   - echo "node ${node_name} ready" > /tmp/blockyard-ready
 EOF
 

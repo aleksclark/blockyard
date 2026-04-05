@@ -2,11 +2,25 @@ mod node;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
+
+use blockyard_raft::network::RaftNetwork;
+use blockyard_raft::proto;
+use blockyard_raft::state_machine::AppState;
+use blockyard_raft::types::RaftRequest;
+
+/// Timeout applied to every CLI → cluster gRPC call.
+const GRPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Meta-group Raft group ID (group 0 stores cluster-wide metadata).
+const META_GROUP: u64 = 0;
 
 #[derive(Parser)]
 #[command(name = "blockyard", about = "Distributed block storage system")]
 struct Cli {
+    #[arg(long, default_value = "http://127.0.0.1:7401", global = true)]
+    endpoint: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -98,6 +112,69 @@ enum RebalanceCommand {
     Status,
 }
 
+// ---------------------------------------------------------------------------
+// gRPC helpers
+// ---------------------------------------------------------------------------
+
+/// Build a [`RaftNetwork`] that points at the given cluster endpoint.
+async fn connect_to_cluster(endpoint: &str) -> anyhow::Result<RaftNetwork> {
+    let network = RaftNetwork::new();
+    // RaftNetwork.add_peer expects the full address with http:// scheme.
+    let addr = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_string()
+    } else {
+        format!("http://{endpoint}")
+    };
+    network.add_peer(0, addr);
+    Ok(network)
+}
+
+/// Send a mutation proposal to the meta-group via gRPC and return the
+/// response payload (if any).
+async fn propose(
+    network: &RaftNetwork,
+    endpoint: &str,
+    request: &RaftRequest,
+) -> anyhow::Result<proto::ForwardProposalResponse> {
+    let payload = serde_json::to_vec(request)?;
+    let req = proto::ForwardProposalRequest {
+        group_id: META_GROUP,
+        payload,
+    };
+
+    let resp = tokio::time::timeout(GRPC_TIMEOUT, network.send_forward_proposal(0, req))
+        .await
+        .map_err(|_| anyhow::anyhow!("Error: cannot connect to cluster at {endpoint}"))?
+        .map_err(|e| anyhow::anyhow!("Error: cannot connect to cluster at {endpoint}: {e}"))?;
+
+    if !resp.success && !resp.error.is_empty() {
+        anyhow::bail!("{}", resp.error);
+    }
+    Ok(resp)
+}
+
+/// Query the committed state of the meta-group via gRPC.
+async fn get_state(network: &RaftNetwork, endpoint: &str) -> anyhow::Result<AppState> {
+    let req = proto::GetStateRequest {
+        group_id: META_GROUP,
+    };
+
+    let resp = tokio::time::timeout(GRPC_TIMEOUT, network.send_get_state(0, req))
+        .await
+        .map_err(|_| anyhow::anyhow!("Error: cannot connect to cluster at {endpoint}"))?
+        .map_err(|e| anyhow::anyhow!("Error: cannot connect to cluster at {endpoint}: {e}"))?;
+
+    if !resp.success {
+        anyhow::bail!("{}", resp.error);
+    }
+    let state: AppState = serde_json::from_slice(&resp.state)?;
+    Ok(state)
+}
+
+// ---------------------------------------------------------------------------
+// Entrypoint
+// ---------------------------------------------------------------------------
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -107,14 +184,16 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        // ── Start (unchanged) ─────────────────────────────────────────
         Command::Start { config } => {
             let cfg = blockyard_common::NodeConfig::from_file(&config)?;
             let mut node = node::BlockyardNode::new(cfg)?;
             node.start().await?;
         }
+
+        // ── Volume commands ───────────────────────────────────────────
         Command::Volume(cmd) => {
-            let raft = blockyard_raft::MultiRaft::new(0);
-            raft.create_group(blockyard_raft::meta_group::MetaGroup::group_id())?;
+            let network = connect_to_cluster(&cli.endpoint).await?;
 
             match cmd {
                 VolumeCommand::Create {
@@ -125,25 +204,21 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     let size_bytes =
                         blockyard_common::parse_size(&size).map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let resp = raft.propose(
-                        0,
-                        &blockyard_raft::types::RaftRequest::VolumeCreate {
-                            name: name.clone(),
-                            size_bytes,
-                            replicas,
-                        },
-                    )?;
-                    println!("Created volume '{name}': {resp:?}");
+                    let req = RaftRequest::VolumeCreate {
+                        name: name.clone(),
+                        size_bytes,
+                        replicas,
+                    };
+                    propose(&network, &cli.endpoint, &req).await?;
+                    println!("Created volume '{name}'");
                 }
                 VolumeCommand::Delete { name } => {
-                    let resp = raft.propose(
-                        0,
-                        &blockyard_raft::types::RaftRequest::VolumeDelete { name: name.clone() },
-                    )?;
-                    println!("Deleted volume '{name}': {resp:?}");
+                    let req = RaftRequest::VolumeDelete { name: name.clone() };
+                    propose(&network, &cli.endpoint, &req).await?;
+                    println!("Deleted volume '{name}'");
                 }
                 VolumeCommand::List => {
-                    let state = raft.get_state(0).unwrap_or_default();
+                    let state = get_state(&network, &cli.endpoint).await?;
                     if state.volumes.is_empty() {
                         println!("No volumes.");
                     } else {
@@ -167,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 VolumeCommand::Status { name } => {
-                    let state = raft.get_state(0).unwrap_or_default();
+                    let state = get_state(&network, &cli.endpoint).await?;
                     match state.volumes.get(&name) {
                         Some(vol) => {
                             println!("Volume:   {}", vol.name);
@@ -192,14 +267,12 @@ async fn main() -> anyhow::Result<()> {
                 VolumeCommand::Resize { name, size } => {
                     let new_size =
                         blockyard_common::parse_size(&size).map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let resp = raft.propose(
-                        0,
-                        &blockyard_raft::types::RaftRequest::VolumeResize {
-                            name: name.clone(),
-                            new_size,
-                        },
-                    )?;
-                    println!("Resized volume '{name}': {resp:?}");
+                    let req = RaftRequest::VolumeResize {
+                        name: name.clone(),
+                        new_size,
+                    };
+                    propose(&network, &cli.endpoint, &req).await?;
+                    println!("Resized volume '{name}'");
                 }
                 VolumeCommand::Set {
                     name,
@@ -208,127 +281,119 @@ async fn main() -> anyhow::Result<()> {
                     read_policy,
                 } => {
                     if let Some(r) = replicas {
-                        raft.propose(
-                            0,
-                            &blockyard_raft::types::RaftRequest::VolumeSetReplicas {
-                                name: name.clone(),
-                                replicas: r,
-                            },
-                        )?;
+                        let req = RaftRequest::VolumeSetReplicas {
+                            name: name.clone(),
+                            replicas: r,
+                        };
+                        propose(&network, &cli.endpoint, &req).await?;
                         println!("Set replicas={r} for volume '{name}'");
                     }
                     if let Some(c) = consistency {
-                        raft.propose(
-                            0,
-                            &blockyard_raft::types::RaftRequest::VolumeSetConsistency {
-                                name: name.clone(),
-                                consistency: c.clone(),
-                            },
-                        )?;
+                        let req = RaftRequest::VolumeSetConsistency {
+                            name: name.clone(),
+                            consistency: c.clone(),
+                        };
+                        propose(&network, &cli.endpoint, &req).await?;
                         println!("Set consistency={c} for volume '{name}'");
                     }
                     if let Some(rp) = read_policy {
-                        raft.propose(
-                            0,
-                            &blockyard_raft::types::RaftRequest::VolumeSetReadPolicy {
-                                name: name.clone(),
-                                read_policy: rp.clone(),
-                            },
-                        )?;
+                        let req = RaftRequest::VolumeSetReadPolicy {
+                            name: name.clone(),
+                            read_policy: rp.clone(),
+                        };
+                        propose(&network, &cli.endpoint, &req).await?;
                         println!("Set read_policy={rp} for volume '{name}'");
                     }
                 }
                 VolumeCommand::Snapshot { name, snap } => {
-                    let resp = raft.propose(
-                        0,
-                        &blockyard_raft::types::RaftRequest::VolumeSnapshot {
-                            name: name.clone(),
-                            snap_name: snap.clone(),
-                        },
-                    )?;
-                    println!("Snapshot '{snap}' of volume '{name}': {resp:?}");
+                    let req = RaftRequest::VolumeSnapshot {
+                        name: name.clone(),
+                        snap_name: snap.clone(),
+                    };
+                    propose(&network, &cli.endpoint, &req).await?;
+                    println!("Created snapshot '{snap}' of volume '{name}'");
                 }
                 VolumeCommand::Snapshots { name } => {
-                    let resp = raft.propose(
-                        0,
-                        &blockyard_raft::types::RaftRequest::VolumeSnapshotList {
-                            name: name.clone(),
-                        },
-                    )?;
-                    match resp {
-                        blockyard_raft::types::RaftResponse::Data(data) => {
-                            let snaps: Vec<String> =
-                                serde_json::from_slice(&data).unwrap_or_default();
-                            if snaps.is_empty() {
-                                println!("No snapshots for volume '{name}'.");
-                            } else {
-                                println!("Snapshots for volume '{name}':");
-                                for s in &snaps {
-                                    println!("  {s}");
-                                }
-                            }
+                    let req = RaftRequest::VolumeSnapshotList { name: name.clone() };
+                    let resp = propose(&network, &cli.endpoint, &req).await?;
+                    let snaps: Vec<String> = serde_json::from_slice(&resp.data).unwrap_or_default();
+                    if snaps.is_empty() {
+                        println!("No snapshots for volume '{name}'.");
+                    } else {
+                        println!("Snapshots for volume '{name}':");
+                        for s in &snaps {
+                            println!("  {s}");
                         }
-                        blockyard_raft::types::RaftResponse::Error(e) => {
-                            println!("Error: {e}");
-                        }
-                        _ => {}
                     }
                 }
                 VolumeCommand::SnapshotDelete { name, snap } => {
-                    let resp = raft.propose(
-                        0,
-                        &blockyard_raft::types::RaftRequest::VolumeSnapshotDelete {
-                            name: name.clone(),
-                            snap_name: snap.clone(),
-                        },
-                    )?;
-                    println!("Delete snapshot '{snap}' of volume '{name}': {resp:?}");
+                    let req = RaftRequest::VolumeSnapshotDelete {
+                        name: name.clone(),
+                        snap_name: snap.clone(),
+                    };
+                    propose(&network, &cli.endpoint, &req).await?;
+                    println!("Deleted snapshot '{snap}' of volume '{name}'");
                 }
             }
         }
-        Command::Node(cmd) => match cmd {
-            NodeCommand::List => {
-                let raft = blockyard_raft::MultiRaft::new(0);
-                raft.create_group(0)?;
-                let state = raft.get_state(0).unwrap_or_default();
-                if state.nodes.is_empty() {
-                    println!("No nodes registered.");
-                } else {
-                    println!("{:<10} {:<20} STATUS", "ID", "ADDRESS");
-                    for node in state.nodes.values() {
-                        println!("{:<10} {:<20} healthy", node.node_id, node.addr);
+
+        // ── Node commands ─────────────────────────────────────────────
+        Command::Node(cmd) => {
+            let network = connect_to_cluster(&cli.endpoint).await?;
+
+            match cmd {
+                NodeCommand::List => {
+                    let state = get_state(&network, &cli.endpoint).await?;
+                    if state.nodes.is_empty() {
+                        println!("No nodes registered.");
+                    } else {
+                        println!("{:<10} {:<20} STATUS", "ID", "ADDRESS");
+                        for node in state.nodes.values() {
+                            println!(
+                                "{:<10} {:<20} {}",
+                                node.node_id, node.addr, node.drain_state
+                            );
+                        }
+                    }
+                }
+                NodeCommand::Status { name } => {
+                    let state = get_state(&network, &cli.endpoint).await?;
+                    let node = state
+                        .nodes
+                        .values()
+                        .find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
+                    match node {
+                        Some(n) => {
+                            println!("Node:   {}", n.node_id);
+                            println!("Addr:   {}", n.addr);
+                            println!("State:  {}", n.drain_state);
+                        }
+                        None => println!("Node '{name}' not found"),
+                    }
+                }
+                NodeCommand::Drain { name } => {
+                    let state = get_state(&network, &cli.endpoint).await?;
+                    let node = state
+                        .nodes
+                        .values()
+                        .find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
+                    match node {
+                        Some(n) => {
+                            let req = RaftRequest::NodeDrain { node_id: n.node_id };
+                            propose(&network, &cli.endpoint, &req).await?;
+                            println!("Draining node '{}' (id={})", name, n.node_id);
+                        }
+                        None => println!("Node '{name}' not found"),
                     }
                 }
             }
-            NodeCommand::Status { name } => {
-                println!("Node:     {name}");
-                println!("State:    healthy");
-                println!("ZFS Pool: online");
-                println!("  Errors: read=0 write=0 cksum=0");
-                println!("  Scrub:  none scheduled");
-            }
-            NodeCommand::Drain { name } => {
-                let raft = blockyard_raft::MultiRaft::new(0);
-                raft.create_group(0)?;
-                let state = raft.get_state(0).unwrap_or_default();
-                let node = state.nodes.values().find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
-                match node {
-                    Some(n) => {
-                        raft.propose(
-                            0,
-                            &blockyard_raft::types::RaftRequest::NodeDrain { node_id: n.node_id },
-                        )?;
-                        println!("Draining node '{}' (id={})", name, n.node_id);
-                    }
-                    None => println!("Node '{name}' not found"),
-                }
-            }
-        },
+        }
+
+        // ── Rebalance commands ────────────────────────────────────────
         Command::Rebalance(cmd) => match cmd {
             RebalanceCommand::Status => {
-                let raft = blockyard_raft::MultiRaft::new(0);
-                raft.create_group(blockyard_raft::meta_group::MetaGroup::group_id())?;
-                let state = raft.get_state(0).unwrap_or_default();
+                let network = connect_to_cluster(&cli.endpoint).await?;
+                let state = get_state(&network, &cli.endpoint).await?;
 
                 let rebalancing: Vec<_> = state
                     .volumes
@@ -354,20 +419,35 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+
+        // ── Mount ─────────────────────────────────────────────────────
         Command::Mount {
             name,
             device,
             backend,
         } => {
-            println!("Mounting volume '{name}' via {backend}...");
-            let mut client = blockyard_ublk::UblkClient::new(name);
+            let be: blockyard_ublk::client::MountBackend = backend
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!("{e}"))?;
+            println!("Mounting volume '{name}' via {be}...");
+            let mut client = blockyard_ublk::UblkClient::new(name).with_backend(be);
             let dev = client.mount(device.as_deref()).await?;
             println!("Mounted at {dev}");
         }
+
+        // ── Status ────────────────────────────────────────────────────
         Command::Status => {
-            println!("Cluster: not connected (standalone mode)");
-            println!("Volumes: 0");
-            println!("Nodes:   0");
+            let network = connect_to_cluster(&cli.endpoint).await?;
+            match get_state(&network, &cli.endpoint).await {
+                Ok(state) => {
+                    println!("Cluster: connected to {}", cli.endpoint);
+                    println!("Nodes:   {}", state.nodes.len());
+                    println!("Volumes: {}", state.volumes.len());
+                }
+                Err(e) => {
+                    println!("Error: cannot connect to cluster at {}: {e}", cli.endpoint);
+                }
+            }
         }
     }
 

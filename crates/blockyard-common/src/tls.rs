@@ -123,12 +123,14 @@ pub fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let pem_data = std::fs::read(path)
         .map_err(|e| Error::Config(format!("failed to read cert file {}: {e}", path.display())))?;
 
-    let certs: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut &pem_data[..])
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| {
-                Error::Config(format!("failed to parse certs from {}: {e}", path.display()))
-            })?;
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &pem_data[..])
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| {
+            Error::Config(format!(
+                "failed to parse certs from {}: {e}",
+                path.display()
+            ))
+        })?;
 
     if certs.is_empty() {
         return Err(Error::Config(format!(
@@ -147,9 +149,7 @@ pub fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 
     rustls_pemfile::private_key(&mut &pem_data[..])
         .map_err(|e| Error::Config(format!("failed to parse key from {}: {e}", path.display())))?
-        .ok_or_else(|| {
-            Error::Config(format!("no private key found in {}", path.display()))
-        })
+        .ok_or_else(|| Error::Config(format!("no private key found in {}", path.display())))
 }
 
 // ---------------------------------------------------------------------------
@@ -173,15 +173,14 @@ pub fn build_server_config(
     let ca_certs = load_certs(ca_path)?;
     let mut root_store = rustls::RootCertStore::empty();
     for ca in &ca_certs {
-        root_store.add(ca.clone()).map_err(|e| {
-            Error::Config(format!("failed to add CA cert to root store: {e}"))
-        })?;
+        root_store
+            .add(ca.clone())
+            .map_err(|e| Error::Config(format!("failed to add CA cert to root store: {e}")))?;
     }
 
-    let client_verifier =
-        rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
-            .build()
-            .map_err(|e| Error::Config(format!("failed to build client verifier: {e}")))?;
+    let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|e| Error::Config(format!("failed to build client verifier: {e}")))?;
 
     let config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
@@ -208,9 +207,9 @@ pub fn build_client_config(
     let ca_certs = load_certs(ca_path)?;
     let mut root_store = rustls::RootCertStore::empty();
     for ca in &ca_certs {
-        root_store.add(ca.clone()).map_err(|e| {
-            Error::Config(format!("failed to add CA cert to root store: {e}"))
-        })?;
+        root_store
+            .add(ca.clone())
+            .map_err(|e| Error::Config(format!("failed to add CA cert to root store: {e}")))?;
     }
 
     let config = rustls::ClientConfig::builder()

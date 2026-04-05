@@ -99,7 +99,10 @@ impl WorkloadLog {
     }
 
     pub fn written_offsets(&self) -> Vec<u64> {
-        self.acknowledged_writes().iter().map(|w| w.offset).collect()
+        self.acknowledged_writes()
+            .iter()
+            .map(|w| w.offset)
+            .collect()
     }
 }
 
@@ -185,7 +188,7 @@ impl WorkloadGenerator {
                 let mut data = vec![0u8; config.block_size];
                 rng.fill(&mut data[..]);
 
-                let write_start = Instant::now();
+                let _write_start = Instant::now();
                 match Self::send_write(&config, id, offset, &data).await {
                     Ok(true) => {
                         let elapsed = start.elapsed();
@@ -259,7 +262,8 @@ impl WorkloadGenerator {
 
     async fn connect(config: &WorkloadConfig) -> anyhow::Result<TcpStream> {
         for target in &config.targets {
-            match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(target)).await {
+            match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(target)).await
+            {
                 Ok(Ok(stream)) => {
                     stream.set_nodelay(true)?;
                     return Ok(stream);
@@ -292,17 +296,19 @@ impl WorkloadGenerator {
             stream.write_all(&buf).await?;
             stream.flush().await?;
 
-        let mut resp_buf = BytesMut::with_capacity(256);
-        loop {
-            let n = stream.read_buf(&mut resp_buf).await?;
-            if n == 0 {
-                anyhow::bail!("connection closed");
+            let mut resp_buf = BytesMut::with_capacity(256);
+            loop {
+                let n = stream.read_buf(&mut resp_buf).await?;
+                if n == 0 {
+                    anyhow::bail!("connection closed");
+                }
+                if let Some(resp) = Response::decode(&mut resp_buf) {
+                    return Ok(resp.status == blockyard_protocol::wire::Status::Ok);
+                }
             }
-            if let Some(resp) = Response::decode(&mut resp_buf) {
-                return Ok(resp.status == blockyard_protocol::wire::Status::Ok);
-            }
-        }
-        }).await.map_err(|_| anyhow::anyhow!("write timeout"))?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("write timeout"))?
     }
 
     async fn send_read(
@@ -337,7 +343,9 @@ impl WorkloadGenerator {
                     return Ok(resp.data);
                 }
             }
-        }).await.map_err(|_| anyhow::anyhow!("read timeout"))?
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("read timeout"))?
     }
 }
 

@@ -69,8 +69,7 @@ impl MetricsRecorder {
     pub fn record_read(&self, volume: &str, bytes: u64, latency_secs: f64) {
         counter!(VOLUME_READ_IOPS, "volume" => volume.to_owned()).increment(1);
         counter!(VOLUME_READ_BYTES_TOTAL, "volume" => volume.to_owned()).increment(bytes);
-        histogram!(VOLUME_READ_LATENCY_SECONDS, "volume" => volume.to_owned())
-            .record(latency_secs);
+        histogram!(VOLUME_READ_LATENCY_SECONDS, "volume" => volume.to_owned()).record(latency_secs);
     }
 
     // -- Cluster -----------------------------------------------------------

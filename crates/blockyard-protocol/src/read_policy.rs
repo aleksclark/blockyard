@@ -6,8 +6,8 @@
 use crate::server::RequestHandler;
 use crate::wire::Status;
 use bytes::Bytes;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tracing::debug;
 
 /// Supported read-routing policies.
@@ -117,8 +117,7 @@ impl<H: RequestHandler> ReadRouter<H> {
                     self.replicas[li]
                 } else {
                     // Fallback to round-robin when no local replica.
-                    let idx =
-                        self.rr_counter.fetch_add(1, Ordering::Relaxed) % self.replicas.len();
+                    let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % self.replicas.len();
                     self.replicas[idx]
                 }
             }
@@ -127,12 +126,7 @@ impl<H: RequestHandler> ReadRouter<H> {
 }
 
 impl<H: RequestHandler> RequestHandler for ReadRouter<H> {
-    async fn handle_read(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        length: u32,
-    ) -> Result<Bytes, Status> {
+    async fn handle_read(&self, volume_id: u64, offset: u64, length: u32) -> Result<Bytes, Status> {
         let target = self.select_replica();
         debug!(
             policy = %self.policy,
@@ -143,12 +137,7 @@ impl<H: RequestHandler> RequestHandler for ReadRouter<H> {
         self.inner.handle_read(volume_id, offset, length).await
     }
 
-    async fn handle_write(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        data: Bytes,
-    ) -> Result<(), Status> {
+    async fn handle_write(&self, volume_id: u64, offset: u64, data: Bytes) -> Result<(), Status> {
         self.inner.handle_write(volume_id, offset, data).await
     }
 
@@ -156,12 +145,7 @@ impl<H: RequestHandler> RequestHandler for ReadRouter<H> {
         self.inner.handle_flush(volume_id).await
     }
 
-    async fn handle_trim(
-        &self,
-        volume_id: u64,
-        offset: u64,
-        length: u32,
-    ) -> Result<(), Status> {
+    async fn handle_trim(&self, volume_id: u64, offset: u64, length: u32) -> Result<(), Status> {
         self.inner.handle_trim(volume_id, offset, length).await
     }
 }
@@ -319,13 +303,7 @@ mod tests {
             .data
             .lock()
             .insert((1, 0), vec![0xAA, 0xBB, 0xCC, 0xDD]);
-        let router = ReadRouter::new(
-            handler,
-            ReadPolicy::Leader,
-            make_replicas(&[1]),
-            0,
-            Some(0),
-        );
+        let router = ReadRouter::new(handler, ReadPolicy::Leader, make_replicas(&[1]), 0, Some(0));
         let data = router.handle_read(1, 0, 4).await.unwrap();
         assert_eq!(data, Bytes::from(vec![0xAA, 0xBB, 0xCC, 0xDD]));
         assert_eq!(router.reads_routed(), 1);
@@ -340,9 +318,7 @@ mod tests {
             0,
             None,
         );
-        let res = router
-            .handle_write(1, 0, Bytes::from(vec![0x01; 4]))
-            .await;
+        let res = router.handle_write(1, 0, Bytes::from(vec![0x01; 4])).await;
         assert!(res.is_ok());
     }
 
@@ -362,13 +338,7 @@ mod tests {
     async fn test_router_handle_trim_passthrough() {
         let handler = MemHandler::new();
         handler.data.lock().insert((1, 0), vec![1, 2, 3, 4]);
-        let router = ReadRouter::new(
-            handler,
-            ReadPolicy::Any,
-            make_replicas(&[1, 2]),
-            0,
-            None,
-        );
+        let router = ReadRouter::new(handler, ReadPolicy::Any, make_replicas(&[1, 2]), 0, None);
         assert!(router.handle_trim(1, 0, 4).await.is_ok());
     }
 

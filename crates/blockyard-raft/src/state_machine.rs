@@ -64,17 +64,12 @@ fn default_read_policy() -> String {
     "any".into()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeDrainState {
+    #[default]
     Active,
     Draining,
     Drained,
-}
-
-impl Default for NodeDrainState {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 impl std::fmt::Display for NodeDrainState {
@@ -733,7 +728,13 @@ mod tests {
     #[test]
     fn test_apply_node_drain() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::NodeRegister { node_id: 1, addr: "a".into() });
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
         let resp = sm.apply(2, &RaftRequest::NodeDrain { node_id: 1 });
         assert_eq!(resp, RaftResponse::Ok);
         assert_eq!(sm.state().nodes[&1].drain_state, NodeDrainState::Draining);
@@ -749,7 +750,13 @@ mod tests {
     #[test]
     fn test_apply_node_drain_complete() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::NodeRegister { node_id: 1, addr: "a".into() });
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
         sm.apply(2, &RaftRequest::NodeDrain { node_id: 1 });
         let resp = sm.apply(3, &RaftRequest::NodeDrainComplete { node_id: 1 });
         assert_eq!(resp, RaftResponse::Ok);
@@ -759,8 +766,21 @@ mod tests {
     #[test]
     fn test_apply_volume_set_replicas() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        let resp = sm.apply(2, &RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        let resp = sm.apply(
+            2,
+            &RaftRequest::VolumeSetReplicas {
+                name: "v".into(),
+                replicas: 5,
+            },
+        );
         assert_eq!(resp, RaftResponse::Ok);
         assert_eq!(sm.state().volumes["v"].replicas, 5);
     }
@@ -768,16 +788,35 @@ mod tests {
     #[test]
     fn test_apply_volume_set_replicas_not_found() {
         let sm = StateMachine::new();
-        let resp = sm.apply(1, &RaftRequest::VolumeSetReplicas { name: "x".into(), replicas: 5 });
+        let resp = sm.apply(
+            1,
+            &RaftRequest::VolumeSetReplicas {
+                name: "x".into(),
+                replicas: 5,
+            },
+        );
         assert!(matches!(resp, RaftResponse::Error(_)));
     }
 
     #[test]
     fn test_apply_volume_set_consistency() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
         assert_eq!(sm.state().volumes["v"].consistency, "majority");
-        let resp = sm.apply(2, &RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() });
+        let resp = sm.apply(
+            2,
+            &RaftRequest::VolumeSetConsistency {
+                name: "v".into(),
+                consistency: "all".into(),
+            },
+        );
         assert_eq!(resp, RaftResponse::Ok);
         assert_eq!(sm.state().volumes["v"].consistency, "all");
     }
@@ -785,9 +824,22 @@ mod tests {
     #[test]
     fn test_apply_volume_set_read_policy() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
         assert_eq!(sm.state().volumes["v"].read_policy, "any");
-        let resp = sm.apply(2, &RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() });
+        let resp = sm.apply(
+            2,
+            &RaftRequest::VolumeSetReadPolicy {
+                name: "v".into(),
+                read_policy: "leader".into(),
+            },
+        );
         assert_eq!(resp, RaftResponse::Ok);
         assert_eq!(sm.state().volumes["v"].read_policy, "leader");
     }
@@ -807,7 +859,14 @@ mod tests {
     #[test]
     fn test_volume_record_defaults() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
         let vol = &sm.state().volumes["v"];
         assert_eq!(vol.consistency, "majority");
         assert_eq!(vol.read_policy, "any");
@@ -818,8 +877,21 @@ mod tests {
     #[test]
     fn test_apply_volume_snapshot() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        let resp = sm.apply(2, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        let resp = sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
         assert_eq!(resp, RaftResponse::Ok);
         let vol = &sm.state().volumes["v"];
         assert_eq!(vol.snapshots, vec!["snap1".to_string()]);
@@ -828,26 +900,76 @@ mod tests {
     #[test]
     fn test_apply_volume_snapshot_duplicate() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        sm.apply(2, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() });
-        let resp = sm.apply(3, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
+        let resp = sm.apply(
+            3,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
         assert!(matches!(resp, RaftResponse::Error(_)));
     }
 
     #[test]
     fn test_apply_volume_snapshot_not_found() {
         let sm = StateMachine::new();
-        let resp = sm.apply(1, &RaftRequest::VolumeSnapshot { name: "nope".into(), snap_name: "s".into() });
+        let resp = sm.apply(
+            1,
+            &RaftRequest::VolumeSnapshot {
+                name: "nope".into(),
+                snap_name: "s".into(),
+            },
+        );
         assert!(matches!(resp, RaftResponse::Error(_)));
     }
 
     #[test]
     fn test_apply_volume_snapshot_multiple() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        sm.apply(2, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() });
-        sm.apply(3, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap2".into() });
-        sm.apply(4, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap3".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
+        sm.apply(
+            3,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap2".into(),
+            },
+        );
+        sm.apply(
+            4,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap3".into(),
+            },
+        );
         let vol = &sm.state().volumes["v"];
         assert_eq!(vol.snapshots.len(), 3);
         assert_eq!(vol.snapshots, vec!["snap1", "snap2", "snap3"]);
@@ -856,9 +978,28 @@ mod tests {
     #[test]
     fn test_apply_volume_snapshot_delete() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        sm.apply(2, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() });
-        let resp = sm.apply(3, &RaftRequest::VolumeSnapshotDelete { name: "v".into(), snap_name: "snap1".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
+        let resp = sm.apply(
+            3,
+            &RaftRequest::VolumeSnapshotDelete {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
         assert_eq!(resp, RaftResponse::Ok);
         let vol = &sm.state().volumes["v"];
         assert!(vol.snapshots.is_empty());
@@ -867,24 +1008,62 @@ mod tests {
     #[test]
     fn test_apply_volume_snapshot_delete_not_found_volume() {
         let sm = StateMachine::new();
-        let resp = sm.apply(1, &RaftRequest::VolumeSnapshotDelete { name: "nope".into(), snap_name: "s".into() });
+        let resp = sm.apply(
+            1,
+            &RaftRequest::VolumeSnapshotDelete {
+                name: "nope".into(),
+                snap_name: "s".into(),
+            },
+        );
         assert!(matches!(resp, RaftResponse::Error(_)));
     }
 
     #[test]
     fn test_apply_volume_snapshot_delete_not_found_snap() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        let resp = sm.apply(2, &RaftRequest::VolumeSnapshotDelete { name: "v".into(), snap_name: "nope".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        let resp = sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshotDelete {
+                name: "v".into(),
+                snap_name: "nope".into(),
+            },
+        );
         assert!(matches!(resp, RaftResponse::Error(_)));
     }
 
     #[test]
     fn test_apply_volume_snapshot_list() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
-        sm.apply(2, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() });
-        sm.apply(3, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap2".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap1".into(),
+            },
+        );
+        sm.apply(
+            3,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "snap2".into(),
+            },
+        );
         let resp = sm.apply(4, &RaftRequest::VolumeSnapshotList { name: "v".into() });
         match resp {
             RaftResponse::Data(data) => {
@@ -898,7 +1077,14 @@ mod tests {
     #[test]
     fn test_apply_volume_snapshot_list_empty() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
         let resp = sm.apply(2, &RaftRequest::VolumeSnapshotList { name: "v".into() });
         match resp {
             RaftResponse::Data(data) => {
@@ -912,16 +1098,40 @@ mod tests {
     #[test]
     fn test_apply_volume_snapshot_list_not_found() {
         let sm = StateMachine::new();
-        let resp = sm.apply(1, &RaftRequest::VolumeSnapshotList { name: "nope".into() });
+        let resp = sm.apply(
+            1,
+            &RaftRequest::VolumeSnapshotList {
+                name: "nope".into(),
+            },
+        );
         assert!(matches!(resp, RaftResponse::Error(_)));
     }
 
     #[test]
     fn test_snapshot_survives_snapshot_restore() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 2 });
-        sm.apply(2, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "s1".into() });
-        sm.apply(3, &RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "s2".into() });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 2,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "s1".into(),
+            },
+        );
+        sm.apply(
+            3,
+            &RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "s2".into(),
+            },
+        );
 
         let snap = sm.snapshot();
         let sm2 = StateMachine::new();
@@ -933,7 +1143,14 @@ mod tests {
     #[test]
     fn test_volume_create_has_empty_snapshots() {
         let sm = StateMachine::new();
-        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 1 });
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1024,
+                replicas: 1,
+            },
+        );
         let vol = &sm.state().volumes["v"];
         assert!(vol.snapshots.is_empty());
     }

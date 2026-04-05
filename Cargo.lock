@@ -216,6 +216,7 @@ dependencies = [
  "blockyard-raft",
  "blockyard-storage",
  "blockyard-ublk",
+ "bytes",
  "clap",
  "hostname",
  "serde_json",
