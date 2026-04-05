@@ -1,1 +1,3 @@
 /target
+tests/images/*.img
+tests/.work/
