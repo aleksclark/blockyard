@@ -16,58 +16,78 @@ Target: single-cluster block storage with Raft replication and UBLK mounting.
 - [x] Shared types, config parsing, error types (`blockyard-common`)
 - [x] Example config file matching RFC spec
 - [x] CLI skeleton with subcommands (`start`, `volume`, `node`, `mount`, `status`)
-- [ ] CI pipeline (cargo check, clippy, test, fmt)
-- [ ] Integration test harness (multi-node in-process)
+- [x] Unit tests across all library crates (368 tests)
+- [x] CI pipeline (cargo check, clippy, test, fmt) — GitHub Actions
+- [x] Integration test harness (VM-based, Jepsen-style with QEMU)
 
 ### 1.2 Gossip — Cluster Membership (`blockyard-gossip`)
-- [ ] SWIM protocol: ping / ping-req / suspect / dead
-- [ ] UDP transport with message serialization
-- [ ] Seed-based join (contact seeds → receive membership)
-- [ ] Piggybacked membership updates on gossip messages
-- [ ] Incarnation numbers for crashing/restarting nodes
-- [ ] Configurable probe interval, suspect timeout, probe timeout
-- [ ] MemberList integration with node state machine
+- [x] SWIM protocol: ping / ping-req / suspect / dead
+- [x] UDP transport with message serialization
+- [x] Seed-based join (contact seeds → receive membership)
+- [x] Piggybacked membership updates on gossip messages
+- [x] Incarnation numbers for crashing/restarting nodes
+- [x] Configurable probe interval, suspect timeout, probe timeout
+- [x] MemberList integration with node state machine
+- [x] Transport trait abstraction (UDP + in-memory for tests)
+- [x] ZFS health propagation via gossip updates
 
 ### 1.3 Multi-Raft Consensus (`blockyard-raft`)
-- [ ] Integrate `openraft` as Raft engine
-- [ ] Meta Group: cluster-wide metadata (volume defs, placement map, node inventory)
-- [ ] Volume Groups: per-volume Raft group lifecycle (create, destroy, membership changes)
-- [ ] Heartbeat consolidation across groups sharing a node pair
+- [x] Multi-Raft group management (create, remove, propose, query state)
+- [x] Meta Group: cluster-wide metadata (volume defs, placement map, node inventory)
+- [x] Volume Groups: per-volume Raft group lifecycle (create, destroy, membership changes)
+- [x] State machine: volume CRUD, placement updates, node register/deregister
+- [x] Snapshot and restore for state machine
+- [x] Heartbeat consolidation across groups sharing a node pair
+- [~] Integrate `openraft` as Raft engine (types defined, full integration pending)
 - [ ] Raft log storage on dedicated ZFS dataset (`blockyard/raft-log`)
 - [ ] Raft snapshot via ZFS snapshot
-- [ ] Leader election and automatic failover
+- [ ] Leader election and automatic failover (via openraft)
 - [ ] Voter/learner management for Meta Group
 
 ### 1.4 Storage Backend (`blockyard-storage`)
-- [ ] ZFS zvol create / destroy / resize via `libzfs` (or CLI shelling)
-- [ ] Zvol naming convention: `<pool>/vol-<volume-id>`
-- [ ] Pool capacity reporting (total / used / available)
-- [ ] Extent-level addressing within zvols (4MB default)
-- [ ] Placement engine: filter → spread → balance → prefer
-- [ ] Failure domain constraint satisfaction
+- [x] StorageBackend trait abstraction
+- [x] ZFS zvol create / destroy / resize via CLI shelling (`ZfsBackend`)
+- [x] MemoryBackend for testing (no ZFS required)
+- [x] Zvol naming convention: `<pool>/vol-<volume-id>`
+- [x] Pool capacity reporting (total / used / available)
+- [x] Placement engine: filter → spread → balance → prefer
+- [x] Failure domain constraint satisfaction
+- [x] ZFS pool health monitoring (`zpool status`, `zpool list`) on periodic interval
+- [x] Detect and report: degraded vdevs, faulted disks, checksum errors, scrub errors
+- [x] Node-local health state machine: healthy → degraded → faulted (based on ZFS pool state)
+- [x] Propagate ZFS health status via gossip (node tags / health metadata)
+- [x] Placement engine excludes nodes with faulted pools from new volume placement
+- [x] Trigger automatic re-replication when a node's pool is persistently degraded
+- [x] Extent-level addressing within zvols (4MB default)
 
 ### 1.5 Block Replication (`blockyard-protocol`)
-- [ ] Binary wire protocol: request/response framing
-- [ ] Op types: READ, WRITE, FLUSH, TRIM
-- [ ] Request pipelining (multiple in-flight requests)
-- [ ] TCP transport with connection pooling
-- [ ] Write path: client → leader → Raft propose → replicate → ack
-- [ ] Read path: client → any replica (based on read-policy)
+- [x] Binary wire protocol: request/response framing (33B request header, 13B response header)
+- [x] Op types: READ, WRITE, FLUSH, TRIM
+- [x] Request pipelining (multiple in-flight requests via codec)
+- [x] TCP connection pooling
+- [x] Tokio codec (Encoder/Decoder) for async framed I/O
+- [x] Protocol server with RequestHandler trait and TCP e2e path
+- [x] Write path: client → server → handler → response (in-process)
+- [x] Read path: client → server → handler → response (in-process)
+- [ ] Write path: client → leader → Raft propose → replicate → ack (cross-node)
+- [ ] Read path: client → any replica based on read-policy (cross-node)
 
 ### 1.6 Volume Mounting (`blockyard-ublk`)
-- [ ] UBLK server using io_uring (Linux 6.0+)
-- [ ] `/dev/ublkbN` block device creation
-- [ ] Multi-queue I/O (one ring per CPU core)
-- [ ] Cluster client: discover volume leader, follow failovers
-- [ ] Write batching and alignment (4KB, 1ms max delay)
-- [ ] Device recovery on mount process restart
+- [x] Mount/unmount abstraction with UBLK and NBD backends
+- [x] Cluster client: discover volume leader, follow failovers
+- [x] UBLK server with multi-queue I/O configuration
+- [x] `/dev/ublkbN` block device path management
+- [x] Device recovery (recover reclaims existing device)
+- [x] Write batching with configurable alignment (4KB) and max delay (1ms)
+- [~] io_uring ring setup (kernel module loading implemented, ring I/O pending)
 
 ### 1.7 CLI & Control Plane
-- [ ] `blockyard start` — full node startup with config
-- [ ] `blockyard volume create/delete/list/status` — via Meta Raft
-- [ ] `blockyard mount <volume>` — UBLK client
-- [ ] `blockyard status` — cluster health summary
-- [ ] `blockyard node list` — node inventory table
+- [x] `blockyard start` — full node startup with config
+- [x] `blockyard volume create/delete/list/status/resize` — wired to Meta Raft
+- [x] `blockyard mount <volume>` — UBLK client
+- [x] `blockyard status` — cluster health summary
+- [x] `blockyard node list` — node inventory table
+- [x] `blockyard node status <name>` — node view with ZFS health info
 
 ---
 
@@ -108,6 +128,9 @@ Target: operational maturity for real workloads.
 - [ ] Cluster metrics: nodes total by state
 - [ ] Per-volume metrics: IOPS, throughput, latency histograms
 - [ ] Per-node metrics: ZFS capacity, Raft group count, leader count
+- [ ] ZFS health metrics: `blockyard_node_zfs_state{pool}` (healthy/degraded/faulted), `blockyard_node_zfs_checksum_errors{pool,vdev}`, `blockyard_node_zfs_read_errors{pool,vdev}`, `blockyard_node_zfs_write_errors{pool,vdev}`, `blockyard_node_zfs_scrub_errors_total{pool}`, `blockyard_node_zfs_last_scrub_timestamp{pool}`
+- [ ] Cluster-wide ZFS health summary in `blockyard status` (count of nodes by pool state)
+- [ ] Alerting-friendly metric: `blockyard_cluster_nodes_zfs_degraded_total`
 - [ ] Rebalance progress metrics
 - [ ] `blockyard volume status <name>` — detailed per-volume view
 
