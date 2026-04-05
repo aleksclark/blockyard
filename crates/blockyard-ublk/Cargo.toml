@@ -1,0 +1,14 @@
+[package]
+name = "blockyard-ublk"
+description = "UBLK (io_uring) and NBD volume exposure for Linux block devices"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blockyard-common = { workspace = true }
+blockyard-protocol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

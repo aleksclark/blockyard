@@ -1,0 +1,17 @@
+[package]
+name = "blockyard-gossip"
+description = "SWIM-based gossip protocol for cluster membership and failure detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blockyard-common = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
