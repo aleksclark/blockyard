@@ -106,14 +106,16 @@ Target: single-cluster block storage with Raft replication and UBLK mounting.
 
 Target: operational maturity for real workloads.
 
-### 2.1 Rebalancing
-- [ ] Detect capacity imbalance (configurable threshold, default 20%)
-- [ ] Compute new placement map via placement engine
-- [ ] Add target node as Raft learner
-- [ ] Bulk data transfer via ZFS send/receive
-- [ ] Promote learner → voter, remove old replica
-- [ ] Throttle: max concurrent moves per node, bandwidth cap
-- [ ] Rebalance status reporting in CLI/metrics
+### 2.1 Rebalancing ✅
+- [x] Detect capacity imbalance (configurable threshold, default 20%)
+- [x] Compute new placement map via placement engine
+- [x] Add target node as Raft learner (via RebalanceStart Raft command)
+- [x] Bulk data transfer via ZFS send/receive (send_zvol, send_incremental, receive_zvol)
+- [x] Promote learner → voter, remove old replica (via RebalanceComplete Raft command with atomic placement swap)
+- [x] Throttle: max concurrent moves per node, bandwidth cap (RebalanceConfig)
+- [x] Rebalance status reporting in CLI (`blockyard rebalance status`)
+- [x] Move state machine: Pending → Syncing → Promoting → Completed / Failed
+- [x] 27 unit tests for rebalance engine
 
 ### 2.2 Online Operations
 - [ ] Online volume expansion (`zfs set volsize`, UBLK resize notification)

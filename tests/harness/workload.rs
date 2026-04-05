@@ -1,14 +1,23 @@
-use crate::harness::cluster::TestCluster;
+use bytes::{Bytes, BytesMut};
+use rand::Rng;
+use rand::SeedableRng;
+use rand::prelude::IndexedRandom;
+use rand::rngs::StdRng;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+use blockyard_protocol::wire::{OpType, Request, Response};
 
 #[derive(Debug, Clone)]
 pub struct WriteRecord {
     pub request_id: u64,
-    pub volume_name: String,
     pub offset: u64,
     pub data: Vec<u8>,
     pub acknowledged: bool,
@@ -18,7 +27,6 @@ pub struct WriteRecord {
 #[derive(Debug, Clone)]
 pub struct ReadRecord {
     pub request_id: u64,
-    pub volume_name: String,
     pub offset: u64,
     pub data: Vec<u8>,
     pub success: bool,
@@ -89,6 +97,10 @@ impl WorkloadLog {
         let idx = (sorted.len() as f64 * 0.99) as usize;
         sorted[idx.min(sorted.len() - 1)]
     }
+
+    pub fn written_offsets(&self) -> Vec<u64> {
+        self.acknowledged_writes().iter().map(|w| w.offset).collect()
+    }
 }
 
 impl Default for WorkloadLog {
@@ -99,23 +111,25 @@ impl Default for WorkloadLog {
 
 #[derive(Debug, Clone)]
 pub struct WorkloadConfig {
-    pub volume_name: String,
+    pub targets: Vec<SocketAddr>,
     pub duration: Duration,
-    pub write_rate: u64,
-    pub read_rate: u64,
+    pub write_interval: Duration,
+    pub read_interval: Duration,
     pub block_size: usize,
     pub max_offset: u64,
+    pub volume_id: u64,
 }
 
 impl Default for WorkloadConfig {
     fn default() -> Self {
         Self {
-            volume_name: "test-vol".into(),
+            targets: vec!["127.0.0.1:7400".parse().unwrap()],
             duration: Duration::from_secs(30),
-            write_rate: 100,
-            read_rate: 200,
+            write_interval: Duration::from_millis(100),
+            read_interval: Duration::from_millis(50),
             block_size: 4096,
-            max_offset: 1024 * 1024 * 1024,
+            max_offset: 1024 * 1024,
+            volume_id: 1,
         }
     }
 }
@@ -151,53 +165,179 @@ impl WorkloadGenerator {
         }
     }
 
-    pub async fn record_write(&self, offset: u64, data: Vec<u8>, acknowledged: bool) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut log = self.log.lock().await;
-        let ts = log.start_time.elapsed();
-        log.writes.push(WriteRecord {
-            request_id: id,
-            volume_name: self.config.volume_name.clone(),
-            offset,
-            data,
-            acknowledged,
-            timestamp: ts,
-        });
-        id
-    }
-
-    pub async fn record_read(
-        &self,
-        offset: u64,
-        data: Vec<u8>,
-        success: bool,
-        latency: Duration,
-    ) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut log = self.log.lock().await;
-        let ts = log.start_time.elapsed();
-        log.reads.push(ReadRecord {
-            request_id: id,
-            volume_name: self.config.volume_name.clone(),
-            offset,
-            data,
-            success,
-            timestamp: ts,
-            latency,
-        });
-        id
-    }
-
-    pub async fn record_error(&self, msg: String) {
-        self.log.lock().await.errors.push(msg);
-    }
-
-    pub fn start(&self) {
+    pub fn start(&self) -> JoinHandle<()> {
         self.running.store(true, Ordering::Relaxed);
+
+        let running = self.running.clone();
+        let log = self.log.clone();
+        let next_id = self.next_id.clone();
+        let config = self.config.clone();
+
+        tokio::spawn(async move {
+            let mut written: HashMap<u64, Vec<u8>> = HashMap::new();
+            let mut rng = StdRng::from_os_rng();
+            let start = Instant::now();
+
+            while running.load(Ordering::Relaxed) && start.elapsed() < config.duration {
+                let id = next_id.fetch_add(1, Ordering::Relaxed);
+                let max_blocks = config.max_offset / config.block_size as u64;
+                let offset = rng.random_range(0..max_blocks) * config.block_size as u64;
+                let mut data = vec![0u8; config.block_size];
+                rng.fill(&mut data[..]);
+
+                let write_start = Instant::now();
+                match Self::send_write(&config, id, offset, &data).await {
+                    Ok(true) => {
+                        let elapsed = start.elapsed();
+                        let mut wl = log.lock().await;
+                        wl.writes.push(WriteRecord {
+                            request_id: id,
+                            offset,
+                            data: data.clone(),
+                            acknowledged: true,
+                            timestamp: elapsed,
+                        });
+                        drop(wl);
+                        written.insert(offset, data);
+                    }
+                    Ok(false) => {
+                        let elapsed = start.elapsed();
+                        let mut wl = log.lock().await;
+                        wl.writes.push(WriteRecord {
+                            request_id: id,
+                            offset,
+                            data,
+                            acknowledged: false,
+                            timestamp: elapsed,
+                        });
+                    }
+                    Err(e) => {
+                        log.lock().await.errors.push(format!("write error: {e}"));
+                    }
+                }
+
+                if !written.is_empty() && rng.random_range(0u32..2) == 0 {
+                    let read_id = next_id.fetch_add(1, Ordering::Relaxed);
+                    let offsets: Vec<u64> = written.keys().copied().collect();
+                    let read_offset = *offsets.choose(&mut rng).unwrap();
+
+                    let read_start = Instant::now();
+                    match Self::send_read(&config, read_id, read_offset, config.block_size as u32)
+                        .await
+                    {
+                        Ok(read_data) => {
+                            let latency = read_start.elapsed();
+                            let expected = written.get(&read_offset);
+                            let success =
+                                expected.map_or(true, |exp| exp.as_slice() == read_data.as_ref());
+                            let mut wl = log.lock().await;
+                            wl.reads.push(ReadRecord {
+                                request_id: read_id,
+                                offset: read_offset,
+                                data: read_data.to_vec(),
+                                success,
+                                timestamp: start.elapsed(),
+                                latency,
+                            });
+                        }
+                        Err(e) => {
+                            log.lock().await.errors.push(format!("read error: {e}"));
+                        }
+                    }
+                }
+
+                tokio::time::sleep(config.write_interval).await;
+            }
+
+            running.store(false, Ordering::Relaxed);
+        })
     }
 
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+    }
+
+    async fn connect(config: &WorkloadConfig) -> anyhow::Result<TcpStream> {
+        for target in &config.targets {
+            match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(target)).await {
+                Ok(Ok(stream)) => {
+                    stream.set_nodelay(true)?;
+                    return Ok(stream);
+                }
+                _ => continue,
+            }
+        }
+        anyhow::bail!("could not connect to any target")
+    }
+
+    async fn send_write(
+        config: &WorkloadConfig,
+        request_id: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> anyhow::Result<bool> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut stream = Self::connect(config).await?;
+
+            let req = Request {
+                request_id,
+                op: OpType::Write,
+                volume_id: config.volume_id,
+                offset,
+                length: data.len() as u32,
+                data: Bytes::copy_from_slice(data),
+            };
+            let mut buf = BytesMut::new();
+            req.encode(&mut buf);
+            stream.write_all(&buf).await?;
+            stream.flush().await?;
+
+        let mut resp_buf = BytesMut::with_capacity(256);
+        loop {
+            let n = stream.read_buf(&mut resp_buf).await?;
+            if n == 0 {
+                anyhow::bail!("connection closed");
+            }
+            if let Some(resp) = Response::decode(&mut resp_buf) {
+                return Ok(resp.status == blockyard_protocol::wire::Status::Ok);
+            }
+        }
+        }).await.map_err(|_| anyhow::anyhow!("write timeout"))?
+    }
+
+    async fn send_read(
+        config: &WorkloadConfig,
+        request_id: u64,
+        offset: u64,
+        length: u32,
+    ) -> anyhow::Result<Bytes> {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut stream = Self::connect(config).await?;
+
+            let req = Request {
+                request_id,
+                op: OpType::Read,
+                volume_id: config.volume_id,
+                offset,
+                length,
+                data: Bytes::new(),
+            };
+            let mut buf = BytesMut::new();
+            req.encode(&mut buf);
+            stream.write_all(&buf).await?;
+            stream.flush().await?;
+
+            let mut resp_buf = BytesMut::with_capacity(8192);
+            loop {
+                let n = stream.read_buf(&mut resp_buf).await?;
+                if n == 0 {
+                    anyhow::bail!("connection closed");
+                }
+                if let Some(resp) = Response::decode(&mut resp_buf) {
+                    return Ok(resp.data);
+                }
+            }
+        }).await.map_err(|_| anyhow::anyhow!("read timeout"))?
     }
 }
 
@@ -208,8 +348,8 @@ mod tests {
     #[test]
     fn test_workload_config_default() {
         let config = WorkloadConfig::default();
-        assert_eq!(config.volume_name, "test-vol");
         assert_eq!(config.block_size, 4096);
+        assert!(!config.targets.is_empty());
     }
 
     #[test]
@@ -234,7 +374,6 @@ mod tests {
         let mut log = WorkloadLog::new();
         log.writes.push(WriteRecord {
             request_id: 1,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![1],
             acknowledged: true,
@@ -242,7 +381,6 @@ mod tests {
         });
         log.writes.push(WriteRecord {
             request_id: 2,
-            volume_name: "v".into(),
             offset: 4096,
             data: vec![2],
             acknowledged: false,
@@ -257,7 +395,6 @@ mod tests {
         let mut log = WorkloadLog::new();
         log.reads.push(ReadRecord {
             request_id: 1,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![],
             success: true,
@@ -266,7 +403,6 @@ mod tests {
         });
         log.reads.push(ReadRecord {
             request_id: 2,
-            volume_name: "v".into(),
             offset: 4096,
             data: vec![],
             success: false,
@@ -283,7 +419,6 @@ mod tests {
         for i in 0..100 {
             log.reads.push(ReadRecord {
                 request_id: i,
-                volume_name: "v".into(),
                 offset: 0,
                 data: vec![],
                 success: true,
@@ -295,53 +430,32 @@ mod tests {
         assert!(p99 >= Duration::from_millis(99));
     }
 
-    #[tokio::test]
-    async fn test_workload_generator_record_write() {
-        let wg = WorkloadGenerator::new(WorkloadConfig::default());
-        let id = wg.record_write(0, vec![1, 2, 3], true).await;
-        assert_eq!(id, 1);
-        let log = wg.log().await;
-        assert_eq!(log.write_count(), 1);
-        assert!(log.writes[0].acknowledged);
-    }
-
-    #[tokio::test]
-    async fn test_workload_generator_record_read() {
-        let wg = WorkloadGenerator::new(WorkloadConfig::default());
-        let id = wg
-            .record_read(0, vec![1, 2], true, Duration::from_millis(5))
-            .await;
-        assert_eq!(id, 1);
-        let log = wg.log().await;
-        assert_eq!(log.read_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_workload_generator_record_error() {
-        let wg = WorkloadGenerator::new(WorkloadConfig::default());
-        wg.record_error("timeout".into()).await;
-        let log = wg.log().await;
-        assert_eq!(log.error_count(), 1);
+    #[test]
+    fn test_workload_log_written_offsets() {
+        let mut log = WorkloadLog::new();
+        log.writes.push(WriteRecord {
+            request_id: 1,
+            offset: 0,
+            data: vec![1],
+            acknowledged: true,
+            timestamp: Duration::from_millis(1),
+        });
+        log.writes.push(WriteRecord {
+            request_id: 2,
+            offset: 4096,
+            data: vec![2],
+            acknowledged: false,
+            timestamp: Duration::from_millis(2),
+        });
+        let offsets = log.written_offsets();
+        assert_eq!(offsets, vec![0]);
     }
 
     #[test]
-    fn test_workload_generator_start_stop() {
+    fn test_workload_generator_stop() {
         let wg = WorkloadGenerator::new(WorkloadConfig::default());
         assert!(!wg.is_running());
-        wg.start();
-        assert!(wg.is_running());
         wg.stop();
         assert!(!wg.is_running());
-    }
-
-    #[tokio::test]
-    async fn test_workload_generator_increments_ids() {
-        let wg = WorkloadGenerator::new(WorkloadConfig::default());
-        let id1 = wg.record_write(0, vec![], true).await;
-        let id2 = wg.record_write(0, vec![], true).await;
-        let id3 = wg.record_read(0, vec![], true, Duration::ZERO).await;
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        assert_eq!(id3, 3);
     }
 }

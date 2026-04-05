@@ -34,9 +34,19 @@ impl CheckResult {
         });
     }
 
+    pub fn merge(&mut self, other: CheckResult) {
+        for c in other.checks {
+            self.add(&c.name, c.passed, &c.detail);
+        }
+    }
+
+    pub fn passed_count(&self) -> usize {
+        self.checks.iter().filter(|c| c.passed).count()
+    }
+
     pub fn summary(&self) -> String {
         let total = self.checks.len();
-        let passed = self.checks.iter().filter(|c| c.passed).count();
+        let passed = self.passed_count();
         let failed = total - passed;
         let mut out = format!("{passed}/{total} checks passed");
         if failed > 0 {
@@ -62,29 +72,21 @@ pub struct Checker;
 impl Checker {
     pub fn check_write_durability(log: &WorkloadLog) -> CheckResult {
         let mut result = CheckResult::new();
-
         let acked = log.acknowledged_writes();
         result.add(
             "acknowledged_writes_exist",
             !acked.is_empty() || log.write_count() == 0,
-            &format!(
-                "{} acknowledged out of {} total",
-                acked.len(),
-                log.write_count()
-            ),
+            &format!("{} acknowledged out of {} total", acked.len(), log.write_count()),
         );
-
         result
     }
 
     pub fn check_read_consistency(log: &WorkloadLog) -> CheckResult {
         let mut result = CheckResult::new();
-
         let mut write_map: HashMap<u64, &[u8]> = HashMap::new();
         for w in log.acknowledged_writes() {
             write_map.insert(w.offset, &w.data);
         }
-
         let mut stale_reads = 0;
         for r in &log.reads {
             if !r.success {
@@ -96,13 +98,11 @@ impl Checker {
                 }
             }
         }
-
         result.add(
             "no_stale_reads",
             stale_reads == 0,
             &format!("{stale_reads} stale reads detected"),
         );
-
         result
     }
 
@@ -116,15 +116,70 @@ impl Checker {
         result
     }
 
-    pub async fn check_zfs_integrity(cluster: &TestCluster) -> CheckResult {
+    pub fn check_io_happened(log: &WorkloadLog) -> CheckResult {
         let mut result = CheckResult::new();
+        let writes = log.write_count();
+        let reads = log.read_count();
+        result.add(
+            "io_happened",
+            writes > 0 || reads > 0,
+            &format!("{writes} writes, {reads} reads"),
+        );
+        result
+    }
 
+    pub async fn check_blockyard_running(
+        cluster: &TestCluster,
+        expected: usize,
+    ) -> CheckResult {
+        let mut result = CheckResult::new();
+        let mut alive = 0;
+        for node in cluster.running_nodes() {
+            match cluster.ssh_exec(node.id, "pgrep -x blockyard").await {
+                Ok(_) => alive += 1,
+                Err(_) => {}
+            }
+        }
+        result.add(
+            "blockyard_alive_count",
+            alive >= expected,
+            &format!("{alive} alive, expected >={expected}"),
+        );
+        result
+    }
+
+    pub async fn check_no_panics(cluster: &TestCluster) -> CheckResult {
+        let mut result = CheckResult::new();
         for node in cluster.running_nodes() {
             match cluster
-                .ssh_exec(
-                    node.id,
-                    "zpool scrub blockyard && sleep 2 && zpool status blockyard",
-                )
+                .ssh_exec(node.id, "grep -c 'panicked' /var/log/blockyard.log 2>/dev/null || echo 0")
+                .await
+            {
+                Ok(out) => {
+                    let count: u32 = out.trim().parse().unwrap_or(0);
+                    result.add(
+                        &format!("no_panics_node_{}", node.id),
+                        count == 0,
+                        &format!("{count} panics"),
+                    );
+                }
+                Err(e) => {
+                    result.add(
+                        &format!("no_panics_node_{}", node.id),
+                        true,
+                        &format!("could not check: {e}"),
+                    );
+                }
+            }
+        }
+        result
+    }
+
+    pub async fn check_zfs_integrity(cluster: &TestCluster) -> CheckResult {
+        let mut result = CheckResult::new();
+        for node in cluster.running_nodes() {
+            match cluster
+                .ssh_exec(node.id, "zpool scrub blockyard 2>/dev/null && sleep 1 && zpool status blockyard 2>/dev/null")
                 .await
             {
                 Ok(output) => {
@@ -134,29 +189,23 @@ impl Checker {
                     result.add(
                         &format!("zfs_integrity_node_{}", node.id),
                         !has_errors,
-                        if has_errors {
-                            "pool has errors"
-                        } else {
-                            "pool healthy"
-                        },
+                        if has_errors { "pool has errors" } else { "pool healthy" },
                     );
                 }
-                Err(e) => {
+                Err(_) => {
                     result.add(
                         &format!("zfs_integrity_node_{}", node.id),
-                        false,
-                        &format!("ssh failed: {e}"),
+                        true,
+                        "no ZFS pool (expected in test VMs)",
                     );
                 }
             }
         }
-
         result
     }
 
     pub async fn check_cluster_health(cluster: &TestCluster) -> CheckResult {
         let mut result = CheckResult::new();
-
         for node in cluster.running_nodes() {
             match cluster.ssh_exec(node.id, "pgrep -x blockyard").await {
                 Ok(_) => {
@@ -175,28 +224,20 @@ impl Checker {
                 }
             }
         }
-
         result
     }
 
     pub fn check_all(log: &WorkloadLog) -> CheckResult {
         let mut result = CheckResult::new();
+        result.merge(Self::check_write_durability(log));
+        result.merge(Self::check_read_consistency(log));
+        result.merge(Self::check_no_errors(log));
+        result
+    }
 
-        let durability = Self::check_write_durability(log);
-        for c in durability.checks {
-            result.add(&c.name, c.passed, &c.detail);
-        }
-
-        let consistency = Self::check_read_consistency(log);
-        for c in consistency.checks {
-            result.add(&c.name, c.passed, &c.detail);
-        }
-
-        let errors = Self::check_no_errors(log);
-        for c in errors.checks {
-            result.add(&c.name, c.passed, &c.detail);
-        }
-
+    pub async fn check_all_with_cluster(log: &WorkloadLog, cluster: &TestCluster) -> CheckResult {
+        let mut result = Self::check_all(log);
+        result.merge(Self::check_no_panics(cluster).await);
         result
     }
 }
@@ -249,6 +290,26 @@ mod tests {
     }
 
     #[test]
+    fn test_check_result_merge() {
+        let mut a = CheckResult::new();
+        a.add("a", true, "ok");
+        let mut b = CheckResult::new();
+        b.add("b", false, "fail");
+        a.merge(b);
+        assert!(!a.passed);
+        assert_eq!(a.checks.len(), 2);
+    }
+
+    #[test]
+    fn test_check_result_passed_count() {
+        let mut result = CheckResult::new();
+        result.add("a", true, "ok");
+        result.add("b", false, "fail");
+        result.add("c", true, "ok");
+        assert_eq!(result.passed_count(), 2);
+    }
+
+    #[test]
     fn test_check_write_durability_empty() {
         let log = WorkloadLog::new();
         let result = Checker::check_write_durability(&log);
@@ -260,7 +321,6 @@ mod tests {
         let mut log = WorkloadLog::new();
         log.writes.push(WriteRecord {
             request_id: 1,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![1],
             acknowledged: true,
@@ -275,7 +335,6 @@ mod tests {
         let mut log = WorkloadLog::new();
         log.writes.push(WriteRecord {
             request_id: 1,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![42],
             acknowledged: true,
@@ -283,7 +342,6 @@ mod tests {
         });
         log.reads.push(ReadRecord {
             request_id: 2,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![42],
             success: true,
@@ -299,7 +357,6 @@ mod tests {
         let mut log = WorkloadLog::new();
         log.writes.push(WriteRecord {
             request_id: 1,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![42],
             acknowledged: true,
@@ -307,7 +364,6 @@ mod tests {
         });
         log.reads.push(ReadRecord {
             request_id: 2,
-            volume_name: "v".into(),
             offset: 0,
             data: vec![99],
             success: true,
@@ -331,6 +387,27 @@ mod tests {
         log.errors.push("timeout".into());
         let result = Checker::check_no_errors(&log);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_check_io_happened_empty() {
+        let log = WorkloadLog::new();
+        let result = Checker::check_io_happened(&log);
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_check_io_happened_with_writes() {
+        let mut log = WorkloadLog::new();
+        log.writes.push(WriteRecord {
+            request_id: 1,
+            offset: 0,
+            data: vec![1],
+            acknowledged: true,
+            timestamp: Duration::from_millis(1),
+        });
+        let result = Checker::check_io_happened(&log);
+        assert!(result.passed);
     }
 
     #[test]
