@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,6 +20,8 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo check --workspace
 
   fmt:
@@ -43,6 +45,8 @@ jobs:
           toolchain: "1.85"
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo clippy --workspace -- -D warnings
 
   test:
@@ -54,13 +58,15 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - run: cargo test --workspace
         timeout-minutes: 10
 
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     needs: [check, test, clippy]
     steps:
       - uses: actions/checkout@v4
@@ -68,8 +74,8 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
-      - name: Install QEMU
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils
+      - name: Install QEMU and protoc
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils protobuf-compiler
       - name: Build release
         run: cargo build --release
       - name: Run integration tests

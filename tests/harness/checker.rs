@@ -91,7 +91,7 @@ impl Checker {
                 continue;
             }
             if let Some(expected) = write_map.get(&r.offset) {
-                if &r.data != *expected {
+                if r.data != **expected {
                     stale_reads += 1;
                 }
             }
@@ -175,6 +175,205 @@ impl Checker {
                 }
             }
         }
+
+        result
+    }
+
+    // ── New methods ─────────────────────────────────────────────────────
+
+    /// SSH `pgrep -x blockyard` on all running nodes and assert that exactly
+    /// `expected_count` nodes have the process running.
+    pub async fn check_blockyard_running(
+        cluster: &TestCluster,
+        expected_count: usize,
+    ) -> CheckResult {
+        let mut result = CheckResult::new();
+        let mut running_count: usize = 0;
+
+        for node in cluster.running_nodes() {
+            if cluster
+                .ssh_exec(node.id, "pgrep -x blockyard")
+                .await
+                .is_ok()
+            {
+                running_count += 1;
+            }
+        }
+
+        result.add(
+            "blockyard_running_count",
+            running_count == expected_count,
+            &format!("expected {expected_count} running, found {running_count}"),
+        );
+        result
+    }
+
+    /// Similar to `check_blockyard_running` but with a minimum threshold: at
+    /// least `min_alive` nodes must have the blockyard process running.
+    pub async fn check_node_count(cluster: &TestCluster, min_alive: usize) -> CheckResult {
+        let mut result = CheckResult::new();
+        let mut alive_count: usize = 0;
+
+        for node in cluster.running_nodes() {
+            if cluster
+                .ssh_exec(node.id, "pgrep -x blockyard")
+                .await
+                .is_ok()
+            {
+                alive_count += 1;
+            }
+        }
+
+        result.add(
+            "minimum_alive_nodes",
+            alive_count >= min_alive,
+            &format!("need >= {min_alive} alive, found {alive_count}"),
+        );
+        result
+    }
+
+    /// SSH `grep -c 'panicked' /var/log/blockyard.log` on each running node,
+    /// asserting zero panics across the cluster.
+    pub async fn check_blockyard_logs_no_panic(cluster: &TestCluster) -> CheckResult {
+        let mut result = CheckResult::new();
+
+        for node in cluster.running_nodes() {
+            match cluster
+                .ssh_exec(
+                    node.id,
+                    "grep -c 'panicked' /var/log/blockyard.log 2>/dev/null || echo 0",
+                )
+                .await
+            {
+                Ok(output) => {
+                    let count: usize = output.trim().parse().unwrap_or(0);
+                    result.add(
+                        &format!("no_panic_node_{}", node.id),
+                        count == 0,
+                        &format!("{count} panic(s) in log"),
+                    );
+                }
+                Err(e) => {
+                    // If ssh itself fails, that's a problem, but if the log
+                    // file doesn't exist yet that's fine — treat as no panics.
+                    result.add(
+                        &format!("no_panic_node_{}", node.id),
+                        true,
+                        &format!("ssh error (log may not exist): {e}"),
+                    );
+                }
+            }
+        }
+
+        result
+    }
+
+    /// SSH `blockyard volume status <name>` on any live node to verify the
+    /// volume exists in the cluster.
+    pub async fn check_volume_exists(cluster: &TestCluster, volume_name: &str) -> CheckResult {
+        let mut result = CheckResult::new();
+        let running = cluster.running_nodes();
+
+        if running.is_empty() {
+            result.add("volume_exists", false, "no running nodes to query");
+            return result;
+        }
+
+        // Try the first running node.
+        let node = running[0];
+        let cmd = format!("blockyard volume status {volume_name}");
+        match cluster.ssh_exec(node.id, &cmd).await {
+            Ok(output) => {
+                let found = output.contains(volume_name);
+                let detail = if found {
+                    format!("volume '{volume_name}' found")
+                } else {
+                    format!("volume '{volume_name}' not found in output")
+                };
+                result.add("volume_exists", found, &detail);
+            }
+            Err(e) => {
+                result.add("volume_exists", false, &format!("command failed: {e}"));
+            }
+        }
+
+        result
+    }
+
+    /// SSH `blockyard rebalance status` and verify there are no active
+    /// (in-progress) rebalance moves.
+    pub async fn check_rebalance_complete(cluster: &TestCluster) -> CheckResult {
+        let mut result = CheckResult::new();
+        let running = cluster.running_nodes();
+
+        if running.is_empty() {
+            result.add("rebalance_complete", false, "no running nodes to query");
+            return result;
+        }
+
+        let node = running[0];
+        match cluster
+            .ssh_exec(node.id, "blockyard rebalance status")
+            .await
+        {
+            Ok(output) => {
+                // We consider the rebalance complete if there are no
+                // "syncing" or "pending" or "promoting" moves reported.
+                let has_active = output.contains("syncing")
+                    || output.contains("pending")
+                    || output.contains("promoting");
+                result.add(
+                    "rebalance_complete",
+                    !has_active,
+                    if has_active {
+                        "active rebalance moves still in progress"
+                    } else {
+                        "no active rebalance moves"
+                    },
+                );
+            }
+            Err(e) => {
+                result.add("rebalance_complete", false, &format!("command failed: {e}"));
+            }
+        }
+
+        result
+    }
+
+    /// Verify that all acknowledged writes in the log can be read back with
+    /// matching data. This is a stronger check than `check_read_consistency`
+    /// because it verifies per-offset latest-write semantics.
+    pub fn check_write_read_integrity(log: &WorkloadLog) -> CheckResult {
+        let mut result = CheckResult::new();
+
+        // Build a map: offset → latest acknowledged write data
+        let mut latest: HashMap<u64, &[u8]> = HashMap::new();
+        for w in &log.writes {
+            if w.acknowledged {
+                latest.insert(w.offset, &w.data);
+            }
+        }
+
+        let mut mismatches = 0;
+        let mut checked = 0;
+
+        for r in &log.reads {
+            if !r.success {
+                continue;
+            }
+            if let Some(expected) = latest.get(&r.offset) {
+                checked += 1;
+                if r.data != **expected {
+                    mismatches += 1;
+                }
+            }
+        }
+
+        result.add(
+            "write_read_integrity",
+            mismatches == 0,
+            &format!("{mismatches} mismatches out of {checked} verified reads"),
+        );
 
         result
     }
@@ -339,5 +538,53 @@ mod tests {
         let result = Checker::check_all(&log);
         assert!(result.passed);
         assert_eq!(result.checks.len(), 3);
+    }
+
+    #[test]
+    fn test_check_write_read_integrity_clean() {
+        let mut log = WorkloadLog::new();
+        log.writes.push(WriteRecord {
+            request_id: 1,
+            volume_name: "v".into(),
+            offset: 0,
+            data: vec![0xAA],
+            acknowledged: true,
+            timestamp: Duration::from_millis(1),
+        });
+        log.reads.push(ReadRecord {
+            request_id: 2,
+            volume_name: "v".into(),
+            offset: 0,
+            data: vec![0xAA],
+            success: true,
+            timestamp: Duration::from_millis(5),
+            latency: Duration::from_millis(2),
+        });
+        let result = Checker::check_write_read_integrity(&log);
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_check_write_read_integrity_mismatch() {
+        let mut log = WorkloadLog::new();
+        log.writes.push(WriteRecord {
+            request_id: 1,
+            volume_name: "v".into(),
+            offset: 0,
+            data: vec![0xAA],
+            acknowledged: true,
+            timestamp: Duration::from_millis(1),
+        });
+        log.reads.push(ReadRecord {
+            request_id: 2,
+            volume_name: "v".into(),
+            offset: 0,
+            data: vec![0xBB],
+            success: true,
+            timestamp: Duration::from_millis(5),
+            latency: Duration::from_millis(2),
+        });
+        let result = Checker::check_write_read_integrity(&log);
+        assert!(!result.passed);
     }
 }

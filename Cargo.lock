@@ -238,6 +238,8 @@ dependencies = [
  "blockyard-raft",
  "blockyard-storage",
  "blockyard-ublk",
+ "bytes",
+ "rand 0.9.2",
  "tokio",
 ]
 
