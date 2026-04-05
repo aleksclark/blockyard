@@ -359,4 +359,173 @@ mod tests {
     fn test_default() {
         let _engine = PlacementEngine::default();
     }
+
+    // ── Per-volume affinity enforcement ──────────────────────────────────
+
+    #[test]
+    fn test_place_volume_affinity_tags_checked() {
+        let engine = PlacementEngine::new();
+        // 4 nodes, but only 2 match the affinity tag "region" = "us-east"
+        let candidates = vec![
+            make_node(1, &[("region", "us-east")], gb(100), 0),
+            make_node(2, &[("region", "us-west")], gb(100), 0),
+            make_node(3, &[("region", "us-east")], gb(100), 0),
+            make_node(4, &[("region", "eu-west")], gb(100), 0),
+        ];
+        let mut spec = make_spec(2);
+        spec.affinity.insert("region".into(), "us-east".into());
+
+        let result = engine.place_volume(&spec, &candidates).unwrap();
+        assert_eq!(result.len(), 2);
+        // Only nodes 1 and 3 are in us-east
+        for id in &result {
+            assert!(
+                *id == 1 || *id == 3,
+                "unexpected node {id} selected – should only have nodes with region=us-east"
+            );
+        }
+    }
+
+    #[test]
+    fn test_place_volume_affinity_not_enough_matching() {
+        let engine = PlacementEngine::new();
+        let candidates = vec![
+            make_node(1, &[("region", "us-east")], gb(100), 0),
+            make_node(2, &[("region", "us-west")], gb(100), 0),
+            make_node(3, &[("region", "us-west")], gb(100), 0),
+        ];
+        let mut spec = make_spec(3);
+        spec.affinity.insert("region".into(), "us-east".into());
+
+        // Only 1 node matches, but we need 3 replicas
+        let result = engine.place_volume(&spec, &candidates);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_place_volume_multi_tag_affinity() {
+        let engine = PlacementEngine::new();
+        let candidates = vec![
+            make_node(1, &[("region", "us-east"), ("storage_class", "ssd")], gb(100), 0),
+            make_node(2, &[("region", "us-east"), ("storage_class", "hdd")], gb(100), 0),
+            make_node(3, &[("region", "us-east"), ("storage_class", "ssd")], gb(100), 0),
+            make_node(4, &[("region", "us-west"), ("storage_class", "ssd")], gb(100), 0),
+        ];
+        let mut spec = make_spec(2);
+        spec.affinity.insert("region".into(), "us-east".into());
+        spec.affinity.insert("storage_class".into(), "ssd".into());
+
+        let result = engine.place_volume(&spec, &candidates).unwrap();
+        assert_eq!(result.len(), 2);
+        // Only nodes 1 and 3 match both tags
+        for id in &result {
+            assert!(*id == 1 || *id == 3);
+        }
+    }
+
+    // ── Failure domain spreading with >3 racks ──────────────────────────
+
+    #[test]
+    fn test_place_volume_failure_domain_more_than_3_racks() {
+        let engine = PlacementEngine::new();
+        let candidates = vec![
+            make_node(1, &[("rack", "r1")], gb(100), 0),
+            make_node(2, &[("rack", "r2")], gb(100), 0),
+            make_node(3, &[("rack", "r3")], gb(100), 0),
+            make_node(4, &[("rack", "r4")], gb(100), 0),
+            make_node(5, &[("rack", "r5")], gb(100), 0),
+        ];
+        let mut spec = make_spec(3);
+        spec.failure_domain = "rack".into();
+
+        let result = engine.place_volume(&spec, &candidates).unwrap();
+        assert_eq!(result.len(), 3);
+
+        // All selected nodes should be in different racks
+        let rack_of = |id: NodeId| -> String {
+            candidates
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .tags
+                .get("rack")
+                .unwrap()
+                .clone()
+        };
+        let racks: HashSet<String> = result.iter().map(|id| rack_of(*id)).collect();
+        assert_eq!(
+            racks.len(),
+            3,
+            "with 5 distinct racks and 3 replicas, all replicas should be in different racks"
+        );
+    }
+
+    #[test]
+    fn test_place_volume_failure_domain_5_racks_5_replicas() {
+        let engine = PlacementEngine::new();
+        let candidates = vec![
+            make_node(1, &[("rack", "r1")], gb(100), 0),
+            make_node(2, &[("rack", "r2")], gb(100), 0),
+            make_node(3, &[("rack", "r3")], gb(100), 0),
+            make_node(4, &[("rack", "r4")], gb(100), 0),
+            make_node(5, &[("rack", "r5")], gb(100), 0),
+        ];
+        let mut spec = make_spec(5);
+        spec.failure_domain = "rack".into();
+
+        let result = engine.place_volume(&spec, &candidates).unwrap();
+        assert_eq!(result.len(), 5);
+
+        let rack_of = |id: NodeId| -> String {
+            candidates
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .tags
+                .get("rack")
+                .unwrap()
+                .clone()
+        };
+        let racks: HashSet<String> = result.iter().map(|id| rack_of(*id)).collect();
+        assert_eq!(racks.len(), 5, "all 5 racks should be represented");
+    }
+
+    #[test]
+    fn test_place_volume_failure_domain_4_racks_uneven() {
+        let engine = PlacementEngine::new();
+        // 4 racks but rack r1 has 3 nodes, others have 1
+        let candidates = vec![
+            make_node(1, &[("rack", "r1")], gb(100), gb(10)),
+            make_node(2, &[("rack", "r1")], gb(100), gb(20)),
+            make_node(3, &[("rack", "r1")], gb(100), gb(30)),
+            make_node(4, &[("rack", "r2")], gb(100), 0),
+            make_node(5, &[("rack", "r3")], gb(100), 0),
+            make_node(6, &[("rack", "r4")], gb(100), 0),
+        ];
+        let mut spec = make_spec(3);
+        spec.failure_domain = "rack".into();
+
+        let result = engine.place_volume(&spec, &candidates).unwrap();
+        assert_eq!(result.len(), 3);
+
+        let rack_of = |id: NodeId| -> String {
+            candidates
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap()
+                .tags
+                .get("rack")
+                .unwrap()
+                .clone()
+        };
+        let racks: HashSet<String> = result.iter().map(|id| rack_of(*id)).collect();
+        // With round-robin interleaving across 4 racks, the first 3 picks should
+        // each be from a different rack.
+        assert!(
+            racks.len() >= 3,
+            "spread should maximise rack diversity: got {} racks from {:?}",
+            racks.len(),
+            result,
+        );
+    }
 }

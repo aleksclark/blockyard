@@ -13,6 +13,11 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
+rcgen = { workspace = true, features = ["pem"] }
+rustls = { workspace = true }
+rustls-pemfile = "2"
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

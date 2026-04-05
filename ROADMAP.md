@@ -123,32 +123,32 @@ Target: operational maturity for real workloads.
 - [x] Change replication factor (`blockyard volume set --replicas N`) — VolumeSetReplicas Raft command
 - [x] Change consistency mode at runtime (`blockyard volume set --consistency/--read-policy`) — VolumeSetConsistency/VolumeSetReadPolicy Raft commands
 
-### 2.3 Per-Volume Tuning
-- [ ] Write consistency modes: `all` / `majority` / `single`
-- [ ] Read policies: `leader` / `any` / `local`
-- [ ] Per-volume affinity and anti-affinity enforcement
-- [ ] Per-volume failure domain spreading
+### 2.3 Per-Volume Tuning ✅
+- [x] Write consistency modes: `all` / `majority` / `single` — ConsistencyEnforcer wrapping RequestHandler
+- [x] Read policies: `leader` / `any` / `local` — ReadRouter with round-robin and local preference
+- [x] Per-volume affinity and anti-affinity enforcement — verified with 6 new placement tests
+- [x] Per-volume failure domain spreading — verified with multi-rack tests (3, 4, 5 racks)
 
-### 2.4 Security
-- [ ] Mutual TLS for all node-to-node communication
-- [ ] Mutual TLS for client-to-cluster communication
-- [ ] Certificate generation and rotation
-- [ ] Token-based authentication (pre-shared bearer tokens)
-- [ ] Volume-level ACLs (read-only, read-write per client)
+### 2.4 Security ✅
+- [x] Mutual TLS for all node-to-node communication — `build_server_config` / `build_client_config` with cert verification
+- [x] Mutual TLS for client-to-cluster communication — same TLS config reused
+- [x] Certificate generation and rotation — `generate_ca()` + `generate_node_cert()` via `rcgen`
+- [x] Token-based authentication (pre-shared bearer tokens) — `TokenStore` with validation
+- [x] Volume-level ACLs (read-only, read-write per client) — `check_volume_access()` with `Permission` enum
 
-### 2.5 Observability
-- [ ] Prometheus `/metrics` endpoint on each node
-- [ ] Cluster metrics: nodes total by state
-- [ ] Per-volume metrics: IOPS, throughput, latency histograms
-- [ ] Per-node metrics: ZFS capacity, Raft group count, leader count
-- [ ] ZFS health metrics
-- [ ] Cluster-wide ZFS health summary
-- [ ] Rebalance progress metrics
+### 2.5 Observability ✅
+- [x] Prometheus `/metrics` endpoint on each node — `MetricsServer` via `metrics-exporter-prometheus`
+- [x] Cluster metrics: nodes total by state
+- [x] Per-volume metrics: IOPS, throughput, latency histograms
+- [x] Per-node metrics: ZFS capacity, Raft group count, leader count
+- [x] ZFS health metrics — state, checksum/read/write errors
+- [x] Cluster-wide ZFS health summary — `blockyard_cluster_nodes_zfs_degraded_total`
+- [x] Rebalance progress metrics — `blockyard_node_rebalance_bytes_remaining`
 
-### 2.6 Snapshots
-- [ ] Volume snapshots delegated to ZFS (`zfs snapshot`)
-- [ ] Snapshot list/delete via CLI
-- [ ] Consistent snapshots across replicas (Raft barrier)
+### 2.6 Snapshots ✅
+- [x] Volume snapshots delegated to ZFS — VolumeSnapshot Raft command + `snapshot_zvol()`
+- [x] Snapshot list/delete via CLI — `volume snapshot`, `volume snapshots`, `volume snapshot-delete`
+- [x] Consistent snapshots across replicas (Raft barrier) — snapshot name tracked in VolumeRecord via Raft
 
 ---
 

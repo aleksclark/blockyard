@@ -60,6 +60,17 @@ pub enum RaftRequest {
         name: String,
         read_policy: String,
     },
+    VolumeSnapshot {
+        name: String,
+        snap_name: String,
+    },
+    VolumeSnapshotDelete {
+        name: String,
+        snap_name: String,
+    },
+    VolumeSnapshotList {
+        name: String,
+    },
 }
 
 impl std::fmt::Display for RaftRequest {
@@ -106,6 +117,15 @@ impl std::fmt::Display for RaftRequest {
             }
             Self::VolumeSetReadPolicy { name, read_policy } => {
                 write!(f, "VolumeSetReadPolicy({name}, {read_policy})")
+            }
+            Self::VolumeSnapshot { name, snap_name } => {
+                write!(f, "VolumeSnapshot({name}, {snap_name})")
+            }
+            Self::VolumeSnapshotDelete { name, snap_name } => {
+                write!(f, "VolumeSnapshotDelete({name}, {snap_name})")
+            }
+            Self::VolumeSnapshotList { name } => {
+                write!(f, "VolumeSnapshotList({name})")
             }
         }
     }
@@ -247,6 +267,18 @@ mod tests {
                 RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() },
                 "VolumeSetReadPolicy(v, leader)",
             ),
+            (
+                RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() },
+                "VolumeSnapshot(v, snap1)",
+            ),
+            (
+                RaftRequest::VolumeSnapshotDelete { name: "v".into(), snap_name: "snap1".into() },
+                "VolumeSnapshotDelete(v, snap1)",
+            ),
+            (
+                RaftRequest::VolumeSnapshotList { name: "v".into() },
+                "VolumeSnapshotList(v)",
+            ),
         ];
         for (req, expected) in cases {
             assert_eq!(req.to_string(), expected);
@@ -297,6 +329,9 @@ mod tests {
             RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 },
             RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() },
             RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() },
+            RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "s1".into() },
+            RaftRequest::VolumeSnapshotDelete { name: "v".into(), snap_name: "s1".into() },
+            RaftRequest::VolumeSnapshotList { name: "v".into() },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();

@@ -70,6 +70,19 @@ enum VolumeCommand {
         #[arg(long)]
         read_policy: Option<String>,
     },
+    Snapshot {
+        name: String,
+        #[arg(long)]
+        snap: String,
+    },
+    Snapshots {
+        name: String,
+    },
+    SnapshotDelete {
+        name: String,
+        #[arg(long)]
+        snap: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -224,6 +237,52 @@ async fn main() -> anyhow::Result<()> {
                         )?;
                         println!("Set read_policy={rp} for volume '{name}'");
                     }
+                }
+                VolumeCommand::Snapshot { name, snap } => {
+                    let resp = raft.propose(
+                        0,
+                        &blockyard_raft::types::RaftRequest::VolumeSnapshot {
+                            name: name.clone(),
+                            snap_name: snap.clone(),
+                        },
+                    )?;
+                    println!("Snapshot '{snap}' of volume '{name}': {resp:?}");
+                }
+                VolumeCommand::Snapshots { name } => {
+                    let resp = raft.propose(
+                        0,
+                        &blockyard_raft::types::RaftRequest::VolumeSnapshotList {
+                            name: name.clone(),
+                        },
+                    )?;
+                    match resp {
+                        blockyard_raft::types::RaftResponse::Data(data) => {
+                            let snaps: Vec<String> =
+                                serde_json::from_slice(&data).unwrap_or_default();
+                            if snaps.is_empty() {
+                                println!("No snapshots for volume '{name}'.");
+                            } else {
+                                println!("Snapshots for volume '{name}':");
+                                for s in &snaps {
+                                    println!("  {s}");
+                                }
+                            }
+                        }
+                        blockyard_raft::types::RaftResponse::Error(e) => {
+                            println!("Error: {e}");
+                        }
+                        _ => {}
+                    }
+                }
+                VolumeCommand::SnapshotDelete { name, snap } => {
+                    let resp = raft.propose(
+                        0,
+                        &blockyard_raft::types::RaftRequest::VolumeSnapshotDelete {
+                            name: name.clone(),
+                            snap_name: snap.clone(),
+                        },
+                    )?;
+                    println!("Delete snapshot '{snap}' of volume '{name}': {resp:?}");
                 }
             }
         }
