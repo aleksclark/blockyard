@@ -68,20 +68,11 @@ pub struct RaftSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipSection {
-    #[serde(
-        default = "default_probe_interval",
-        with = "humantime_serde_compat"
-    )]
+    #[serde(default = "default_probe_interval", with = "humantime_serde_compat")]
     pub probe_interval: Duration,
-    #[serde(
-        default = "default_suspect_timeout",
-        with = "humantime_serde_compat"
-    )]
+    #[serde(default = "default_suspect_timeout", with = "humantime_serde_compat")]
     pub suspect_timeout: Duration,
-    #[serde(
-        default = "default_probe_timeout",
-        with = "humantime_serde_compat"
-    )]
+    #[serde(default = "default_probe_timeout", with = "humantime_serde_compat")]
     pub probe_timeout: Duration,
 }
 
@@ -107,10 +98,13 @@ pub struct TlsSection {
 impl NodeConfig {
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!("failed to read config file {}: {}", path.display(), e))
+            Error::Config(format!(
+                "failed to read config file {}: {}",
+                path.display(),
+                e
+            ))
         })?;
-        toml::from_str(&content)
-            .map_err(|e| Error::Config(format!("failed to parse config: {e}")))
+        toml::from_str(&content).map_err(|e| Error::Config(format!("failed to parse config: {e}")))
     }
 }
 

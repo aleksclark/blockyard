@@ -14,7 +14,11 @@ impl ZfsBackend {
         &self.pool_name
     }
 
-    pub async fn create_zvol(&self, volume_id: &VolumeId, size_bytes: u64) -> blockyard_common::Result<()> {
+    pub async fn create_zvol(
+        &self,
+        volume_id: &VolumeId,
+        size_bytes: u64,
+    ) -> blockyard_common::Result<()> {
         let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
         info!(zvol = %zvol_name, size = size_bytes, "creating zvol");
         Ok(())
@@ -26,13 +30,21 @@ impl ZfsBackend {
         Ok(())
     }
 
-    pub async fn resize_zvol(&self, volume_id: &VolumeId, new_size: u64) -> blockyard_common::Result<()> {
+    pub async fn resize_zvol(
+        &self,
+        volume_id: &VolumeId,
+        new_size: u64,
+    ) -> blockyard_common::Result<()> {
         let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
         info!(zvol = %zvol_name, new_size, "resizing zvol");
         Ok(())
     }
 
-    pub async fn snapshot_zvol(&self, volume_id: &VolumeId, snap_name: &str) -> blockyard_common::Result<()> {
+    pub async fn snapshot_zvol(
+        &self,
+        volume_id: &VolumeId,
+        snap_name: &str,
+    ) -> blockyard_common::Result<()> {
         let zvol_name = format!("{}/vol-{}@{}", self.pool_name, volume_id, snap_name);
         info!(snapshot = %zvol_name, "creating snapshot");
         Ok(())

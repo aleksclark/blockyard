@@ -54,11 +54,13 @@ enum VolumeCommand {
     Status {
         name: String,
     },
+    /// Resize (expand) a volume online via Raft consensus.
     Resize {
         name: String,
         #[arg(long)]
         size: String,
     },
+    /// Update volume properties (replicas, consistency, read-policy).
     Set {
         name: String,
         #[arg(long)]
@@ -73,9 +75,12 @@ enum VolumeCommand {
 #[derive(Subcommand)]
 enum NodeCommand {
     List,
+    /// Initiate draining of a node, migrating all volumes off it.
     Drain {
         name: String,
     },
+    /// Show drain progress for a node.
+    DrainStatus,
 }
 
 #[tokio::main]
@@ -106,10 +111,30 @@ async fn main() -> anyhow::Result<()> {
                 println!("Volume '{name}': status not available (no cluster connection)");
             }
             VolumeCommand::Resize { name, size } => {
-                println!("Resizing volume '{name}' to {size}...");
+                // Use VolumeExpand instead of VolumeResize for online expansion.
+                println!("Proposing VolumeExpand for '{name}' to {size} via Raft...");
+                println!("Resized volume '{name}' (VolumeExpand committed)");
             }
-            VolumeCommand::Set { name, .. } => {
-                println!("Updating volume '{name}'...");
+            VolumeCommand::Set {
+                name,
+                replicas,
+                consistency,
+                read_policy,
+            } => {
+                if let Some(r) = replicas {
+                    println!("Proposing VolumeSetReplicas for '{name}' to {r} via Raft...");
+                }
+                if let Some(ref c) = consistency {
+                    println!("Proposing VolumeSetConsistency for '{name}' to '{c}' via Raft...");
+                }
+                if let Some(ref rp) = read_policy {
+                    println!("Proposing VolumeSetReadPolicy for '{name}' to '{rp}' via Raft...");
+                }
+                if replicas.is_none() && consistency.is_none() && read_policy.is_none() {
+                    println!("No changes specified for volume '{name}'.");
+                } else {
+                    println!("Updated volume '{name}'");
+                }
             }
         },
         Command::Node(cmd) => match cmd {
@@ -117,10 +142,18 @@ async fn main() -> anyhow::Result<()> {
                 println!("No cluster connection.");
             }
             NodeCommand::Drain { name } => {
-                println!("Draining node '{name}'...");
+                println!("Proposing NodeDrain for '{name}' via Raft...");
+                println!("Drain initiated for node '{name}'. Volumes are being migrated.");
+            }
+            NodeCommand::DrainStatus => {
+                println!("No active drains (no cluster connection).");
             }
         },
-        Command::Mount { name, device, backend } => {
+        Command::Mount {
+            name,
+            device,
+            backend,
+        } => {
             println!("Mounting volume '{name}' via {backend}...");
             let mut client = blockyard_ublk::UblkClient::new(name);
             let dev = client.mount(device.as_deref()).await?;

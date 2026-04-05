@@ -198,6 +198,7 @@ dependencies = [
  "blockyard-common",
  "bytes",
  "openraft",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror",
@@ -210,10 +211,13 @@ name = "blockyard-storage"
 version = "0.1.0"
 dependencies = [
  "blockyard-common",
+ "parking_lot",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

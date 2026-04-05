@@ -13,11 +13,11 @@ pub struct BlockyardNode {
 
 impl BlockyardNode {
     pub fn new(config: NodeConfig) -> blockyard_common::Result<Self> {
-        let node_name = config
-            .node
-            .name
-            .clone()
-            .unwrap_or_else(|| hostname::get().map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|_| "unknown".to_string()));
+        let node_name = config.node.name.clone().unwrap_or_else(|| {
+            hostname::get()
+                .map(|h| h.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string())
+        });
 
         info!(name = %node_name, "initializing blockyard node");
 

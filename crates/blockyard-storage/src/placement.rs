@@ -17,9 +17,9 @@ impl PlacementEngine {
         let filtered: Vec<&NodeInfo> = candidates
             .iter()
             .filter(|n| {
-                spec.affinity.iter().all(|(k, v)| {
-                    n.tags.get(k).is_some_and(|tv| tv == v)
-                })
+                spec.affinity
+                    .iter()
+                    .all(|(k, v)| n.tags.get(k).is_some_and(|tv| tv == v))
             })
             .collect();
 
