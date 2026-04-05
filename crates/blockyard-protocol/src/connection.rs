@@ -37,7 +37,7 @@ impl ConnectionPool {
 
     pub fn put(&self, addr: SocketAddr, stream: TcpStream) {
         let mut pool = self.connections.lock();
-        let conns = pool.entry(addr).or_insert_with(Vec::new);
+        let conns = pool.entry(addr).or_default();
         if conns.len() < self.max_per_host {
             conns.push(stream);
         } else {

@@ -62,7 +62,7 @@ impl PlacementEngine {
     fn matches_anti_affinity(&self, spec: &VolumeSpec, node: &NodeInfo) -> bool {
         spec.anti_affinity
             .iter()
-            .all(|(k, v)| !node.tags.get(k).is_some_and(|tv| tv == v))
+            .all(|(k, v)| node.tags.get(k).is_none_or(|tv| tv != v))
     }
 
     fn spread_by_failure_domain<'a>(

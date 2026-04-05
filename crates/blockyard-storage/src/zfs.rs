@@ -100,7 +100,7 @@ impl StorageBackend for ZfsBackend {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         if parts.len() < 2 {
             return Err(blockyard_common::Error::Storage(
                 "unexpected zpool list output".into(),
@@ -135,7 +135,7 @@ impl StorageBackend for ZfsBackend {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         if parts.len() < 6 {
             return Err(blockyard_common::Error::Storage(
                 "unexpected zpool list output".into(),

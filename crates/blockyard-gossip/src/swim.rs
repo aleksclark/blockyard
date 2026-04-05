@@ -110,7 +110,7 @@ impl<T: Transport + 'static> SwimGossip<T> {
                         async move {
                             let _ = transport_ref;
                             drop(data);
-                            drop(addr);
+                            let _ = addr;
                         }
                     });
                 }
