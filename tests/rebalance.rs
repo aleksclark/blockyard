@@ -50,3 +50,71 @@ async fn all_nodes_healthy_after_recovery() {
     let no_panics = Checker::check_no_panics(&cluster).await;
     assert!(no_panics.passed, "{}", no_panics.summary());
 }
+
+#[tokio::test]
+#[ignore]
+async fn node_drain_cluster_survives() {
+    if !require_vm_env() { return; }
+    let cluster = running_cluster(5);
+    harness::ensure_all_nodes_running(&cluster).await;
+
+    let injector = FaultInjector::new(&cluster);
+    injector.inject(&Fault::NodeCrash { node_id: 3 }).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let health = Checker::check_blockyard_running(&cluster, 4).await;
+    assert!(health.passed, "after drain crash: {}", health.summary());
+
+    let no_panics = Checker::check_no_panics(&cluster).await;
+    assert!(no_panics.passed, "{}", no_panics.summary());
+
+    harness::ensure_all_nodes_running(&cluster).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn volume_resize_cluster_healthy() {
+    if !require_vm_env() { return; }
+    let cluster = running_cluster(5);
+    harness::ensure_all_nodes_running(&cluster).await;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let health = Checker::check_blockyard_running(&cluster, 5).await;
+    assert!(health.passed, "{}", health.summary());
+
+    let no_panics = Checker::check_no_panics(&cluster).await;
+    assert!(no_panics.passed, "{}", no_panics.summary());
+}
+
+#[tokio::test]
+#[ignore]
+async fn change_replicas_cluster_healthy() {
+    if !require_vm_env() { return; }
+    let cluster = running_cluster(5);
+    harness::ensure_all_nodes_running(&cluster).await;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let health = Checker::check_blockyard_running(&cluster, 5).await;
+    assert!(health.passed, "{}", health.summary());
+
+    let no_panics = Checker::check_no_panics(&cluster).await;
+    assert!(no_panics.passed, "{}", no_panics.summary());
+}
+
+#[tokio::test]
+#[ignore]
+async fn change_consistency_mode_cluster_healthy() {
+    if !require_vm_env() { return; }
+    let cluster = running_cluster(5);
+    harness::ensure_all_nodes_running(&cluster).await;
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let health = Checker::check_blockyard_running(&cluster, 5).await;
+    assert!(health.passed, "{}", health.summary());
+
+    let no_panics = Checker::check_no_panics(&cluster).await;
+    assert!(no_panics.passed, "{}", no_panics.summary());
+}

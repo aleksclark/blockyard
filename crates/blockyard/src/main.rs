@@ -188,8 +188,42 @@ async fn main() -> anyhow::Result<()> {
                     )?;
                     println!("Resized volume '{name}': {resp:?}");
                 }
-                VolumeCommand::Set { name, .. } => {
-                    println!("Updated volume '{name}'");
+                VolumeCommand::Set {
+                    name,
+                    replicas,
+                    consistency,
+                    read_policy,
+                } => {
+                    if let Some(r) = replicas {
+                        raft.propose(
+                            0,
+                            &blockyard_raft::types::RaftRequest::VolumeSetReplicas {
+                                name: name.clone(),
+                                replicas: r,
+                            },
+                        )?;
+                        println!("Set replicas={r} for volume '{name}'");
+                    }
+                    if let Some(c) = consistency {
+                        raft.propose(
+                            0,
+                            &blockyard_raft::types::RaftRequest::VolumeSetConsistency {
+                                name: name.clone(),
+                                consistency: c.clone(),
+                            },
+                        )?;
+                        println!("Set consistency={c} for volume '{name}'");
+                    }
+                    if let Some(rp) = read_policy {
+                        raft.propose(
+                            0,
+                            &blockyard_raft::types::RaftRequest::VolumeSetReadPolicy {
+                                name: name.clone(),
+                                read_policy: rp.clone(),
+                            },
+                        )?;
+                        println!("Set read_policy={rp} for volume '{name}'");
+                    }
                 }
             }
         }
@@ -215,7 +249,20 @@ async fn main() -> anyhow::Result<()> {
                 println!("  Scrub:  none scheduled");
             }
             NodeCommand::Drain { name } => {
-                println!("Draining node '{name}'...");
+                let raft = blockyard_raft::MultiRaft::new(0);
+                raft.create_group(0)?;
+                let state = raft.get_state(0).unwrap_or_default();
+                let node = state.nodes.values().find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
+                match node {
+                    Some(n) => {
+                        raft.propose(
+                            0,
+                            &blockyard_raft::types::RaftRequest::NodeDrain { node_id: n.node_id },
+                        )?;
+                        println!("Draining node '{}' (id={})", name, n.node_id);
+                    }
+                    None => println!("Node '{name}' not found"),
+                }
             }
         },
         Command::Rebalance(cmd) => match cmd {

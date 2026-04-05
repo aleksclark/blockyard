@@ -46,15 +46,51 @@ pub struct VolumeRecord {
     pub size_bytes: u64,
     pub replicas: u32,
     pub placement: Vec<u64>,
-    /// Tracks an ongoing rebalance operation, if any.
+    #[serde(default = "default_consistency")]
+    pub consistency: String,
+    #[serde(default = "default_read_policy")]
+    pub read_policy: String,
     #[serde(default)]
     pub rebalance_state: Option<RebalanceState>,
+}
+
+fn default_consistency() -> String {
+    "majority".into()
+}
+
+fn default_read_policy() -> String {
+    "any".into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeDrainState {
+    Active,
+    Draining,
+    Drained,
+}
+
+impl Default for NodeDrainState {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
+impl std::fmt::Display for NodeDrainState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Draining => write!(f, "draining"),
+            Self::Drained => write!(f, "drained"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRecord {
     pub node_id: u64,
     pub addr: String,
+    #[serde(default)]
+    pub drain_state: NodeDrainState,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +126,8 @@ impl StateMachine {
                         size_bytes: *size_bytes,
                         replicas: *replicas,
                         placement: Vec::new(),
+                        consistency: default_consistency(),
+                        read_policy: default_read_policy(),
                         rebalance_state: None,
                     },
                 );
@@ -121,6 +159,7 @@ impl StateMachine {
                     NodeRecord {
                         node_id: *node_id,
                         addr: addr.clone(),
+                        drain_state: NodeDrainState::Active,
                     },
                 );
                 RaftResponse::Ok
@@ -171,6 +210,46 @@ impl StateMachine {
                     RaftResponse::Ok
                 } else {
                     RaftResponse::Error(format!("volume not found: {volume_name}"))
+                }
+            }
+            RaftRequest::NodeDrain { node_id } => {
+                if let Some(node) = state.nodes.get_mut(node_id) {
+                    node.drain_state = NodeDrainState::Draining;
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("node not found: {node_id}"))
+                }
+            }
+            RaftRequest::NodeDrainComplete { node_id } => {
+                if let Some(node) = state.nodes.get_mut(node_id) {
+                    node.drain_state = NodeDrainState::Drained;
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("node not found: {node_id}"))
+                }
+            }
+            RaftRequest::VolumeSetReplicas { name, replicas } => {
+                if let Some(vol) = state.volumes.get_mut(name) {
+                    vol.replicas = *replicas;
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {name}"))
+                }
+            }
+            RaftRequest::VolumeSetConsistency { name, consistency } => {
+                if let Some(vol) = state.volumes.get_mut(name) {
+                    vol.consistency = consistency.clone();
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {name}"))
+                }
+            }
+            RaftRequest::VolumeSetReadPolicy { name, read_policy } => {
+                if let Some(vol) = state.volumes.get_mut(name) {
+                    vol.read_policy = read_policy.clone();
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {name}"))
                 }
             }
         }
@@ -614,5 +693,88 @@ mod tests {
             RebalancePhase::Failed("timeout".into()).to_string(),
             "failed: timeout"
         );
+    }
+
+    #[test]
+    fn test_apply_node_drain() {
+        let sm = StateMachine::new();
+        sm.apply(1, &RaftRequest::NodeRegister { node_id: 1, addr: "a".into() });
+        let resp = sm.apply(2, &RaftRequest::NodeDrain { node_id: 1 });
+        assert_eq!(resp, RaftResponse::Ok);
+        assert_eq!(sm.state().nodes[&1].drain_state, NodeDrainState::Draining);
+    }
+
+    #[test]
+    fn test_apply_node_drain_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(1, &RaftRequest::NodeDrain { node_id: 99 });
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_apply_node_drain_complete() {
+        let sm = StateMachine::new();
+        sm.apply(1, &RaftRequest::NodeRegister { node_id: 1, addr: "a".into() });
+        sm.apply(2, &RaftRequest::NodeDrain { node_id: 1 });
+        let resp = sm.apply(3, &RaftRequest::NodeDrainComplete { node_id: 1 });
+        assert_eq!(resp, RaftResponse::Ok);
+        assert_eq!(sm.state().nodes[&1].drain_state, NodeDrainState::Drained);
+    }
+
+    #[test]
+    fn test_apply_volume_set_replicas() {
+        let sm = StateMachine::new();
+        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        let resp = sm.apply(2, &RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 });
+        assert_eq!(resp, RaftResponse::Ok);
+        assert_eq!(sm.state().volumes["v"].replicas, 5);
+    }
+
+    #[test]
+    fn test_apply_volume_set_replicas_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(1, &RaftRequest::VolumeSetReplicas { name: "x".into(), replicas: 5 });
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_apply_volume_set_consistency() {
+        let sm = StateMachine::new();
+        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        assert_eq!(sm.state().volumes["v"].consistency, "majority");
+        let resp = sm.apply(2, &RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() });
+        assert_eq!(resp, RaftResponse::Ok);
+        assert_eq!(sm.state().volumes["v"].consistency, "all");
+    }
+
+    #[test]
+    fn test_apply_volume_set_read_policy() {
+        let sm = StateMachine::new();
+        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        assert_eq!(sm.state().volumes["v"].read_policy, "any");
+        let resp = sm.apply(2, &RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() });
+        assert_eq!(resp, RaftResponse::Ok);
+        assert_eq!(sm.state().volumes["v"].read_policy, "leader");
+    }
+
+    #[test]
+    fn test_node_drain_state_display() {
+        assert_eq!(NodeDrainState::Active.to_string(), "active");
+        assert_eq!(NodeDrainState::Draining.to_string(), "draining");
+        assert_eq!(NodeDrainState::Drained.to_string(), "drained");
+    }
+
+    #[test]
+    fn test_node_drain_state_default() {
+        assert_eq!(NodeDrainState::default(), NodeDrainState::Active);
+    }
+
+    #[test]
+    fn test_volume_record_defaults() {
+        let sm = StateMachine::new();
+        sm.apply(1, &RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1024, replicas: 3 });
+        let vol = &sm.state().volumes["v"];
+        assert_eq!(vol.consistency, "majority");
+        assert_eq!(vol.read_policy, "any");
     }
 }

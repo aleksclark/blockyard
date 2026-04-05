@@ -42,6 +42,24 @@ pub enum RaftRequest {
         volume_name: String,
         reason: String,
     },
+    NodeDrain {
+        node_id: u64,
+    },
+    NodeDrainComplete {
+        node_id: u64,
+    },
+    VolumeSetReplicas {
+        name: String,
+        replicas: u32,
+    },
+    VolumeSetConsistency {
+        name: String,
+        consistency: String,
+    },
+    VolumeSetReadPolicy {
+        name: String,
+        read_policy: String,
+    },
 }
 
 impl std::fmt::Display for RaftRequest {
@@ -77,6 +95,17 @@ impl std::fmt::Display for RaftRequest {
                 reason,
             } => {
                 write!(f, "RebalanceFail({volume_name}, {reason})")
+            }
+            Self::NodeDrain { node_id } => write!(f, "NodeDrain({node_id})"),
+            Self::NodeDrainComplete { node_id } => write!(f, "NodeDrainComplete({node_id})"),
+            Self::VolumeSetReplicas { name, replicas } => {
+                write!(f, "VolumeSetReplicas({name}, {replicas})")
+            }
+            Self::VolumeSetConsistency { name, consistency } => {
+                write!(f, "VolumeSetConsistency({name}, {consistency})")
+            }
+            Self::VolumeSetReadPolicy { name, read_policy } => {
+                write!(f, "VolumeSetReadPolicy({name}, {read_policy})")
             }
         }
     }
@@ -198,6 +227,26 @@ mod tests {
                 },
                 "RebalanceFail(v, err)",
             ),
+            (
+                RaftRequest::NodeDrain { node_id: 5 },
+                "NodeDrain(5)",
+            ),
+            (
+                RaftRequest::NodeDrainComplete { node_id: 5 },
+                "NodeDrainComplete(5)",
+            ),
+            (
+                RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 },
+                "VolumeSetReplicas(v, 5)",
+            ),
+            (
+                RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() },
+                "VolumeSetConsistency(v, all)",
+            ),
+            (
+                RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() },
+                "VolumeSetReadPolicy(v, leader)",
+            ),
         ];
         for (req, expected) in cases {
             assert_eq!(req.to_string(), expected);
@@ -243,6 +292,11 @@ mod tests {
                 volume_name: "v".into(),
                 reason: "disk full".into(),
             },
+            RaftRequest::NodeDrain { node_id: 1 },
+            RaftRequest::NodeDrainComplete { node_id: 1 },
+            RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 },
+            RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() },
+            RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();

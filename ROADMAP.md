@@ -117,11 +117,11 @@ Target: operational maturity for real workloads.
 - [x] Move state machine: Pending → Syncing → Promoting → Completed / Failed
 - [x] 27 unit tests for rebalance engine
 
-### 2.2 Online Operations
-- [ ] Online volume expansion (`zfs set volsize`, UBLK resize notification)
-- [ ] Node drain (`blockyard node drain`) — migrate all volumes, then remove
-- [ ] Change replication factor (`blockyard volume set --replicas N`)
-- [ ] Change consistency mode at runtime
+### 2.2 Online Operations ✅
+- [x] Online volume expansion (VolumeResize Raft command → zfs set volsize on replicas)
+- [x] Node drain (`blockyard node drain`) — NodeDrain/NodeDrainComplete Raft commands, DrainEngine with move state machine
+- [x] Change replication factor (`blockyard volume set --replicas N`) — VolumeSetReplicas Raft command
+- [x] Change consistency mode at runtime (`blockyard volume set --consistency/--read-policy`) — VolumeSetConsistency/VolumeSetReadPolicy Raft commands
 
 ### 2.3 Per-Volume Tuning
 - [ ] Write consistency modes: `all` / `majority` / `single`
