@@ -12,3 +12,9 @@ blockyard-protocol = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true }
+libc = { workspace = true }

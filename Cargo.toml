@@ -60,6 +60,10 @@ rand = "0.9"
 parking_lot = "0.12"
 dashmap = "6"
 
+# Linux io_uring
+io-uring = "0.7"
+libc = "0.2"
+
 # Internal crates
 blockyard-common = { path = "crates/blockyard-common" }
 blockyard-gossip = { path = "crates/blockyard-gossip" }
