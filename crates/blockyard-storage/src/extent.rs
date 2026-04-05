@@ -38,7 +38,7 @@ pub struct ExtentMap {
 
 impl ExtentMap {
     pub fn new(volume_size: u64, extent_size: u64) -> Self {
-        let count = (volume_size + extent_size - 1) / extent_size;
+        let count = volume_size.div_ceil(extent_size);
         Self {
             extent_size,
             volume_size,

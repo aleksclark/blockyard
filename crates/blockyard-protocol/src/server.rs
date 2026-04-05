@@ -1,4 +1,4 @@
-use crate::wire::{OpType, Request, Response, Status, RESPONSE_HEADER_SIZE};
+use crate::wire::{OpType, RESPONSE_HEADER_SIZE, Request, Response, Status};
 use bytes::{Bytes, BytesMut};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -89,7 +89,8 @@ impl<H: RequestHandler> ProtocolServer<H> {
 
             while let Some(req) = Request::decode(&mut buf) {
                 let response = Self::dispatch(&handler, &req).await;
-                let mut resp_buf = BytesMut::with_capacity(RESPONSE_HEADER_SIZE + response.data.len());
+                let mut resp_buf =
+                    BytesMut::with_capacity(RESPONSE_HEADER_SIZE + response.data.len());
                 response.encode(&mut resp_buf);
                 stream.write_all(&resp_buf).await?;
                 stream.flush().await?;
@@ -101,7 +102,9 @@ impl<H: RequestHandler> ProtocolServer<H> {
         let request_id = req.request_id;
 
         match req.op {
-            OpType::Read => match handler.handle_read(req.volume_id, req.offset, req.length).await
+            OpType::Read => match handler
+                .handle_read(req.volume_id, req.offset, req.length)
+                .await
             {
                 Ok(data) => Response {
                     request_id,
@@ -203,9 +206,7 @@ mod tests {
             offset: u64,
             data: Bytes,
         ) -> Result<(), Status> {
-            self.data
-                .lock()
-                .insert((volume_id, offset), data.to_vec());
+            self.data.lock().insert((volume_id, offset), data.to_vec());
             Ok(())
         }
 
@@ -308,18 +309,13 @@ mod tests {
         assert!(handler.data.lock().get(&(1, 0)).is_none());
     }
 
-    async fn read_response(
-        client: &mut TcpStream,
-        resp_buf: &mut BytesMut,
-    ) -> Response {
+    async fn read_response(client: &mut TcpStream, resp_buf: &mut BytesMut) -> Response {
         loop {
-            let n = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                client.read_buf(resp_buf),
-            )
-            .await
-            .expect("read_response timed out")
-            .unwrap();
+            let n =
+                tokio::time::timeout(std::time::Duration::from_secs(2), client.read_buf(resp_buf))
+                    .await
+                    .expect("read_response timed out")
+                    .unwrap();
             assert!(n > 0, "unexpected EOF from server");
             if let Some(resp) = Response::decode(resp_buf) {
                 return resp;

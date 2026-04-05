@@ -68,20 +68,11 @@ pub struct RaftSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipSection {
-    #[serde(
-        default = "default_probe_interval",
-        with = "humantime_serde_compat"
-    )]
+    #[serde(default = "default_probe_interval", with = "humantime_serde_compat")]
     pub probe_interval: Duration,
-    #[serde(
-        default = "default_suspect_timeout",
-        with = "humantime_serde_compat"
-    )]
+    #[serde(default = "default_suspect_timeout", with = "humantime_serde_compat")]
     pub suspect_timeout: Duration,
-    #[serde(
-        default = "default_probe_timeout",
-        with = "humantime_serde_compat"
-    )]
+    #[serde(default = "default_probe_timeout", with = "humantime_serde_compat")]
     pub probe_timeout: Duration,
 }
 
@@ -113,12 +104,11 @@ impl NodeConfig {
                 e
             ))
         })?;
-        Self::from_str(&content)
+        Self::from_toml(&content)
     }
 
-    pub fn from_str(content: &str) -> Result<Self> {
-        toml::from_str(content)
-            .map_err(|e| Error::Config(format!("failed to parse config: {e}")))
+    pub fn from_toml(content: &str) -> Result<Self> {
+        toml::from_str(content).map_err(|e| Error::Config(format!("failed to parse config: {e}")))
     }
 }
 
@@ -245,8 +235,8 @@ pub(crate) mod humantime_serde_compat {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::humantime_serde_compat::parse_duration;
+    use super::*;
 
     const MINIMAL_CONFIG: &str = r#"
 [node]
@@ -297,7 +287,7 @@ rack = "rack-1"
 
     #[test]
     fn test_from_str_minimal() {
-        let cfg = NodeConfig::from_str(MINIMAL_CONFIG).unwrap();
+        let cfg = NodeConfig::from_toml(MINIMAL_CONFIG).unwrap();
         assert_eq!(cfg.storage.zfs_pool, "blockyard");
         assert_eq!(cfg.cluster.seeds.len(), 1);
         assert!(cfg.node.name.is_none());
@@ -305,7 +295,7 @@ rack = "rack-1"
 
     #[test]
     fn test_from_str_full() {
-        let cfg = NodeConfig::from_str(FULL_CONFIG).unwrap();
+        let cfg = NodeConfig::from_toml(FULL_CONFIG).unwrap();
         assert_eq!(cfg.node.name.as_deref(), Some("node-a"));
         assert_eq!(cfg.cluster.seeds.len(), 2);
         assert_eq!(cfg.storage.extent_size, "4MB");
@@ -322,7 +312,7 @@ rack = "rack-1"
 
     #[test]
     fn test_from_str_defaults() {
-        let cfg = NodeConfig::from_str(MINIMAL_CONFIG).unwrap();
+        let cfg = NodeConfig::from_toml(MINIMAL_CONFIG).unwrap();
         assert_eq!(cfg.raft.heartbeat_interval, Duration::from_millis(200));
         assert_eq!(cfg.raft.election_timeout_min, Duration::from_millis(1000));
         assert_eq!(cfg.raft.election_timeout_max, Duration::from_millis(2000));
@@ -338,12 +328,12 @@ rack = "rack-1"
 
     #[test]
     fn test_from_str_invalid() {
-        assert!(NodeConfig::from_str("this is not toml [[[").is_err());
+        assert!(NodeConfig::from_toml("this is not toml [[[").is_err());
     }
 
     #[test]
     fn test_from_str_missing_required() {
-        let r = NodeConfig::from_str("[node]\n[cluster]\nseeds = []\n");
+        let r = NodeConfig::from_toml("[node]\n[cluster]\nseeds = []\n");
         assert!(r.is_err());
     }
 
@@ -391,7 +381,10 @@ rack = "rack-1"
 
     #[test]
     fn test_parse_duration_whitespace() {
-        assert_eq!(parse_duration("  200ms  ").unwrap(), Duration::from_millis(200));
+        assert_eq!(
+            parse_duration("  200ms  ").unwrap(),
+            Duration::from_millis(200)
+        );
     }
 
     #[test]
@@ -418,7 +411,7 @@ ca_cert = "/etc/blockyard/ca.pem"
 cert = "/etc/blockyard/node.pem"
 key = "/etc/blockyard/node-key.pem"
 "#;
-        let cfg = NodeConfig::from_str(cfg_str).unwrap();
+        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
         let tls = cfg.tls.unwrap();
         assert_eq!(tls.ca_cert, PathBuf::from("/etc/blockyard/ca.pem"));
         assert_eq!(tls.cert, PathBuf::from("/etc/blockyard/node.pem"));
@@ -427,9 +420,9 @@ key = "/etc/blockyard/node-key.pem"
 
     #[test]
     fn test_config_roundtrip() {
-        let cfg = NodeConfig::from_str(FULL_CONFIG).unwrap();
+        let cfg = NodeConfig::from_toml(FULL_CONFIG).unwrap();
         let toml_str = toml::to_string(&cfg).unwrap();
-        let cfg2 = NodeConfig::from_str(&toml_str).unwrap();
+        let cfg2 = NodeConfig::from_toml(&toml_str).unwrap();
         assert_eq!(cfg2.storage.zfs_pool, cfg.storage.zfs_pool);
         assert_eq!(cfg2.raft.heartbeat_interval, cfg.raft.heartbeat_interval);
     }

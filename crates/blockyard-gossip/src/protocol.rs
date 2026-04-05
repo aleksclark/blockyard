@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use blockyard_common::types::{NodeId, NodeInfo, ZfsHealthState};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GossipMessage {
@@ -81,7 +81,11 @@ mod tests {
 
     #[test]
     fn test_ping_req_encode_decode() {
-        let msg = GossipMessage::PingReq { from: 1, target: 2, seq: 10 };
+        let msg = GossipMessage::PingReq {
+            from: 1,
+            target: 2,
+            seq: 10,
+        };
         let data = msg.encode();
         let decoded = GossipMessage::decode(&data).unwrap();
         match decoded {
@@ -110,7 +114,10 @@ mod tests {
 
     #[test]
     fn test_suspect_encode_decode() {
-        let msg = GossipMessage::Suspect { node: 3, incarnation: 7 };
+        let msg = GossipMessage::Suspect {
+            node: 3,
+            incarnation: 7,
+        };
         let data = msg.encode();
         let decoded = GossipMessage::decode(&data).unwrap();
         match decoded {
@@ -124,7 +131,10 @@ mod tests {
 
     #[test]
     fn test_dead_encode_decode() {
-        let msg = GossipMessage::Dead { node: 4, incarnation: 2 };
+        let msg = GossipMessage::Dead {
+            node: 4,
+            incarnation: 2,
+        };
         let data = msg.encode();
         let decoded = GossipMessage::decode(&data).unwrap();
         match decoded {
@@ -141,8 +151,14 @@ mod tests {
         let msg = GossipMessage::Compound {
             primary: Box::new(GossipMessage::Ping { from: 1, seq: 1 }),
             piggyback: vec![
-                GossipUpdate::NodeSuspect { node: 5, incarnation: 1 },
-                GossipUpdate::ZfsHealth { node: 2, state: ZfsHealthState::Degraded },
+                GossipUpdate::NodeSuspect {
+                    node: 5,
+                    incarnation: 1,
+                },
+                GossipUpdate::ZfsHealth {
+                    node: 2,
+                    state: ZfsHealthState::Degraded,
+                },
             ],
         };
         let data = msg.encode();

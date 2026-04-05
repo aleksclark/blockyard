@@ -45,18 +45,13 @@ impl std::fmt::Display for NodeState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ZfsHealthState {
     Online,
     Degraded,
     Faulted,
+    #[default]
     Unknown,
-}
-
-impl Default for ZfsHealthState {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for ZfsHealthState {
@@ -295,7 +290,10 @@ mod tests {
 
     #[test]
     fn test_parse_size_fractional() {
-        assert_eq!(parse_size("1.5GB").unwrap(), (1.5 * 1024.0 * 1024.0 * 1024.0) as u64);
+        assert_eq!(
+            parse_size("1.5GB").unwrap(),
+            (1.5 * 1024.0 * 1024.0 * 1024.0) as u64
+        );
     }
 
     #[test]
@@ -322,10 +320,22 @@ mod tests {
 
     #[test]
     fn test_write_consistency_from_str() {
-        assert_eq!("all".parse::<WriteConsistency>().unwrap(), WriteConsistency::All);
-        assert_eq!("majority".parse::<WriteConsistency>().unwrap(), WriteConsistency::Majority);
-        assert_eq!("single".parse::<WriteConsistency>().unwrap(), WriteConsistency::Single);
-        assert_eq!("ALL".parse::<WriteConsistency>().unwrap(), WriteConsistency::All);
+        assert_eq!(
+            "all".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::All
+        );
+        assert_eq!(
+            "majority".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::Majority
+        );
+        assert_eq!(
+            "single".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::Single
+        );
+        assert_eq!(
+            "ALL".parse::<WriteConsistency>().unwrap(),
+            WriteConsistency::All
+        );
         assert!("bad".parse::<WriteConsistency>().is_err());
     }
 

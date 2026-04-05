@@ -14,7 +14,11 @@ impl ZfsBackend {
 }
 
 impl StorageBackend for ZfsBackend {
-    async fn create_zvol(&self, volume_id: &VolumeId, size_bytes: u64) -> blockyard_common::Result<()> {
+    async fn create_zvol(
+        &self,
+        volume_id: &VolumeId,
+        size_bytes: u64,
+    ) -> blockyard_common::Result<()> {
         let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
         info!(zvol = %zvol_name, size = size_bytes, "creating zvol");
 
@@ -50,7 +54,11 @@ impl StorageBackend for ZfsBackend {
         Ok(())
     }
 
-    async fn resize_zvol(&self, volume_id: &VolumeId, new_size: u64) -> blockyard_common::Result<()> {
+    async fn resize_zvol(
+        &self,
+        volume_id: &VolumeId,
+        new_size: u64,
+    ) -> blockyard_common::Result<()> {
         let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
         info!(zvol = %zvol_name, new_size, "resizing zvol");
 
@@ -68,7 +76,11 @@ impl StorageBackend for ZfsBackend {
         Ok(())
     }
 
-    async fn snapshot_zvol(&self, volume_id: &VolumeId, snap_name: &str) -> blockyard_common::Result<()> {
+    async fn snapshot_zvol(
+        &self,
+        volume_id: &VolumeId,
+        snap_name: &str,
+    ) -> blockyard_common::Result<()> {
         let snap_full = format!("{}/vol-{}@{}", self.pool_name, volume_id, snap_name);
         info!(snapshot = %snap_full, "creating snapshot");
 
@@ -100,19 +112,19 @@ impl StorageBackend for ZfsBackend {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         if parts.len() < 2 {
             return Err(blockyard_common::Error::Storage(
                 "unexpected zpool list output".into(),
             ));
         }
 
-        let total: u64 = parts[0].parse().map_err(|e| {
-            blockyard_common::Error::Storage(format!("parse capacity: {e}"))
-        })?;
-        let used: u64 = parts[1].parse().map_err(|e| {
-            blockyard_common::Error::Storage(format!("parse used: {e}"))
-        })?;
+        let total: u64 = parts[0]
+            .parse()
+            .map_err(|e| blockyard_common::Error::Storage(format!("parse capacity: {e}")))?;
+        let used: u64 = parts[1]
+            .parse()
+            .map_err(|e| blockyard_common::Error::Storage(format!("parse used: {e}")))?;
 
         Ok((total, used))
     }
@@ -120,7 +132,9 @@ impl StorageBackend for ZfsBackend {
     async fn pool_health(&self) -> blockyard_common::Result<ZfsPoolHealth> {
         let output = tokio::process::Command::new("zpool")
             .args([
-                "list", "-Hp", "-o",
+                "list",
+                "-Hp",
+                "-o",
                 "name,size,alloc,free,frag,health",
                 &self.pool_name,
             ])
@@ -135,7 +149,7 @@ impl StorageBackend for ZfsBackend {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let parts: Vec<&str> = stdout.trim().split_whitespace().collect();
+        let parts: Vec<&str> = stdout.split_whitespace().collect();
         if parts.len() < 6 {
             return Err(blockyard_common::Error::Storage(
                 "unexpected zpool list output".into(),
@@ -178,8 +192,14 @@ impl StorageBackend for ZfsBackend {
     async fn list_zvols(&self) -> blockyard_common::Result<Vec<crate::backend::ZvolInfo>> {
         let output = tokio::process::Command::new("zfs")
             .args([
-                "list", "-Hp", "-t", "volume", "-o", "name,volsize,used",
-                "-r", &self.pool_name,
+                "list",
+                "-Hp",
+                "-t",
+                "volume",
+                "-o",
+                "name,volsize,used",
+                "-r",
+                &self.pool_name,
             ])
             .output()
             .await?;
@@ -257,6 +277,96 @@ impl ZfsBackend {
 
         (total_read, total_write, total_cksum)
     }
+
+    /// Full send of a zvol to a remote host via `zfs send | ssh <target> zfs receive`.
+    ///
+    /// `target_addr` should be a host:port or hostname suitable for SSH.
+    pub async fn send_zvol(
+        &self,
+        volume_id: &VolumeId,
+        target_addr: &str,
+    ) -> blockyard_common::Result<()> {
+        let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
+        info!(zvol = %zvol_name, target = %target_addr, "starting full zfs send");
+
+        let shell_cmd = format!(
+            "zfs send {zvol} | ssh {target} zfs receive {zvol}",
+            zvol = zvol_name,
+            target = target_addr,
+        );
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", &shell_cmd])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(blockyard_common::Error::Storage(format!(
+                "zfs send failed: {stderr}"
+            )));
+        }
+
+        info!(zvol = %zvol_name, target = %target_addr, "zfs send completed");
+        Ok(())
+    }
+
+    /// Placeholder for the receiving end of a `zfs receive`.
+    ///
+    /// In practice the receive side is driven by the sender's SSH pipe, so
+    /// this method exists as a hook for future local preparation (e.g.
+    /// ensuring the target dataset is ready).
+    pub async fn receive_zvol(&self, volume_id: &VolumeId) -> blockyard_common::Result<()> {
+        let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
+        info!(zvol = %zvol_name, "ready to receive zvol (placeholder)");
+        Ok(())
+    }
+
+    /// Incremental send of a zvol from `from_snap` to the current state.
+    ///
+    /// Runs `zfs send -i <from_snap> <zvol> | ssh <target> zfs receive <zvol>`.
+    pub async fn send_incremental(
+        &self,
+        volume_id: &VolumeId,
+        from_snap: &str,
+        target_addr: &str,
+    ) -> blockyard_common::Result<()> {
+        let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
+        let snap_full = format!("{zvol_name}@{from_snap}");
+        info!(
+            zvol = %zvol_name,
+            from_snap = %snap_full,
+            target = %target_addr,
+            "starting incremental zfs send"
+        );
+
+        let shell_cmd = format!(
+            "zfs send -i {snap} {zvol} | ssh {target} zfs receive {zvol}",
+            snap = snap_full,
+            zvol = zvol_name,
+            target = target_addr,
+        );
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", &shell_cmd])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(blockyard_common::Error::Storage(format!(
+                "zfs incremental send failed: {stderr}"
+            )));
+        }
+
+        info!(
+            zvol = %zvol_name,
+            from_snap = %snap_full,
+            target = %target_addr,
+            "incremental zfs send completed"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +377,14 @@ mod tests {
     fn test_zfs_backend_pool_name() {
         let backend = ZfsBackend::new("testpool".to_string());
         assert_eq!(backend.pool_name(), "testpool");
+    }
+
+    #[tokio::test]
+    async fn test_receive_zvol_placeholder() {
+        let backend = ZfsBackend::new("testpool".to_string());
+        let vol_id: VolumeId = uuid::Uuid::new_v4();
+        // receive_zvol is a placeholder that always succeeds.
+        let result = backend.receive_zvol(&vol_id).await;
+        assert!(result.is_ok());
     }
 }

@@ -14,7 +14,10 @@ pub struct InMemoryNetwork {
 }
 
 impl InMemoryNetwork {
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<(Vec<u8>, SocketAddr, SocketAddr)>) {
+    pub fn new() -> (
+        Self,
+        mpsc::UnboundedReceiver<(Vec<u8>, SocketAddr, SocketAddr)>,
+    ) {
         let (tx, rx) = mpsc::unbounded_channel();
         (Self { tx }, rx)
     }
@@ -22,7 +25,10 @@ impl InMemoryNetwork {
     pub fn create_transport(
         &self,
         addr: SocketAddr,
-    ) -> (InMemoryTransport, mpsc::UnboundedSender<(Vec<u8>, SocketAddr)>) {
+    ) -> (
+        InMemoryTransport,
+        mpsc::UnboundedSender<(Vec<u8>, SocketAddr)>,
+    ) {
         let (deliver_tx, deliver_rx) = mpsc::unbounded_channel();
         let transport = InMemoryTransport {
             addr,

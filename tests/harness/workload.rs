@@ -1,7 +1,7 @@
 use crate::harness::cluster::TestCluster;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -151,12 +151,7 @@ impl WorkloadGenerator {
         }
     }
 
-    pub async fn record_write(
-        &self,
-        offset: u64,
-        data: Vec<u8>,
-        acknowledged: bool,
-    ) -> u64 {
+    pub async fn record_write(&self, offset: u64, data: Vec<u8>, acknowledged: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut log = self.log.lock().await;
         let ts = log.start_time.elapsed();
@@ -344,9 +339,7 @@ mod tests {
         let wg = WorkloadGenerator::new(WorkloadConfig::default());
         let id1 = wg.record_write(0, vec![], true).await;
         let id2 = wg.record_write(0, vec![], true).await;
-        let id3 = wg
-            .record_read(0, vec![], true, Duration::ZERO)
-            .await;
+        let id3 = wg.record_read(0, vec![], true, Duration::ZERO).await;
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 3);

@@ -5,8 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+type PeerGroupMap = HashMap<(NodeId, NodeId), HashSet<RaftGroupId>>;
+
 pub struct HeartbeatConsolidator {
-    shared_groups: Arc<RwLock<HashMap<(NodeId, NodeId), HashSet<RaftGroupId>>>>,
+    shared_groups: Arc<RwLock<PeerGroupMap>>,
     last_heartbeat: Arc<RwLock<HashMap<NodeId, Instant>>>,
     interval: Duration,
 }
@@ -32,10 +34,7 @@ impl HeartbeatConsolidator {
         for &a in members {
             for &b in members {
                 if a != b {
-                    shared
-                        .entry((a, b))
-                        .or_insert_with(HashSet::new)
-                        .insert(group_id);
+                    shared.entry((a, b)).or_default().insert(group_id);
                 }
             }
         }

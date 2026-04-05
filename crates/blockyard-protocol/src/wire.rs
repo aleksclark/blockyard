@@ -343,7 +343,12 @@ mod tests {
 
     #[test]
     fn test_response_error_statuses() {
-        for status in [Status::NotFound, Status::NoQuorum, Status::IoError, Status::InvalidRequest] {
+        for status in [
+            Status::NotFound,
+            Status::NoQuorum,
+            Status::IoError,
+            Status::InvalidRequest,
+        ] {
             let resp = Response {
                 request_id: 1,
                 status,

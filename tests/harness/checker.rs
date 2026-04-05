@@ -67,7 +67,11 @@ impl Checker {
         result.add(
             "acknowledged_writes_exist",
             !acked.is_empty() || log.write_count() == 0,
-            &format!("{} acknowledged out of {} total", acked.len(), log.write_count()),
+            &format!(
+                "{} acknowledged out of {} total",
+                acked.len(),
+                log.write_count()
+            ),
         );
 
         result
@@ -117,7 +121,10 @@ impl Checker {
 
         for node in cluster.running_nodes() {
             match cluster
-                .ssh_exec(node.id, "zpool scrub blockyard && sleep 2 && zpool status blockyard")
+                .ssh_exec(
+                    node.id,
+                    "zpool scrub blockyard && sleep 2 && zpool status blockyard",
+                )
                 .await
             {
                 Ok(output) => {
@@ -151,10 +158,7 @@ impl Checker {
         let mut result = CheckResult::new();
 
         for node in cluster.running_nodes() {
-            match cluster
-                .ssh_exec(node.id, "pgrep -x blockyard")
-                .await
-            {
+            match cluster.ssh_exec(node.id, "pgrep -x blockyard").await {
                 Ok(_) => {
                     result.add(
                         &format!("blockyard_running_node_{}", node.id),

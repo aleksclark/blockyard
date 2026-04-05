@@ -71,9 +71,9 @@ impl MultiRaft {
         req: &RaftRequest,
     ) -> blockyard_common::Result<crate::types::RaftResponse> {
         let groups = self.groups.read();
-        let group = groups.get(&group_id).ok_or_else(|| {
-            blockyard_common::Error::Raft(format!("group not found: {group_id}"))
-        })?;
+        let group = groups
+            .get(&group_id)
+            .ok_or_else(|| blockyard_common::Error::Raft(format!("group not found: {group_id}")))?;
         Ok(group.propose(req))
     }
 

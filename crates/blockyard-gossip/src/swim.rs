@@ -91,16 +91,29 @@ impl<T: Transport + 'static> SwimGossip<T> {
 
     pub fn handle_message(&self, msg: GossipMessage, from: SocketAddr) -> Option<GossipMessage> {
         match msg {
-            GossipMessage::Ping { from: sender_id, seq } => {
+            GossipMessage::Ping {
+                from: sender_id,
+                seq,
+            } => {
                 debug!(from = sender_id, seq, "received Ping");
                 self.addr_to_id.write().insert(from, sender_id);
-                Some(GossipMessage::Ack { from: self.local_id, seq })
+                Some(GossipMessage::Ack {
+                    from: self.local_id,
+                    seq,
+                })
             }
-            GossipMessage::PingReq { from: sender_id, target, seq } => {
+            GossipMessage::PingReq {
+                from: sender_id,
+                target,
+                seq,
+            } => {
                 debug!(from = sender_id, target, seq, "received PingReq");
                 self.addr_to_id.write().insert(from, sender_id);
                 if let Some(target_info) = self.members.get(target) {
-                    let ping = GossipMessage::Ping { from: self.local_id, seq };
+                    let ping = GossipMessage::Ping {
+                        from: self.local_id,
+                        seq,
+                    };
                     let target_addr = target_info.addr;
                     let encoded = self.wrap_with_piggyback(ping).encode();
                     let transport_ref = &self.transport;
@@ -110,16 +123,23 @@ impl<T: Transport + 'static> SwimGossip<T> {
                         async move {
                             let _ = transport_ref;
                             drop(data);
-                            drop(addr);
+                            let _ = addr;
                         }
                     });
                 }
                 None
             }
-            GossipMessage::Ack { from: sender_id, seq } => {
+            GossipMessage::Ack {
+                from: sender_id,
+                seq,
+            } => {
                 debug!(from = sender_id, seq, "received Ack");
                 self.addr_to_id.write().insert(from, sender_id);
-                if self.members.get(sender_id).is_some_and(|n| n.state == NodeState::Suspect) {
+                if self
+                    .members
+                    .get(sender_id)
+                    .is_some_and(|n| n.state == NodeState::Suspect)
+                {
                     self.members.mark_state(sender_id, NodeState::Healthy);
                 }
                 None
@@ -137,14 +157,16 @@ impl<T: Transport + 'static> SwimGossip<T> {
                     refutation.incarnation = incarnation + 1;
                     self.members.upsert(refutation);
                 } else {
-                    self.members.apply_update(&GossipUpdate::NodeSuspect { node, incarnation });
+                    self.members
+                        .apply_update(&GossipUpdate::NodeSuspect { node, incarnation });
                 }
                 None
             }
             GossipMessage::Dead { node, incarnation } => {
                 debug!(node, incarnation, "received Dead");
                 if node != self.local_id {
-                    self.members.apply_update(&GossipUpdate::NodeDead { node, incarnation });
+                    self.members
+                        .apply_update(&GossipUpdate::NodeDead { node, incarnation });
                 }
                 None
             }
@@ -183,9 +205,7 @@ impl<T: Transport + 'static> SwimGossip<T> {
         let candidates: Vec<&NodeInfo> = nodes
             .iter()
             .filter(|n| {
-                n.id != self.local_id
-                    && n.state != NodeState::Failed
-                    && n.state != NodeState::Left
+                n.id != self.local_id && n.state != NodeState::Failed && n.state != NodeState::Left
             })
             .collect();
 
@@ -201,11 +221,7 @@ impl<T: Transport + 'static> SwimGossip<T> {
         let nodes = self.members.all_nodes();
         let mut candidates: Vec<NodeInfo> = nodes
             .into_iter()
-            .filter(|n| {
-                n.id != self.local_id
-                    && n.id != exclude
-                    && n.state == NodeState::Healthy
-            })
+            .filter(|n| n.id != self.local_id && n.id != exclude && n.state == NodeState::Healthy)
             .collect();
 
         let mut rng = rand::rng();
@@ -221,7 +237,10 @@ impl<T: Transport + 'static> SwimGossip<T> {
         };
 
         let seq = self.next_seq();
-        let ping = GossipMessage::Ping { from: self.local_id, seq };
+        let ping = GossipMessage::Ping {
+            from: self.local_id,
+            seq,
+        };
 
         if let Err(e) = self.send_msg(ping, target.addr).await {
             debug!(target = target.id, error = %e, "ping send failed");
@@ -235,7 +254,11 @@ impl<T: Transport + 'static> SwimGossip<T> {
                 match self.transport.recv_from().await {
                     Ok((data, from)) => {
                         if let Ok(msg) = GossipMessage::decode(&data) {
-                            if let GossipMessage::Ack { from: ack_from, seq: ack_seq } = &msg {
+                            if let GossipMessage::Ack {
+                                from: ack_from,
+                                seq: ack_seq,
+                            } = &msg
+                            {
                                 if *ack_from == target.id && *ack_seq == seq {
                                     self.handle_message(msg, from);
                                     return true;
@@ -274,7 +297,10 @@ impl<T: Transport + 'static> SwimGossip<T> {
                         match self.transport.recv_from().await {
                             Ok((data, from)) => {
                                 if let Ok(msg) = GossipMessage::decode(&data) {
-                                    if let GossipMessage::Ack { from: ack_from, seq: ack_seq } = &msg
+                                    if let GossipMessage::Ack {
+                                        from: ack_from,
+                                        seq: ack_seq,
+                                    } = &msg
                                     {
                                         if *ack_from == target.id && *ack_seq == seq {
                                             self.handle_message(msg, from);
@@ -406,7 +432,10 @@ mod tests {
         let reply = gossip.handle_message(msg, from);
         assert!(reply.is_some());
         match reply.unwrap() {
-            GossipMessage::Ack { from: ack_from, seq } => {
+            GossipMessage::Ack {
+                from: ack_from,
+                seq,
+            } => {
                 assert_eq!(ack_from, 1);
                 assert_eq!(seq, 42);
             }
@@ -456,7 +485,10 @@ mod tests {
     fn test_handle_suspect_self_refutation() {
         let (gossip, _) = make_gossip(1, 7400);
         let from: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let msg = GossipMessage::Suspect { node: 1, incarnation: 1 };
+        let msg = GossipMessage::Suspect {
+            node: 1,
+            incarnation: 1,
+        };
         let reply = gossip.handle_message(msg, from);
         assert!(reply.is_none());
         let info = gossip.members().get(1).unwrap();
@@ -468,7 +500,10 @@ mod tests {
         let (gossip, _) = make_gossip(1, 7400);
         gossip.members().upsert(make_node_info(2, 7401));
         let from: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let msg = GossipMessage::Suspect { node: 2, incarnation: 1 };
+        let msg = GossipMessage::Suspect {
+            node: 2,
+            incarnation: 1,
+        };
         gossip.handle_message(msg, from);
         assert_eq!(gossip.members().get(2).unwrap().state, NodeState::Suspect);
     }
@@ -478,7 +513,10 @@ mod tests {
         let (gossip, _) = make_gossip(1, 7400);
         gossip.members().upsert(make_node_info(2, 7401));
         let from: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let msg = GossipMessage::Dead { node: 2, incarnation: 1 };
+        let msg = GossipMessage::Dead {
+            node: 2,
+            incarnation: 1,
+        };
         gossip.handle_message(msg, from);
         assert_eq!(gossip.members().get(2).unwrap().state, NodeState::Failed);
     }
@@ -487,7 +525,10 @@ mod tests {
     fn test_handle_dead_self_ignored() {
         let (gossip, _) = make_gossip(1, 7400);
         let from: SocketAddr = "127.0.0.1:8000".parse().unwrap();
-        let msg = GossipMessage::Dead { node: 1, incarnation: 1 };
+        let msg = GossipMessage::Dead {
+            node: 1,
+            incarnation: 1,
+        };
         gossip.handle_message(msg, from);
         assert_eq!(gossip.members().get(1).unwrap().state, NodeState::Healthy);
     }
@@ -594,6 +635,9 @@ mod tests {
         assert_eq!(from, addr);
         assert_eq!(to, target);
         let msg = GossipMessage::decode(&data).unwrap();
-        assert!(matches!(msg, GossipMessage::Compound { .. }) || matches!(msg, GossipMessage::Ping { .. }));
+        assert!(
+            matches!(msg, GossipMessage::Compound { .. })
+                || matches!(msg, GossipMessage::Ping { .. })
+        );
     }
 }

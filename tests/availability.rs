@@ -1,3 +1,4 @@
+#![allow(unused_imports, dead_code)]
 mod harness;
 
 use harness::checker::Checker;

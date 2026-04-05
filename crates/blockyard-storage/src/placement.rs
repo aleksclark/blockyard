@@ -62,7 +62,7 @@ impl PlacementEngine {
     fn matches_anti_affinity(&self, spec: &VolumeSpec, node: &NodeInfo) -> bool {
         spec.anti_affinity
             .iter()
-            .all(|(k, v)| !node.tags.get(k).is_some_and(|tv| tv == v))
+            .all(|(k, v)| node.tags.get(k).is_none_or(|tv| tv != v))
     }
 
     fn spread_by_failure_domain<'a>(
@@ -112,22 +112,14 @@ impl PlacementEngine {
         result
     }
 
-    fn balance_by_capacity(
-        &self,
-        mut candidates: Vec<&NodeInfo>,
-        count: usize,
-    ) -> Vec<NodeId> {
+    fn balance_by_capacity(&self, mut candidates: Vec<&NodeInfo>, count: usize) -> Vec<NodeId> {
         candidates.sort_by(|a, b| {
             let a_free = a.capacity_bytes.saturating_sub(a.used_bytes);
             let b_free = b.capacity_bytes.saturating_sub(b.used_bytes);
             b_free.cmp(&a_free)
         });
 
-        candidates
-            .iter()
-            .take(count)
-            .map(|n| n.id)
-            .collect()
+        candidates.iter().take(count).map(|n| n.id).collect()
     }
 
     pub fn should_exclude_node(&self, node: &NodeInfo) -> bool {
@@ -135,8 +127,7 @@ impl PlacementEngine {
     }
 
     pub fn needs_re_replication(&self, node: &NodeInfo) -> bool {
-        node.zfs_health == ZfsHealthState::Faulted
-            || node.state == NodeState::Failed
+        node.zfs_health == ZfsHealthState::Faulted || node.state == NodeState::Failed
     }
 }
 
@@ -235,8 +226,7 @@ mod tests {
             make_node(4, &[("storage_class", "ssd")], gb(100), 0),
         ];
         let mut spec = make_spec(3);
-        spec.affinity
-            .insert("storage_class".into(), "ssd".into());
+        spec.affinity.insert("storage_class".into(), "ssd".into());
 
         let result = engine.place_volume(&spec, &candidates).unwrap();
         assert_eq!(result.len(), 3);

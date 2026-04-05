@@ -76,7 +76,11 @@ impl MemoryBackend {
 }
 
 impl StorageBackend for MemoryBackend {
-    async fn create_zvol(&self, volume_id: &VolumeId, size_bytes: u64) -> blockyard_common::Result<()> {
+    async fn create_zvol(
+        &self,
+        volume_id: &VolumeId,
+        size_bytes: u64,
+    ) -> blockyard_common::Result<()> {
         let mut zvols = self.zvols.lock();
         if zvols.contains_key(volume_id) {
             return Err(blockyard_common::Error::Storage(format!(
@@ -102,26 +106,32 @@ impl StorageBackend for MemoryBackend {
         self.zvols
             .lock()
             .remove(volume_id)
-            .ok_or_else(|| {
-                blockyard_common::Error::VolumeNotFound(volume_id.to_string())
-            })?;
+            .ok_or_else(|| blockyard_common::Error::VolumeNotFound(volume_id.to_string()))?;
         Ok(())
     }
 
-    async fn resize_zvol(&self, volume_id: &VolumeId, new_size: u64) -> blockyard_common::Result<()> {
+    async fn resize_zvol(
+        &self,
+        volume_id: &VolumeId,
+        new_size: u64,
+    ) -> blockyard_common::Result<()> {
         let mut zvols = self.zvols.lock();
-        let entry = zvols.get_mut(volume_id).ok_or_else(|| {
-            blockyard_common::Error::VolumeNotFound(volume_id.to_string())
-        })?;
+        let entry = zvols
+            .get_mut(volume_id)
+            .ok_or_else(|| blockyard_common::Error::VolumeNotFound(volume_id.to_string()))?;
         entry.size_bytes = new_size;
         Ok(())
     }
 
-    async fn snapshot_zvol(&self, volume_id: &VolumeId, snap_name: &str) -> blockyard_common::Result<()> {
+    async fn snapshot_zvol(
+        &self,
+        volume_id: &VolumeId,
+        snap_name: &str,
+    ) -> blockyard_common::Result<()> {
         let mut zvols = self.zvols.lock();
-        let entry = zvols.get_mut(volume_id).ok_or_else(|| {
-            blockyard_common::Error::VolumeNotFound(volume_id.to_string())
-        })?;
+        let entry = zvols
+            .get_mut(volume_id)
+            .ok_or_else(|| blockyard_common::Error::VolumeNotFound(volume_id.to_string()))?;
         entry.snapshots.push(snap_name.to_string());
         Ok(())
     }

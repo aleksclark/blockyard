@@ -30,6 +30,18 @@ pub enum RaftRequest {
         offset: u64,
         data: Vec<u8>,
     },
+    RebalanceStart {
+        volume_name: String,
+        source: u64,
+        target: u64,
+    },
+    RebalanceComplete {
+        volume_name: String,
+    },
+    RebalanceFail {
+        volume_name: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for RaftRequest {
@@ -45,8 +57,26 @@ impl std::fmt::Display for RaftRequest {
             }
             Self::NodeRegister { node_id, .. } => write!(f, "NodeRegister({node_id})"),
             Self::NodeDeregister { node_id } => write!(f, "NodeDeregister({node_id})"),
-            Self::Write { volume_id, offset, .. } => {
+            Self::Write {
+                volume_id, offset, ..
+            } => {
                 write!(f, "Write(vol={volume_id}, off={offset})")
+            }
+            Self::RebalanceStart {
+                volume_name,
+                source,
+                target,
+            } => {
+                write!(f, "RebalanceStart({volume_name}, {source}->{target})")
+            }
+            Self::RebalanceComplete { volume_name } => {
+                write!(f, "RebalanceComplete({volume_name})")
+            }
+            Self::RebalanceFail {
+                volume_name,
+                reason,
+            } => {
+                write!(f, "RebalanceFail({volume_name}, {reason})")
             }
         }
     }
@@ -102,13 +132,72 @@ mod tests {
     #[test]
     fn test_raft_request_display() {
         let cases = vec![
-            (RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1, replicas: 1 }, "VolumeCreate(v)"),
-            (RaftRequest::VolumeDelete { name: "v".into() }, "VolumeDelete(v)"),
-            (RaftRequest::VolumeResize { name: "v".into(), new_size: 2 }, "VolumeResize(v, 2)"),
-            (RaftRequest::PlacementUpdate { volume_name: "v".into(), nodes: vec![1] }, "PlacementUpdate(v)"),
-            (RaftRequest::NodeRegister { node_id: 1, addr: "a".into() }, "NodeRegister(1)"),
-            (RaftRequest::NodeDeregister { node_id: 1 }, "NodeDeregister(1)"),
-            (RaftRequest::Write { volume_id: 1, offset: 0, data: vec![0] }, "Write(vol=1, off=0)"),
+            (
+                RaftRequest::VolumeCreate {
+                    name: "v".into(),
+                    size_bytes: 1,
+                    replicas: 1,
+                },
+                "VolumeCreate(v)",
+            ),
+            (
+                RaftRequest::VolumeDelete { name: "v".into() },
+                "VolumeDelete(v)",
+            ),
+            (
+                RaftRequest::VolumeResize {
+                    name: "v".into(),
+                    new_size: 2,
+                },
+                "VolumeResize(v, 2)",
+            ),
+            (
+                RaftRequest::PlacementUpdate {
+                    volume_name: "v".into(),
+                    nodes: vec![1],
+                },
+                "PlacementUpdate(v)",
+            ),
+            (
+                RaftRequest::NodeRegister {
+                    node_id: 1,
+                    addr: "a".into(),
+                },
+                "NodeRegister(1)",
+            ),
+            (
+                RaftRequest::NodeDeregister { node_id: 1 },
+                "NodeDeregister(1)",
+            ),
+            (
+                RaftRequest::Write {
+                    volume_id: 1,
+                    offset: 0,
+                    data: vec![0],
+                },
+                "Write(vol=1, off=0)",
+            ),
+            (
+                RaftRequest::RebalanceStart {
+                    volume_name: "v".into(),
+                    source: 1,
+                    target: 2,
+                },
+                "RebalanceStart(v, 1->2)",
+            ),
+            (
+                RaftRequest::RebalanceComplete {
+                    volume_name: "v".into(),
+                },
+                "RebalanceComplete(v)",
+            ),
+            (
+                RaftRequest::RebalanceFail {
+                    volume_name: "v".into(),
+                    reason: "err".into(),
+                },
+                "RebalanceFail(v, err)",
+            ),
         ];
         for (req, expected) in cases {
             assert_eq!(req.to_string(), expected);
@@ -118,18 +207,80 @@ mod tests {
     #[test]
     fn test_raft_request_all_variants_roundtrip() {
         let variants: Vec<RaftRequest> = vec![
-            RaftRequest::VolumeCreate { name: "v".into(), size_bytes: 1, replicas: 1 },
+            RaftRequest::VolumeCreate {
+                name: "v".into(),
+                size_bytes: 1,
+                replicas: 1,
+            },
             RaftRequest::VolumeDelete { name: "v".into() },
-            RaftRequest::VolumeResize { name: "v".into(), new_size: 2 },
-            RaftRequest::PlacementUpdate { volume_name: "v".into(), nodes: vec![1] },
-            RaftRequest::NodeRegister { node_id: 1, addr: "a".into() },
+            RaftRequest::VolumeResize {
+                name: "v".into(),
+                new_size: 2,
+            },
+            RaftRequest::PlacementUpdate {
+                volume_name: "v".into(),
+                nodes: vec![1],
+            },
+            RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
             RaftRequest::NodeDeregister { node_id: 1 },
-            RaftRequest::Write { volume_id: 1, offset: 0, data: vec![0] },
+            RaftRequest::Write {
+                volume_id: 1,
+                offset: 0,
+                data: vec![0],
+            },
+            RaftRequest::RebalanceStart {
+                volume_name: "v".into(),
+                source: 1,
+                target: 2,
+            },
+            RaftRequest::RebalanceComplete {
+                volume_name: "v".into(),
+            },
+            RaftRequest::RebalanceFail {
+                volume_name: "v".into(),
+                reason: "disk full".into(),
+            },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();
             let decoded: RaftRequest = serde_json::from_str(&json).unwrap();
             assert_eq!(&decoded, v);
         }
+    }
+
+    #[test]
+    fn test_rebalance_start_serialization() {
+        let req = RaftRequest::RebalanceStart {
+            volume_name: "vol-1".into(),
+            source: 10,
+            target: 20,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: RaftRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn test_rebalance_complete_serialization() {
+        let req = RaftRequest::RebalanceComplete {
+            volume_name: "vol-1".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: RaftRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn test_rebalance_fail_serialization() {
+        let req = RaftRequest::RebalanceFail {
+            volume_name: "vol-1".into(),
+            reason: "network timeout".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: RaftRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, req);
     }
 }

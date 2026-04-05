@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use tokio_util::codec::{Decoder, Encoder};
 
-use crate::wire::{Request, Response, REQUEST_HEADER_SIZE, RESPONSE_HEADER_SIZE};
+use crate::wire::{REQUEST_HEADER_SIZE, RESPONSE_HEADER_SIZE, Request, Response};
 
 pub struct BlockProtocolCodec {
     is_server: bool,

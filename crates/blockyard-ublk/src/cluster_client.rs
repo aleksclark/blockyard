@@ -1,7 +1,7 @@
+use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use parking_lot::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub struct ClusterClient {
     volume_name: String,

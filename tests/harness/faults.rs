@@ -4,20 +4,55 @@ use tokio::process::Command;
 
 #[derive(Debug, Clone)]
 pub enum Fault {
-    NodeCrash { node_id: usize },
-    NodePause { node_id: usize },
-    NodeResume { node_id: usize },
-    NetworkPartition { from: usize, to: usize },
-    NetworkHeal { from: usize, to: usize },
-    AsymmetricPartition { blocked_from: usize, blocked_to: usize },
-    NetworkDelay { node_id: usize, latency: Duration },
-    NetworkLoss { node_id: usize, loss_pct: u8 },
-    NetworkReset { node_id: usize },
-    DiskSlow { node_id: usize, latency: Duration },
-    DiskFault { node_id: usize },
-    DiskHeal { node_id: usize },
-    ClockSkew { node_id: usize, offset: i64 },
-    FillDisk { node_id: usize },
+    NodeCrash {
+        node_id: usize,
+    },
+    NodePause {
+        node_id: usize,
+    },
+    NodeResume {
+        node_id: usize,
+    },
+    NetworkPartition {
+        from: usize,
+        to: usize,
+    },
+    NetworkHeal {
+        from: usize,
+        to: usize,
+    },
+    AsymmetricPartition {
+        blocked_from: usize,
+        blocked_to: usize,
+    },
+    NetworkDelay {
+        node_id: usize,
+        latency: Duration,
+    },
+    NetworkLoss {
+        node_id: usize,
+        loss_pct: u8,
+    },
+    NetworkReset {
+        node_id: usize,
+    },
+    DiskSlow {
+        node_id: usize,
+        latency: Duration,
+    },
+    DiskFault {
+        node_id: usize,
+    },
+    DiskHeal {
+        node_id: usize,
+    },
+    ClockSkew {
+        node_id: usize,
+        offset: i64,
+    },
+    FillDisk {
+        node_id: usize,
+    },
 }
 
 impl Fault {
@@ -78,9 +113,10 @@ impl<'a> FaultInjector<'a> {
                 self.cluster.resume_blockyard(*node_id).await?;
             }
             Fault::NetworkPartition { from, to } => {
-                let to_node = self.cluster.node(*to).ok_or_else(|| {
-                    anyhow::anyhow!("node {to} not found")
-                })?;
+                let to_node = self
+                    .cluster
+                    .node(*to)
+                    .ok_or_else(|| anyhow::anyhow!("node {to} not found"))?;
                 self.cluster
                     .ssh_exec(
                         *from,
@@ -91,9 +127,10 @@ impl<'a> FaultInjector<'a> {
                         ),
                     )
                     .await?;
-                let from_node = self.cluster.node(*from).ok_or_else(|| {
-                    anyhow::anyhow!("node {from} not found")
-                })?;
+                let from_node = self
+                    .cluster
+                    .node(*from)
+                    .ok_or_else(|| anyhow::anyhow!("node {from} not found"))?;
                 self.cluster
                     .ssh_exec(
                         *to,
@@ -117,9 +154,10 @@ impl<'a> FaultInjector<'a> {
                 blocked_from,
                 blocked_to,
             } => {
-                let to_node = self.cluster.node(*blocked_to).ok_or_else(|| {
-                    anyhow::anyhow!("node {blocked_to} not found")
-                })?;
+                let to_node = self
+                    .cluster
+                    .node(*blocked_to)
+                    .ok_or_else(|| anyhow::anyhow!("node {blocked_to} not found"))?;
                 self.cluster
                     .ssh_exec(
                         *blocked_from,
@@ -179,10 +217,7 @@ impl<'a> FaultInjector<'a> {
             Fault::ClockSkew { node_id, offset } => {
                 let sign = if *offset >= 0 { "+" } else { "" };
                 self.cluster
-                    .ssh_exec(
-                        *node_id,
-                        &format!("date -s \"{sign}{offset} seconds\""),
-                    )
+                    .ssh_exec(*node_id, &format!("date -s \"{sign}{offset} seconds\""))
                     .await?;
             }
             Fault::FillDisk { node_id } => {
@@ -217,18 +252,9 @@ mod tests {
     #[test]
     fn test_fault_description() {
         let cases = vec![
-            (
-                Fault::NodeCrash { node_id: 0 },
-                "crash node 0",
-            ),
-            (
-                Fault::NodePause { node_id: 1 },
-                "pause node 1",
-            ),
-            (
-                Fault::NodeResume { node_id: 1 },
-                "resume node 1",
-            ),
+            (Fault::NodeCrash { node_id: 0 }, "crash node 0"),
+            (Fault::NodePause { node_id: 1 }, "pause node 1"),
+            (Fault::NodeResume { node_id: 1 }, "resume node 1"),
             (
                 Fault::NetworkPartition { from: 0, to: 1 },
                 "partition node 0 <-> node 1",
@@ -273,10 +299,7 @@ mod tests {
                 Fault::DiskFault { node_id: 1 },
                 "inject disk fault on node 1",
             ),
-            (
-                Fault::DiskHeal { node_id: 1 },
-                "heal disk on node 1",
-            ),
+            (Fault::DiskHeal { node_id: 1 }, "heal disk on node 1"),
             (
                 Fault::ClockSkew {
                     node_id: 0,
@@ -284,10 +307,7 @@ mod tests {
                 },
                 "skew clock on node 0 by 30s",
             ),
-            (
-                Fault::FillDisk { node_id: 2 },
-                "fill disk on node 2",
-            ),
+            (Fault::FillDisk { node_id: 2 }, "fill disk on node 2"),
         ];
         for (fault, expected) in cases {
             assert_eq!(fault.description(), expected);

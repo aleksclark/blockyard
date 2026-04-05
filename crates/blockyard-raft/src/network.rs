@@ -40,9 +40,7 @@ impl ConnectionPool {
 
         // Slow path: create a new channel.
         let endpoint = Channel::from_shared(addr.to_owned()).map_err(|e| {
-            blockyard_common::Error::Raft(format!(
-                "invalid endpoint for node {node_id}: {e}"
-            ))
+            blockyard_common::Error::Raft(format!("invalid endpoint for node {node_id}: {e}"))
         })?;
 
         let channel = endpoint.connect().await.map_err(|e| {
@@ -102,19 +100,14 @@ impl RaftNetwork {
     }
 
     /// Resolve and connect (or reuse) a channel for the given node.
-    async fn channel_for(
-        &self,
-        node_id: NodeId,
-    ) -> blockyard_common::Result<Channel> {
+    async fn channel_for(&self, node_id: NodeId) -> blockyard_common::Result<Channel> {
         let addr = self
             .peer_addrs
             .read()
             .get(&node_id)
             .cloned()
             .ok_or_else(|| {
-                blockyard_common::Error::Raft(format!(
-                    "no address registered for node {node_id}"
-                ))
+                blockyard_common::Error::Raft(format!("no address registered for node {node_id}"))
             })?;
         self.pool.get_or_connect(node_id, &addr).await
     }
@@ -135,9 +128,7 @@ impl RaftNetwork {
 
         let resp = client.append_entries(request).await.map_err(|e| {
             warn!(target, error = %e, "append_entries RPC failed");
-            blockyard_common::Error::Raft(format!(
-                "append_entries to node {target}: {e}"
-            ))
+            blockyard_common::Error::Raft(format!("append_entries to node {target}: {e}"))
         })?;
 
         Ok(resp.into_inner())
@@ -155,9 +146,7 @@ impl RaftNetwork {
 
         let resp = client.install_snapshot(request).await.map_err(|e| {
             warn!(target, error = %e, "install_snapshot RPC failed");
-            blockyard_common::Error::Raft(format!(
-                "install_snapshot to node {target}: {e}"
-            ))
+            blockyard_common::Error::Raft(format!("install_snapshot to node {target}: {e}"))
         })?;
 
         Ok(resp.into_inner())
@@ -175,9 +164,7 @@ impl RaftNetwork {
 
         let resp = client.request_vote(request).await.map_err(|e| {
             warn!(target, error = %e, "request_vote RPC failed");
-            blockyard_common::Error::Raft(format!(
-                "request_vote to node {target}: {e}"
-            ))
+            blockyard_common::Error::Raft(format!("request_vote to node {target}: {e}"))
         })?;
 
         Ok(resp.into_inner())
@@ -195,18 +182,12 @@ impl RaftNetwork {
         request: proto::ConsolidatedHeartbeatRequest,
     ) -> blockyard_common::Result<proto::ConsolidatedHeartbeatResponse> {
         let channel = self.channel_for(target).await?;
-        let mut client =
-            proto::heartbeat_service_client::HeartbeatServiceClient::new(channel);
+        let mut client = proto::heartbeat_service_client::HeartbeatServiceClient::new(channel);
 
-        let resp = client
-            .consolidated_heartbeat(request)
-            .await
-            .map_err(|e| {
-                warn!(target, error = %e, "consolidated_heartbeat RPC failed");
-                blockyard_common::Error::Raft(format!(
-                    "consolidated_heartbeat to node {target}: {e}"
-                ))
-            })?;
+        let resp = client.consolidated_heartbeat(request).await.map_err(|e| {
+            warn!(target, error = %e, "consolidated_heartbeat RPC failed");
+            blockyard_common::Error::Raft(format!("consolidated_heartbeat to node {target}: {e}"))
+        })?;
 
         Ok(resp.into_inner())
     }
@@ -223,14 +204,11 @@ impl RaftNetwork {
         request: proto::ForwardProposalRequest,
     ) -> blockyard_common::Result<proto::ForwardProposalResponse> {
         let channel = self.channel_for(target).await?;
-        let mut client =
-            proto::cluster_service_client::ClusterServiceClient::new(channel);
+        let mut client = proto::cluster_service_client::ClusterServiceClient::new(channel);
 
         let resp = client.forward_proposal(request).await.map_err(|e| {
             warn!(target, error = %e, "forward_proposal RPC failed");
-            blockyard_common::Error::Raft(format!(
-                "forward_proposal to node {target}: {e}"
-            ))
+            blockyard_common::Error::Raft(format!("forward_proposal to node {target}: {e}"))
         })?;
 
         Ok(resp.into_inner())
@@ -244,14 +222,11 @@ impl RaftNetwork {
         request: proto::GetStateRequest,
     ) -> blockyard_common::Result<proto::GetStateResponse> {
         let channel = self.channel_for(target).await?;
-        let mut client =
-            proto::cluster_service_client::ClusterServiceClient::new(channel);
+        let mut client = proto::cluster_service_client::ClusterServiceClient::new(channel);
 
         let resp = client.get_state(request).await.map_err(|e| {
             warn!(target, error = %e, "get_state RPC failed");
-            blockyard_common::Error::Raft(format!(
-                "get_state to node {target}: {e}"
-            ))
+            blockyard_common::Error::Raft(format!("get_state to node {target}: {e}"))
         })?;
 
         Ok(resp.into_inner())
@@ -372,8 +347,7 @@ mod tests {
         let decoded = proto::InstallSnapshotRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded, req);
 
-        let state: crate::state_machine::AppState =
-            serde_json::from_slice(&decoded.data).unwrap();
+        let state: crate::state_machine::AppState = serde_json::from_slice(&decoded.data).unwrap();
         assert!(state.volumes.is_empty());
     }
 
@@ -417,8 +391,7 @@ mod tests {
         };
 
         let bytes = req.encode_to_vec();
-        let decoded =
-            proto::ConsolidatedHeartbeatRequest::decode(bytes.as_slice()).unwrap();
+        let decoded = proto::ConsolidatedHeartbeatRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded, req);
         assert_eq!(decoded.heartbeats.len(), 2);
     }
@@ -443,9 +416,11 @@ mod tests {
         let decoded = proto::ForwardProposalRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded, req);
 
-        let inner: crate::types::RaftRequest =
-            serde_json::from_slice(&decoded.payload).unwrap();
-        assert!(matches!(inner, crate::types::RaftRequest::VolumeCreate { .. }));
+        let inner: crate::types::RaftRequest = serde_json::from_slice(&decoded.payload).unwrap();
+        assert!(matches!(
+            inner,
+            crate::types::RaftRequest::VolumeCreate { .. }
+        ));
     }
 
     #[test]
@@ -465,8 +440,7 @@ mod tests {
         let decoded = proto::GetStateResponse::decode(bytes.as_slice()).unwrap();
         assert_eq!(decoded, resp);
 
-        let s: crate::state_machine::AppState =
-            serde_json::from_slice(&decoded.state).unwrap();
+        let s: crate::state_machine::AppState = serde_json::from_slice(&decoded.state).unwrap();
         assert_eq!(s.applied_index, 42);
     }
 
@@ -670,8 +644,7 @@ mod tests {
         let resp = net.send_get_state(1, req).await.unwrap();
         assert!(resp.success, "error: {}", resp.error);
 
-        let state: crate::state_machine::AppState =
-            serde_json::from_slice(&resp.state).unwrap();
+        let state: crate::state_machine::AppState = serde_json::from_slice(&resp.state).unwrap();
         assert!(state.nodes.contains_key(&99));
 
         server_handle.abort();

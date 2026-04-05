@@ -30,27 +30,18 @@ impl BlockyardGrpcServer {
     }
 
     /// Convenience: start a tonic server on `addr` exposing all three services.
-    pub async fn serve(
-        &self,
-        addr: std::net::SocketAddr,
-    ) -> blockyard_common::Result<()> {
-        let raft_svc = proto::raft_service_server::RaftServiceServer::new(
-            RaftServiceImpl {
-                multiraft: Arc::clone(&self.multiraft),
-            },
-        );
+    pub async fn serve(&self, addr: std::net::SocketAddr) -> blockyard_common::Result<()> {
+        let raft_svc = proto::raft_service_server::RaftServiceServer::new(RaftServiceImpl {
+            multiraft: Arc::clone(&self.multiraft),
+        });
         let heartbeat_svc =
-            proto::heartbeat_service_server::HeartbeatServiceServer::new(
-                HeartbeatServiceImpl {
-                    multiraft: Arc::clone(&self.multiraft),
-                },
-            );
+            proto::heartbeat_service_server::HeartbeatServiceServer::new(HeartbeatServiceImpl {
+                multiraft: Arc::clone(&self.multiraft),
+            });
         let cluster_svc =
-            proto::cluster_service_server::ClusterServiceServer::new(
-                ClusterServiceImpl {
-                    multiraft: Arc::clone(&self.multiraft),
-                },
-            );
+            proto::cluster_service_server::ClusterServiceServer::new(ClusterServiceImpl {
+                multiraft: Arc::clone(&self.multiraft),
+            });
 
         tracing::info!(%addr, "starting gRPC server");
 
@@ -60,9 +51,7 @@ impl BlockyardGrpcServer {
             .add_service(cluster_svc)
             .serve(addr)
             .await
-            .map_err(|e| {
-                blockyard_common::Error::Raft(format!("gRPC serve error: {e}"))
-            })
+            .map_err(|e| blockyard_common::Error::Raft(format!("gRPC serve error: {e}")))
     }
 
     /// Start serving using an existing `TcpListener` (useful for tests where
@@ -71,23 +60,17 @@ impl BlockyardGrpcServer {
         &self,
         listener: tokio::net::TcpListener,
     ) -> blockyard_common::Result<()> {
-        let raft_svc = proto::raft_service_server::RaftServiceServer::new(
-            RaftServiceImpl {
-                multiraft: Arc::clone(&self.multiraft),
-            },
-        );
+        let raft_svc = proto::raft_service_server::RaftServiceServer::new(RaftServiceImpl {
+            multiraft: Arc::clone(&self.multiraft),
+        });
         let heartbeat_svc =
-            proto::heartbeat_service_server::HeartbeatServiceServer::new(
-                HeartbeatServiceImpl {
-                    multiraft: Arc::clone(&self.multiraft),
-                },
-            );
+            proto::heartbeat_service_server::HeartbeatServiceServer::new(HeartbeatServiceImpl {
+                multiraft: Arc::clone(&self.multiraft),
+            });
         let cluster_svc =
-            proto::cluster_service_server::ClusterServiceServer::new(
-                ClusterServiceImpl {
-                    multiraft: Arc::clone(&self.multiraft),
-                },
-            );
+            proto::cluster_service_server::ClusterServiceServer::new(ClusterServiceImpl {
+                multiraft: Arc::clone(&self.multiraft),
+            });
 
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
@@ -99,9 +82,7 @@ impl BlockyardGrpcServer {
             .add_service(cluster_svc)
             .serve_with_incoming(incoming)
             .await
-            .map_err(|e| {
-                blockyard_common::Error::Raft(format!("gRPC serve error: {e}"))
-            })
+            .map_err(|e| blockyard_common::Error::Raft(format!("gRPC serve error: {e}")))
     }
 }
 
@@ -142,12 +123,9 @@ impl proto::raft_service_server::RaftService for RaftServiceImpl {
         // Apply each entry to the state machine (simplified: in a real
         // implementation this would go through the Raft log).
         for entry in &req.entries {
-            let raft_req: RaftRequest = serde_json::from_slice(&entry.data)
-                .map_err(|e| {
-                    Status::invalid_argument(format!(
-                        "failed to decode log entry: {e}"
-                    ))
-                })?;
+            let raft_req: RaftRequest = serde_json::from_slice(&entry.data).map_err(|e| {
+                Status::invalid_argument(format!("failed to decode log entry: {e}"))
+            })?;
 
             self.multiraft
                 .propose(req.group_id, &raft_req)
@@ -194,12 +172,8 @@ impl proto::raft_service_server::RaftService for RaftServiceImpl {
         })?;
         // We can't directly access the state machine through MultiRaft's
         // public API for restore, so we validate the snapshot is parseable.
-        let _: crate::state_machine::AppState =
-            serde_json::from_slice(&req.data).map_err(|e| {
-                Status::invalid_argument(format!(
-                    "invalid snapshot data: {e}"
-                ))
-            })?;
+        let _: crate::state_machine::AppState = serde_json::from_slice(&req.data)
+            .map_err(|e| Status::invalid_argument(format!("invalid snapshot data: {e}")))?;
 
         debug!(
             group_id = req.group_id,
@@ -319,12 +293,9 @@ impl proto::cluster_service_server::ClusterService for ClusterServiceImpl {
         let req = request.into_inner();
         tracing::Span::current().record("group_id", req.group_id);
 
-        let raft_req: RaftRequest =
-            serde_json::from_slice(&req.payload).map_err(|e| {
-                Status::invalid_argument(format!(
-                    "failed to decode proposal payload: {e}"
-                ))
-            })?;
+        let raft_req: RaftRequest = serde_json::from_slice(&req.payload).map_err(|e| {
+            Status::invalid_argument(format!("failed to decode proposal payload: {e}"))
+        })?;
 
         debug!(
             group_id = req.group_id,
@@ -365,11 +336,8 @@ impl proto::cluster_service_server::ClusterService for ClusterServiceImpl {
 
         match self.multiraft.get_state(req.group_id) {
             Some(state) => {
-                let state_bytes = serde_json::to_vec(&state).map_err(|e| {
-                    Status::internal(format!(
-                        "failed to serialize state: {e}"
-                    ))
-                })?;
+                let state_bytes = serde_json::to_vec(&state)
+                    .map_err(|e| Status::internal(format!("failed to serialize state: {e}")))?;
                 Ok(Response::new(proto::GetStateResponse {
                     success: true,
                     error: String::new(),
@@ -537,10 +505,9 @@ mod tests {
             data: snap,
         });
 
-        let resp =
-            proto::raft_service_server::RaftService::install_snapshot(&svc, req)
-                .await
-                .unwrap();
+        let resp = proto::raft_service_server::RaftService::install_snapshot(&svc, req)
+            .await
+            .unwrap();
         assert_eq!(resp.into_inner().term, 3);
     }
 
@@ -571,11 +538,10 @@ mod tests {
             ],
         });
 
-        let resp = proto::heartbeat_service_server::HeartbeatService::consolidated_heartbeat(
-            &svc, req,
-        )
-        .await
-        .unwrap();
+        let resp =
+            proto::heartbeat_service_server::HeartbeatService::consolidated_heartbeat(&svc, req)
+                .await
+                .unwrap();
         assert!(resp.into_inner().success);
     }
 
@@ -607,11 +573,10 @@ mod tests {
         });
 
         // Should succeed — missing groups are logged but don't fail the RPC.
-        let resp = proto::heartbeat_service_server::HeartbeatService::consolidated_heartbeat(
-            &svc, req,
-        )
-        .await
-        .unwrap();
+        let resp =
+            proto::heartbeat_service_server::HeartbeatService::consolidated_heartbeat(&svc, req)
+                .await
+                .unwrap();
         assert!(resp.into_inner().success);
     }
 
@@ -636,10 +601,7 @@ mod tests {
             payload,
         });
 
-        let resp =
-            proto::cluster_service_server::ClusterService::forward_proposal(
-                &svc, req,
-            )
+        let resp = proto::cluster_service_server::ClusterService::forward_proposal(&svc, req)
             .await
             .unwrap();
         let inner = resp.into_inner();
@@ -663,10 +625,7 @@ mod tests {
             payload: b"not valid json".to_vec(),
         });
 
-        let err =
-            proto::cluster_service_server::ClusterService::forward_proposal(
-                &svc, req,
-            )
+        let err = proto::cluster_service_server::ClusterService::forward_proposal(&svc, req)
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -693,10 +652,7 @@ mod tests {
             payload,
         });
 
-        let resp =
-            proto::cluster_service_server::ClusterService::forward_proposal(
-                &svc, req,
-            )
+        let resp = proto::cluster_service_server::ClusterService::forward_proposal(&svc, req)
             .await
             .unwrap();
         let inner = resp.into_inner();
@@ -722,15 +678,13 @@ mod tests {
         };
 
         let req = Request::new(proto::GetStateRequest { group_id: 100 });
-        let resp =
-            proto::cluster_service_server::ClusterService::get_state(&svc, req)
-                .await
-                .unwrap();
+        let resp = proto::cluster_service_server::ClusterService::get_state(&svc, req)
+            .await
+            .unwrap();
         let inner = resp.into_inner();
         assert!(inner.success);
 
-        let state: crate::state_machine::AppState =
-            serde_json::from_slice(&inner.state).unwrap();
+        let state: crate::state_machine::AppState = serde_json::from_slice(&inner.state).unwrap();
         assert!(state.nodes.contains_key(&7));
     }
 
@@ -743,10 +697,9 @@ mod tests {
         };
 
         let req = Request::new(proto::GetStateRequest { group_id: 999 });
-        let resp =
-            proto::cluster_service_server::ClusterService::get_state(&svc, req)
-                .await
-                .unwrap();
+        let resp = proto::cluster_service_server::ClusterService::get_state(&svc, req)
+            .await
+            .unwrap();
         let inner = resp.into_inner();
         assert!(!inner.success);
         assert!(inner.error.contains("not found"));

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
@@ -135,9 +135,9 @@ impl UblkServer {
         self.set_state(UblkServerState::Recovering);
         info!("recovering UBLK device");
 
-        let dev_path = self.device_path().ok_or_else(|| {
-            blockyard_common::Error::Storage("no device to recover".into())
-        })?;
+        let dev_path = self
+            .device_path()
+            .ok_or_else(|| blockyard_common::Error::Storage("no device to recover".into()))?;
 
         self.set_state(UblkServerState::Running);
         Ok(dev_path)

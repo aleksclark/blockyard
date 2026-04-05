@@ -24,8 +24,7 @@ pub struct ClusterConfig {
 
 impl Default for ClusterConfig {
     fn default() -> Self {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-            .unwrap_or_else(|_| ".".to_string());
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
         let base = PathBuf::from(&manifest_dir);
         Self {
             node_count: DEFAULT_NODE_COUNT,
@@ -155,9 +154,10 @@ impl TestCluster {
     }
 
     pub async fn start_node(&mut self, id: usize) -> anyhow::Result<()> {
-        let node = self.nodes.get_mut(&id).ok_or_else(|| {
-            anyhow::anyhow!("node {id} not found")
-        })?;
+        let node = self
+            .nodes
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("node {id} not found"))?;
 
         if node.state == NodeTestState::Running {
             return Ok(());
@@ -225,9 +225,10 @@ impl TestCluster {
     }
 
     pub async fn ssh_exec(&self, node_id: usize, cmd: &str) -> anyhow::Result<String> {
-        let node = self.nodes.get(&node_id).ok_or_else(|| {
-            anyhow::anyhow!("node {node_id} not found")
-        })?;
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| anyhow::anyhow!("node {node_id} not found"))?;
 
         let ssh_key = self.config.work_dir.join("id_test");
         let output = Command::new("ssh")
@@ -256,15 +257,11 @@ impl TestCluster {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    pub async fn scp_to(
-        &self,
-        node_id: usize,
-        local: &Path,
-        remote: &str,
-    ) -> anyhow::Result<()> {
-        let node = self.nodes.get(&node_id).ok_or_else(|| {
-            anyhow::anyhow!("node {node_id} not found")
-        })?;
+    pub async fn scp_to(&self, node_id: usize, local: &Path, remote: &str) -> anyhow::Result<()> {
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| anyhow::anyhow!("node {node_id} not found"))?;
 
         let ssh_key = self.config.work_dir.join("id_test");
         let status = Command::new("scp")
@@ -315,9 +312,10 @@ impl TestCluster {
     }
 
     pub async fn start_blockyard(&self, node_id: usize) -> anyhow::Result<()> {
-        let node = self.nodes.get(&node_id).ok_or_else(|| {
-            anyhow::anyhow!("node {node_id} not found")
-        })?;
+        let node = self
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| anyhow::anyhow!("node {node_id} not found"))?;
 
         let seeds: Vec<String> = self
             .seed_addrs()

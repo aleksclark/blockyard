@@ -55,12 +55,14 @@ impl MemberList {
             node.state = state;
             if old_state != state {
                 let update = match state {
-                    NodeState::Suspect => {
-                        GossipUpdate::NodeSuspect { node: id, incarnation: node.incarnation }
-                    }
-                    NodeState::Failed => {
-                        GossipUpdate::NodeDead { node: id, incarnation: node.incarnation }
-                    }
+                    NodeState::Suspect => GossipUpdate::NodeSuspect {
+                        node: id,
+                        incarnation: node.incarnation,
+                    },
+                    NodeState::Failed => GossipUpdate::NodeDead {
+                        node: id,
+                        incarnation: node.incarnation,
+                    },
                     NodeState::Left => GossipUpdate::NodeLeft { node: id },
                     _ => GossipUpdate::NodeAlive(node.clone()),
                 };
@@ -72,9 +74,10 @@ impl MemberList {
     pub fn mark_zfs_health(&self, id: NodeId, health: ZfsHealthState) {
         if let Some(node) = self.inner.write().get_mut(&id) {
             node.zfs_health = health;
-            self.pending_updates.write().push(
-                GossipUpdate::ZfsHealth { node: id, state: health },
-            );
+            self.pending_updates.write().push(GossipUpdate::ZfsHealth {
+                node: id,
+                state: health,
+            });
         }
     }
 
@@ -136,9 +139,7 @@ impl MemberList {
         self.inner
             .read()
             .values()
-            .filter(|n| {
-                n.state == NodeState::Healthy && n.zfs_health == ZfsHealthState::Online
-            })
+            .filter(|n| n.state == NodeState::Healthy && n.zfs_health == ZfsHealthState::Online)
             .cloned()
             .collect()
     }
@@ -325,7 +326,10 @@ mod tests {
     fn test_apply_update_node_suspect() {
         let ml = MemberList::new();
         ml.upsert(make_node(1, 1));
-        ml.apply_update(&GossipUpdate::NodeSuspect { node: 1, incarnation: 1 });
+        ml.apply_update(&GossipUpdate::NodeSuspect {
+            node: 1,
+            incarnation: 1,
+        });
         assert_eq!(ml.get(1).unwrap().state, NodeState::Suspect);
     }
 
@@ -333,7 +337,10 @@ mod tests {
     fn test_apply_update_node_suspect_stale_incarnation() {
         let ml = MemberList::new();
         ml.upsert(make_node(1, 5));
-        ml.apply_update(&GossipUpdate::NodeSuspect { node: 1, incarnation: 3 });
+        ml.apply_update(&GossipUpdate::NodeSuspect {
+            node: 1,
+            incarnation: 3,
+        });
         assert_eq!(ml.get(1).unwrap().state, NodeState::Healthy);
     }
 
@@ -341,7 +348,10 @@ mod tests {
     fn test_apply_update_node_dead() {
         let ml = MemberList::new();
         ml.upsert(make_node(1, 1));
-        ml.apply_update(&GossipUpdate::NodeDead { node: 1, incarnation: 1 });
+        ml.apply_update(&GossipUpdate::NodeDead {
+            node: 1,
+            incarnation: 1,
+        });
         assert_eq!(ml.get(1).unwrap().state, NodeState::Failed);
     }
 

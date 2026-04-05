@@ -21,6 +21,8 @@ enum Command {
     Volume(VolumeCommand),
     #[command(subcommand)]
     Node(NodeCommand),
+    #[command(subcommand)]
+    Rebalance(RebalanceCommand),
     Mount {
         name: String,
         #[arg(long)]
@@ -73,12 +75,14 @@ enum VolumeCommand {
 #[derive(Subcommand)]
 enum NodeCommand {
     List,
-    Status {
-        name: String,
-    },
-    Drain {
-        name: String,
-    },
+    Status { name: String },
+    Drain { name: String },
+}
+
+#[derive(Subcommand)]
+enum RebalanceCommand {
+    /// Show active and recent rebalance moves with progress
+    Status,
 }
 
 #[tokio::main]
@@ -106,8 +110,8 @@ async fn main() -> anyhow::Result<()> {
                     replicas,
                     ..
                 } => {
-                    let size_bytes = blockyard_common::parse_size(&size)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let size_bytes =
+                        blockyard_common::parse_size(&size).map_err(|e| anyhow::anyhow!("{e}"))?;
                     let resp = raft.propose(
                         0,
                         &blockyard_raft::types::RaftRequest::VolumeCreate {
@@ -130,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
                     if state.volumes.is_empty() {
                         println!("No volumes.");
                     } else {
-                        println!("{:<20} {:>10} {:>8} {}", "NAME", "SIZE", "REPLICAS", "NODES");
+                        println!("{:<20} {:>10} {:>8} NODES", "NAME", "SIZE", "REPLICAS");
                         for vol in state.volumes.values() {
                             let size_str = format_size(vol.size_bytes);
                             let nodes_str = if vol.placement.is_empty() {
@@ -173,8 +177,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 VolumeCommand::Resize { name, size } => {
-                    let new_size = blockyard_common::parse_size(&size)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let new_size =
+                        blockyard_common::parse_size(&size).map_err(|e| anyhow::anyhow!("{e}"))?;
                     let resp = raft.propose(
                         0,
                         &blockyard_raft::types::RaftRequest::VolumeResize {
@@ -197,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
                 if state.nodes.is_empty() {
                     println!("No nodes registered.");
                 } else {
-                    println!("{:<10} {:<20} {}", "ID", "ADDRESS", "STATUS");
+                    println!("{:<10} {:<20} STATUS", "ID", "ADDRESS");
                     for node in state.nodes.values() {
                         println!("{:<10} {:<20} healthy", node.node_id, node.addr);
                     }
@@ -212,6 +216,36 @@ async fn main() -> anyhow::Result<()> {
             }
             NodeCommand::Drain { name } => {
                 println!("Draining node '{name}'...");
+            }
+        },
+        Command::Rebalance(cmd) => match cmd {
+            RebalanceCommand::Status => {
+                let raft = blockyard_raft::MultiRaft::new(0);
+                raft.create_group(blockyard_raft::meta_group::MetaGroup::group_id())?;
+                let state = raft.get_state(0).unwrap_or_default();
+
+                let rebalancing: Vec<_> = state
+                    .volumes
+                    .values()
+                    .filter(|v| v.rebalance_state.is_some())
+                    .collect();
+
+                if rebalancing.is_empty() {
+                    println!("No active rebalance operations.");
+                } else {
+                    println!(
+                        "{:<20} {:>8} {:>8} {:>10}",
+                        "VOLUME", "SOURCE", "TARGET", "PHASE"
+                    );
+                    for vol in rebalancing {
+                        if let Some(ref rs) = vol.rebalance_state {
+                            println!(
+                                "{:<20} {:>8} {:>8} {:>10}",
+                                vol.name, rs.source, rs.target, rs.phase
+                            );
+                        }
+                    }
+                }
             }
         },
         Command::Mount {
