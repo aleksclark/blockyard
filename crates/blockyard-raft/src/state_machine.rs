@@ -4,6 +4,35 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Tracks the state of an in-progress rebalance operation for a volume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RebalanceState {
+    /// Node the volume replica is moving from.
+    pub source: u64,
+    /// Node the volume replica is moving to.
+    pub target: u64,
+    /// Current phase of the rebalance.
+    pub phase: RebalancePhase,
+}
+
+/// Lifecycle phases of a volume rebalance tracked in the state machine.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RebalancePhase {
+    Syncing,
+    Completed,
+    Failed(String),
+}
+
+impl std::fmt::Display for RebalancePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Syncing => write!(f, "syncing"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed(reason) => write!(f, "failed: {reason}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
     pub volumes: HashMap<String, VolumeRecord>,
@@ -17,6 +46,9 @@ pub struct VolumeRecord {
     pub size_bytes: u64,
     pub replicas: u32,
     pub placement: Vec<u64>,
+    /// Tracks an ongoing rebalance operation, if any.
+    #[serde(default)]
+    pub rebalance_state: Option<RebalanceState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +86,7 @@ impl StateMachine {
                         size_bytes: *size_bytes,
                         replicas: *replicas,
                         placement: Vec::new(),
+                        rebalance_state: None,
                     },
                 );
                 RaftResponse::Ok
@@ -93,6 +126,42 @@ impl StateMachine {
                 RaftResponse::Ok
             }
             RaftRequest::Write { .. } => RaftResponse::Ok,
+            RaftRequest::RebalanceStart { volume_name, source, target } => {
+                if let Some(vol) = state.volumes.get_mut(volume_name) {
+                    vol.rebalance_state = Some(RebalanceState {
+                        source: *source,
+                        target: *target,
+                        phase: RebalancePhase::Syncing,
+                    });
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {volume_name}"))
+                }
+            }
+            RaftRequest::RebalanceComplete { volume_name } => {
+                if let Some(vol) = state.volumes.get_mut(volume_name) {
+                    if let Some(ref mut rs) = vol.rebalance_state {
+                        // Update placement: replace source with target.
+                        if let Some(pos) = vol.placement.iter().position(|&n| n == rs.source) {
+                            vol.placement[pos] = rs.target;
+                        }
+                        rs.phase = RebalancePhase::Completed;
+                    }
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {volume_name}"))
+                }
+            }
+            RaftRequest::RebalanceFail { volume_name, reason } => {
+                if let Some(vol) = state.volumes.get_mut(volume_name) {
+                    if let Some(ref mut rs) = vol.rebalance_state {
+                        rs.phase = RebalancePhase::Failed(reason.clone());
+                    }
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {volume_name}"))
+                }
+            }
         }
     }
 
@@ -147,6 +216,7 @@ mod tests {
         let state = sm.state();
         assert!(state.volumes.contains_key("vol-1"));
         assert_eq!(state.volumes["vol-1"].replicas, 3);
+        assert!(state.volumes["vol-1"].rebalance_state.is_none());
         assert_eq!(state.applied_index, 1);
     }
 
@@ -313,5 +383,201 @@ mod tests {
         }
         assert_eq!(sm.state().volumes.len(), 10);
         assert_eq!(sm.state().applied_index, 10);
+    }
+
+    // ── Rebalance state machine tests ───────────────────────────────────
+
+    #[test]
+    fn test_apply_rebalance_start() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "vol-1".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::PlacementUpdate {
+                volume_name: "vol-1".into(),
+                nodes: vec![1, 2, 3],
+            },
+        );
+        let resp = sm.apply(
+            3,
+            &RaftRequest::RebalanceStart {
+                volume_name: "vol-1".into(),
+                source: 1,
+                target: 4,
+            },
+        );
+        assert_eq!(resp, RaftResponse::Ok);
+        let vol = &sm.state().volumes["vol-1"];
+        let rs = vol.rebalance_state.as_ref().unwrap();
+        assert_eq!(rs.source, 1);
+        assert_eq!(rs.target, 4);
+        assert_eq!(rs.phase, RebalancePhase::Syncing);
+    }
+
+    #[test]
+    fn test_apply_rebalance_start_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(
+            1,
+            &RaftRequest::RebalanceStart {
+                volume_name: "nonexistent".into(),
+                source: 1,
+                target: 2,
+            },
+        );
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_apply_rebalance_complete() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "vol-1".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::PlacementUpdate {
+                volume_name: "vol-1".into(),
+                nodes: vec![1, 2, 3],
+            },
+        );
+        sm.apply(
+            3,
+            &RaftRequest::RebalanceStart {
+                volume_name: "vol-1".into(),
+                source: 1,
+                target: 4,
+            },
+        );
+        let resp = sm.apply(
+            4,
+            &RaftRequest::RebalanceComplete {
+                volume_name: "vol-1".into(),
+            },
+        );
+        assert_eq!(resp, RaftResponse::Ok);
+        let vol = &sm.state().volumes["vol-1"];
+        // Placement should have 4 replacing 1.
+        assert!(vol.placement.contains(&4));
+        assert!(!vol.placement.contains(&1));
+        assert_eq!(vol.placement.len(), 3);
+        let rs = vol.rebalance_state.as_ref().unwrap();
+        assert_eq!(rs.phase, RebalancePhase::Completed);
+    }
+
+    #[test]
+    fn test_apply_rebalance_complete_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(
+            1,
+            &RaftRequest::RebalanceComplete {
+                volume_name: "nonexistent".into(),
+            },
+        );
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_apply_rebalance_fail() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "vol-1".into(),
+                size_bytes: 1024,
+                replicas: 3,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::RebalanceStart {
+                volume_name: "vol-1".into(),
+                source: 1,
+                target: 2,
+            },
+        );
+        let resp = sm.apply(
+            3,
+            &RaftRequest::RebalanceFail {
+                volume_name: "vol-1".into(),
+                reason: "disk error".into(),
+            },
+        );
+        assert_eq!(resp, RaftResponse::Ok);
+        let vol = &sm.state().volumes["vol-1"];
+        let rs = vol.rebalance_state.as_ref().unwrap();
+        assert_eq!(rs.phase, RebalancePhase::Failed("disk error".into()));
+    }
+
+    #[test]
+    fn test_apply_rebalance_fail_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(
+            1,
+            &RaftRequest::RebalanceFail {
+                volume_name: "nonexistent".into(),
+                reason: "nope".into(),
+            },
+        );
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_rebalance_state_snapshot_restore() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::VolumeCreate {
+                name: "vol-1".into(),
+                size_bytes: 1024,
+                replicas: 2,
+            },
+        );
+        sm.apply(
+            2,
+            &RaftRequest::PlacementUpdate {
+                volume_name: "vol-1".into(),
+                nodes: vec![1, 2],
+            },
+        );
+        sm.apply(
+            3,
+            &RaftRequest::RebalanceStart {
+                volume_name: "vol-1".into(),
+                source: 1,
+                target: 3,
+            },
+        );
+
+        let snap = sm.snapshot();
+        let sm2 = StateMachine::new();
+        sm2.restore(&snap).unwrap();
+        let vol = &sm2.state().volumes["vol-1"];
+        let rs = vol.rebalance_state.as_ref().unwrap();
+        assert_eq!(rs.source, 1);
+        assert_eq!(rs.target, 3);
+        assert_eq!(rs.phase, RebalancePhase::Syncing);
+    }
+
+    #[test]
+    fn test_rebalance_phase_display() {
+        assert_eq!(RebalancePhase::Syncing.to_string(), "syncing");
+        assert_eq!(RebalancePhase::Completed.to_string(), "completed");
+        assert_eq!(
+            RebalancePhase::Failed("timeout".into()).to_string(),
+            "failed: timeout"
+        );
     }
 }
