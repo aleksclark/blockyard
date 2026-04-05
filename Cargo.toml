@@ -9,6 +9,7 @@ members = [
     "crates/blockyard-raft",
     "crates/blockyard-storage",
     "crates/blockyard-ublk",
+    "tests",
 ]
 
 [workspace.package]
@@ -21,7 +22,8 @@ rust-version = "1.85"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["codec"] }
 
 # Raft consensus
 openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
@@ -33,6 +35,7 @@ toml = "0.8"
 
 # Networking
 tonic = "0.12"
+tonic-build = "0.12"
 prost = "0.13"
 quinn = "0.11"
 
