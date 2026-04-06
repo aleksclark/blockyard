@@ -4,6 +4,7 @@ mod harness;
 use harness::checker::Checker;
 use harness::cluster::{ClusterConfig, TestCluster};
 use harness::faults::{Fault, FaultInjector};
+use harness::workload::{WorkloadConfig, WorkloadGenerator};
 use std::time::Duration;
 
 fn require_vm_env() -> bool {
@@ -173,4 +174,47 @@ async fn asymmetric_partition_cluster_survives() {
         .inject(&Fault::NetworkReset { node_id: 0 })
         .await
         .unwrap();
+}
+
+/// Reproduces: data written to the block protocol is not readable back.
+/// mkfs.ext4 writes superblock data, but mount fails because reads return
+/// all zeros instead of the written data. This test writes a known pattern
+/// via the block protocol TCP path and reads it back, asserting equality.
+#[tokio::test]
+#[ignore]
+async fn write_then_read_returns_written_data() {
+    if !require_vm_env() {
+        return;
+    }
+    let cluster = running_cluster(5);
+    harness::ensure_all_nodes_running(&cluster).await;
+
+    let target = cluster.running_nodes()[0].blockyard_addr();
+    let config = WorkloadConfig {
+        targets: vec![target],
+        duration: Duration::from_secs(5),
+        write_interval: Duration::from_millis(100),
+        read_interval: Duration::from_millis(50),
+        block_size: 4096,
+        max_offset: 64 * 1024,
+        volume_id: 1,
+    };
+
+    let pattern: Vec<u8> = (0..4096u16).map(|i| (i % 256) as u8).collect();
+    let offset = 0u64;
+
+    let write_ok = WorkloadGenerator::send_write(&config, 1, offset, &pattern)
+        .await
+        .expect("write should succeed");
+    assert!(write_ok, "write was not acknowledged");
+
+    let read_data = WorkloadGenerator::send_read(&config, 2, offset, 4096)
+        .await
+        .expect("read should succeed");
+
+    assert_eq!(
+        read_data.as_ref(),
+        pattern.as_slice(),
+        "read data does not match written data — reads are returning wrong content"
+    );
 }

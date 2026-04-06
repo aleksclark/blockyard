@@ -260,7 +260,7 @@ impl WorkloadGenerator {
         self.running.store(false, Ordering::Relaxed);
     }
 
-    async fn connect(config: &WorkloadConfig) -> anyhow::Result<TcpStream> {
+    pub async fn connect(config: &WorkloadConfig) -> anyhow::Result<TcpStream> {
         for target in &config.targets {
             match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(target)).await
             {
@@ -274,7 +274,7 @@ impl WorkloadGenerator {
         anyhow::bail!("could not connect to any target")
     }
 
-    async fn send_write(
+    pub async fn send_write(
         config: &WorkloadConfig,
         request_id: u64,
         offset: u64,
@@ -311,7 +311,7 @@ impl WorkloadGenerator {
         .map_err(|_| anyhow::anyhow!("write timeout"))?
     }
 
-    async fn send_read(
+    pub async fn send_read(
         config: &WorkloadConfig,
         request_id: u64,
         offset: u64,

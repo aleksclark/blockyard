@@ -9,6 +9,7 @@ use blockyard_raft::network::RaftNetwork;
 use blockyard_raft::types::RaftRequest;
 use blockyard_storage::backend::MemoryBackend;
 use blockyard_storage::{HealthMonitor, PlacementEngine};
+use blockyard_ublk::nbd::MemBlockStore;
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +23,7 @@ use blockyard_common::types::{NodeId, NodeInfo, NodeState, ZfsHealthState};
 
 struct BlockHandler {
     raft: Arc<MultiRaft>,
-    #[allow(dead_code)]
-    backend: Arc<MemoryBackend>,
+    store: Arc<MemBlockStore>,
 }
 
 impl RequestHandler for BlockHandler {
@@ -33,7 +33,6 @@ impl RequestHandler for BlockHandler {
         offset: u64,
         data: Bytes,
     ) -> Result<(), WireStatus> {
-        // Propose the write through Raft for replication.
         let req = RaftRequest::Write {
             volume_id,
             offset,
@@ -45,19 +44,18 @@ impl RequestHandler for BlockHandler {
             WireStatus::IoError
         })?;
 
+        self.store.write(offset, &data);
         Ok(())
     }
 
     async fn handle_read(
         &self,
         _volume_id: u64,
-        _offset: u64,
+        offset: u64,
         length: u32,
     ) -> Result<Bytes, WireStatus> {
-        // Read from the in-memory backend. The MemoryBackend doesn't have
-        // block-level read; return zeroes for now (matches memory-backed
-        // semantics where unwritten regions are zero).
-        Ok(Bytes::from(vec![0u8; length as usize]))
+        let data = self.store.read(offset, length);
+        Ok(Bytes::from(data))
     }
 
     async fn handle_flush(&self, _volume_id: u64) -> Result<(), WireStatus> {
@@ -175,10 +173,11 @@ impl BlockyardNode {
             1024 * 1024 * 1024 * 100,
         ));
 
-        // 6. Create BlockHandler
+        // 6. Create BlockHandler with in-memory block store (10GB)
+        let block_store = Arc::new(MemBlockStore::new(10 * 1024 * 1024 * 1024, 4096));
         let handler = BlockHandler {
             raft: Arc::clone(&self.raft),
-            backend: Arc::clone(&backend),
+            store: block_store,
         };
 
         // 7. Spawn ProtocolServer on config.node.listen

@@ -199,3 +199,15 @@ Before submitting work:
 6. `ROADMAP.md` updated if a task is completed
 7. No `TODO` without a tracking issue reference
 8. No `unsafe` without a `// SAFETY:` comment explaining the invariant
+
+## Bug Fix Rule
+
+**Every bug fix MUST begin with a failing test that reproduces the bug.** Do not read the source code or attempt a fix until the test exists and fails. The workflow is:
+
+1. Write an integration test (preferred) or unit test that exercises the exact failing behavior reported
+2. Run the test and confirm it fails for the expected reason
+3. Only then investigate the source code and implement the fix
+4. Run the test again and confirm it passes
+5. Run the full test suite to confirm no regressions
+
+This applies to all bugs — whether found by users, CI, or during development. No exceptions.
