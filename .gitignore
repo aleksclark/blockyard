@@ -1,3 +1,4 @@
 /target
 tests/images/*.img
+tests/images/*.qcow2
 tests/.work/

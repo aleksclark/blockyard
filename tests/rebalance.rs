@@ -20,12 +20,17 @@ fn running_cluster(node_count: usize) -> TestCluster {
 #[tokio::test]
 #[ignore]
 async fn crash_during_operation() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
     let injector = FaultInjector::new(&cluster);
-    injector.inject(&Fault::NodeCrash { node_id: 4 }).await.unwrap();
+    injector
+        .inject(&Fault::NodeCrash { node_id: 4 })
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let health = Checker::check_blockyard_running(&cluster, 4).await;
@@ -40,7 +45,9 @@ async fn crash_during_operation() {
 #[tokio::test]
 #[ignore]
 async fn all_nodes_healthy_after_recovery() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
@@ -54,12 +61,17 @@ async fn all_nodes_healthy_after_recovery() {
 #[tokio::test]
 #[ignore]
 async fn node_drain_cluster_survives() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
     let injector = FaultInjector::new(&cluster);
-    injector.inject(&Fault::NodeCrash { node_id: 3 }).await.unwrap();
+    injector
+        .inject(&Fault::NodeCrash { node_id: 3 })
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let health = Checker::check_blockyard_running(&cluster, 4).await;
@@ -74,7 +86,9 @@ async fn node_drain_cluster_survives() {
 #[tokio::test]
 #[ignore]
 async fn volume_resize_cluster_healthy() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
@@ -90,7 +104,9 @@ async fn volume_resize_cluster_healthy() {
 #[tokio::test]
 #[ignore]
 async fn change_replicas_cluster_healthy() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 
@@ -106,7 +122,9 @@ async fn change_replicas_cluster_healthy() {
 #[tokio::test]
 #[ignore]
 async fn change_consistency_mode_cluster_healthy() {
-    if !require_vm_env() { return; }
+    if !require_vm_env() {
+        return;
+    }
     let cluster = running_cluster(5);
     harness::ensure_all_nodes_running(&cluster).await;
 

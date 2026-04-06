@@ -406,10 +406,30 @@ mod tests {
     fn test_place_volume_multi_tag_affinity() {
         let engine = PlacementEngine::new();
         let candidates = vec![
-            make_node(1, &[("region", "us-east"), ("storage_class", "ssd")], gb(100), 0),
-            make_node(2, &[("region", "us-east"), ("storage_class", "hdd")], gb(100), 0),
-            make_node(3, &[("region", "us-east"), ("storage_class", "ssd")], gb(100), 0),
-            make_node(4, &[("region", "us-west"), ("storage_class", "ssd")], gb(100), 0),
+            make_node(
+                1,
+                &[("region", "us-east"), ("storage_class", "ssd")],
+                gb(100),
+                0,
+            ),
+            make_node(
+                2,
+                &[("region", "us-east"), ("storage_class", "hdd")],
+                gb(100),
+                0,
+            ),
+            make_node(
+                3,
+                &[("region", "us-east"), ("storage_class", "ssd")],
+                gb(100),
+                0,
+            ),
+            make_node(
+                4,
+                &[("region", "us-west"), ("storage_class", "ssd")],
+                gb(100),
+                0,
+            ),
         ];
         let mut spec = make_spec(2);
         spec.affinity.insert("region".into(), "us-east".into());

@@ -1,7 +1,6 @@
 use blockyard_common::types::NodeId;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
@@ -52,12 +51,7 @@ impl DrainEngine {
         }
     }
 
-    pub fn enqueue_move(
-        &self,
-        volume_name: String,
-        source_node: NodeId,
-        target_node: NodeId,
-    ) {
+    pub fn enqueue_move(&self, volume_name: String, source_node: NodeId, target_node: NodeId) {
         self.moves.lock().push(DrainMove {
             volume_name,
             source_node,
@@ -68,7 +62,10 @@ impl DrainEngine {
 
     pub fn start_migrating(&self, volume_name: &str) -> bool {
         let mut moves = self.moves.lock();
-        if let Some(m) = moves.iter_mut().find(|m| m.volume_name == volume_name && m.state == DrainMoveState::Pending) {
+        if let Some(m) = moves
+            .iter_mut()
+            .find(|m| m.volume_name == volume_name && m.state == DrainMoveState::Pending)
+        {
             m.state = DrainMoveState::Migrating;
             true
         } else {
@@ -78,7 +75,10 @@ impl DrainEngine {
 
     pub fn complete_move(&self, volume_name: &str) -> bool {
         let mut moves = self.moves.lock();
-        if let Some(m) = moves.iter_mut().find(|m| m.volume_name == volume_name && m.state == DrainMoveState::Migrating) {
+        if let Some(m) = moves
+            .iter_mut()
+            .find(|m| m.volume_name == volume_name && m.state == DrainMoveState::Migrating)
+        {
             m.state = DrainMoveState::Completed;
             info!(volume = %volume_name, "drain move completed");
             true
@@ -89,7 +89,10 @@ impl DrainEngine {
 
     pub fn fail_move(&self, volume_name: &str) -> bool {
         let mut moves = self.moves.lock();
-        if let Some(m) = moves.iter_mut().find(|m| m.volume_name == volume_name && m.state == DrainMoveState::Migrating) {
+        if let Some(m) = moves
+            .iter_mut()
+            .find(|m| m.volume_name == volume_name && m.state == DrainMoveState::Migrating)
+        {
             m.state = DrainMoveState::Failed;
             true
         } else {
@@ -99,23 +102,29 @@ impl DrainEngine {
 
     pub fn progress(&self, node_id: NodeId) -> DrainProgress {
         let moves = self.moves.lock();
-        let node_moves: Vec<&DrainMove> = moves
-            .iter()
-            .filter(|m| m.source_node == node_id)
-            .collect();
+        let node_moves: Vec<&DrainMove> =
+            moves.iter().filter(|m| m.source_node == node_id).collect();
         DrainProgress {
             node_id,
             total_volumes: node_moves.len(),
-            completed: node_moves.iter().filter(|m| m.state == DrainMoveState::Completed).count(),
-            failed: node_moves.iter().filter(|m| m.state == DrainMoveState::Failed).count(),
-            in_progress: node_moves.iter().filter(|m| m.state == DrainMoveState::Migrating).count(),
+            completed: node_moves
+                .iter()
+                .filter(|m| m.state == DrainMoveState::Completed)
+                .count(),
+            failed: node_moves
+                .iter()
+                .filter(|m| m.state == DrainMoveState::Failed)
+                .count(),
+            in_progress: node_moves
+                .iter()
+                .filter(|m| m.state == DrainMoveState::Migrating)
+                .count(),
         }
     }
 
     pub fn is_drain_complete(&self, node_id: NodeId) -> bool {
         let progress = self.progress(node_id);
-        progress.total_volumes > 0
-            && progress.completed + progress.failed == progress.total_volumes
+        progress.total_volumes > 0 && progress.completed + progress.failed == progress.total_volumes
     }
 
     pub fn all_moves(&self) -> Vec<DrainMove> {

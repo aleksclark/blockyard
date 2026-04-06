@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+libublk = ["dep:libublk"]
+
 [dependencies]
 blockyard-common = { workspace = true }
 blockyard-protocol = { workspace = true }
@@ -15,3 +19,6 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 bytes = { workspace = true }
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libublk = { workspace = true, optional = true }

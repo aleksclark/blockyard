@@ -129,7 +129,9 @@ mod tests {
     #[test]
     fn test_validate_known_token() {
         let store = sample_store();
-        let info = store.validate_token("tok-admin").expect("token should exist");
+        let info = store
+            .validate_token("tok-admin")
+            .expect("token should exist");
         assert_eq!(info.client_name, "admin-client");
     }
 

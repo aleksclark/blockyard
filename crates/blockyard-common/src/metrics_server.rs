@@ -51,7 +51,10 @@ mod tests {
     fn test_metrics_server_new() {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let server = MetricsServer::new(addr);
-        assert_eq!(format!("{:?}", server), format!("MetricsServer {{ addr: {addr} }}"));
+        assert_eq!(
+            format!("{:?}", server),
+            format!("MetricsServer {{ addr: {addr} }}")
+        );
     }
 
     // NOTE: We intentionally do **not** call `start()` in unit tests because

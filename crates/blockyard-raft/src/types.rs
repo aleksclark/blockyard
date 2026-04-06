@@ -247,32 +247,44 @@ mod tests {
                 },
                 "RebalanceFail(v, err)",
             ),
-            (
-                RaftRequest::NodeDrain { node_id: 5 },
-                "NodeDrain(5)",
-            ),
+            (RaftRequest::NodeDrain { node_id: 5 }, "NodeDrain(5)"),
             (
                 RaftRequest::NodeDrainComplete { node_id: 5 },
                 "NodeDrainComplete(5)",
             ),
             (
-                RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 },
+                RaftRequest::VolumeSetReplicas {
+                    name: "v".into(),
+                    replicas: 5,
+                },
                 "VolumeSetReplicas(v, 5)",
             ),
             (
-                RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() },
+                RaftRequest::VolumeSetConsistency {
+                    name: "v".into(),
+                    consistency: "all".into(),
+                },
                 "VolumeSetConsistency(v, all)",
             ),
             (
-                RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() },
+                RaftRequest::VolumeSetReadPolicy {
+                    name: "v".into(),
+                    read_policy: "leader".into(),
+                },
                 "VolumeSetReadPolicy(v, leader)",
             ),
             (
-                RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "snap1".into() },
+                RaftRequest::VolumeSnapshot {
+                    name: "v".into(),
+                    snap_name: "snap1".into(),
+                },
                 "VolumeSnapshot(v, snap1)",
             ),
             (
-                RaftRequest::VolumeSnapshotDelete { name: "v".into(), snap_name: "snap1".into() },
+                RaftRequest::VolumeSnapshotDelete {
+                    name: "v".into(),
+                    snap_name: "snap1".into(),
+                },
                 "VolumeSnapshotDelete(v, snap1)",
             ),
             (
@@ -326,11 +338,26 @@ mod tests {
             },
             RaftRequest::NodeDrain { node_id: 1 },
             RaftRequest::NodeDrainComplete { node_id: 1 },
-            RaftRequest::VolumeSetReplicas { name: "v".into(), replicas: 5 },
-            RaftRequest::VolumeSetConsistency { name: "v".into(), consistency: "all".into() },
-            RaftRequest::VolumeSetReadPolicy { name: "v".into(), read_policy: "leader".into() },
-            RaftRequest::VolumeSnapshot { name: "v".into(), snap_name: "s1".into() },
-            RaftRequest::VolumeSnapshotDelete { name: "v".into(), snap_name: "s1".into() },
+            RaftRequest::VolumeSetReplicas {
+                name: "v".into(),
+                replicas: 5,
+            },
+            RaftRequest::VolumeSetConsistency {
+                name: "v".into(),
+                consistency: "all".into(),
+            },
+            RaftRequest::VolumeSetReadPolicy {
+                name: "v".into(),
+                read_policy: "leader".into(),
+            },
+            RaftRequest::VolumeSnapshot {
+                name: "v".into(),
+                snap_name: "s1".into(),
+            },
+            RaftRequest::VolumeSnapshotDelete {
+                name: "v".into(),
+                snap_name: "s1".into(),
+            },
             RaftRequest::VolumeSnapshotList { name: "v".into() },
         ];
         for v in &variants {
