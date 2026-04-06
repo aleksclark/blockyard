@@ -187,6 +187,8 @@ deploy_blockyard() {
         return 1
     fi
 
+    ssh_node "$node_id" "pkill -9 blockyard 2>/dev/null; sleep 1" 2>/dev/null || true
+
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -i "$WORK_DIR/id_test" \
         -P "$ssh_port" "$binary" root@127.0.0.1:/usr/local/bin/blockyard

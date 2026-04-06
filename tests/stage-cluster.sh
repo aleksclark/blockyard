@@ -120,6 +120,7 @@ deploy() {
     local binary="$PROJECT_ROOT/target/release/blockyard"
     [ -f "$binary" ] || { echo "ERROR: build first: cargo build --release --features blockyard-ublk/libublk"; exit 1; }
     for i in $(seq 0 $((NODE_COUNT - 1))); do
+        ssh_node $i "pkill -9 blockyard 2>/dev/null; sleep 1" 2>/dev/null || true
         scp $SSH_OPTS -P "$(ssh_port $i)" "$binary" root@127.0.0.1:/usr/local/bin/blockyard
         echo "${PREFIX}-${i}: deployed"
     done
