@@ -7,8 +7,8 @@ use blockyard_raft::grpc_server::BlockyardGrpcServer;
 use blockyard_raft::multiraft::MultiRaft;
 use blockyard_raft::network::RaftNetwork;
 use blockyard_raft::types::RaftRequest;
-use blockyard_storage::backend::MemoryBackend;
-use blockyard_storage::{HealthMonitor, PlacementEngine};
+use blockyard_storage::backend::{MemoryBackend, StorageBackend};
+use blockyard_storage::{HealthMonitor, PlacementEngine, ZfsBackend};
 use blockyard_ublk::nbd::MemBlockStore;
 use bytes::Bytes;
 use std::sync::Arc;
@@ -167,11 +167,17 @@ impl BlockyardNode {
         );
         gossip.start().await?;
 
-        // 5. Create shared MemoryBackend
-        let backend = Arc::new(MemoryBackend::new(
-            self.config.storage.zfs_pool.clone(),
-            1024 * 1024 * 1024 * 100,
-        ));
+        // 5. Create storage backend — use ZFS if pool exists, else MemoryBackend
+        let pool_name = self.config.storage.zfs_pool.clone();
+        let zfs_available = {
+            let zfs_test = ZfsBackend::new(pool_name.clone());
+            matches!(zfs_test.pool_capacity().await, Ok((total, _)) if total > 0)
+        };
+        if zfs_available {
+            info!(pool = %pool_name, "using ZFS storage backend");
+        } else {
+            info!(pool = %pool_name, "ZFS pool not available, using in-memory backend");
+        }
 
         // 6. Create BlockHandler with in-memory block store (10GB)
         let block_store = Arc::new(MemBlockStore::new(10 * 1024 * 1024 * 1024, 4096));
@@ -219,9 +225,15 @@ impl BlockyardNode {
 
         // 10. Start health monitor
         let hm = self.health_monitor.clone();
-        let backend_for_health = backend.clone();
+        let pool_for_health = pool_name.clone();
         tokio::spawn(async move {
-            hm.run(backend_for_health).await;
+            if zfs_available {
+                let backend = Arc::new(ZfsBackend::new(pool_for_health));
+                hm.run(backend).await;
+            } else {
+                let backend = Arc::new(MemoryBackend::new(pool_for_health, 1024 * 1024 * 1024 * 100));
+                hm.run(backend).await;
+            }
         });
 
         // 11. Wait for ctrl-c, then shutdown

@@ -49,6 +49,9 @@ ssh_pwauth: false
 runcmd:
   - modprobe ublk_drv || true
   - modprobe nbd || true
+  - dnf install -y --allowerasing 'https://zfsonlinux.org/fedora/zfs-release-3-0.fc42.noarch.rpm' kernel-devel-\$(uname -r) zfs-dkms zfs > /var/log/zfs-install.log 2>&1 || true
+  - modprobe zfs || true
+  - zpool list blockyard 2>/dev/null || zpool create -f blockyard /dev/vdb 2>/dev/null || true
   - echo "${name} ready" > /tmp/ready
 EOF
     mkisofs -output "$WORK_DIR/${name}-seed.iso" -volid cidata -joliet -rock \

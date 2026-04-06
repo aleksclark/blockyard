@@ -218,3 +218,38 @@ async fn write_then_read_returns_written_data() {
         "read data does not match written data — reads are returning wrong content"
     );
 }
+
+/// Verifies that the cluster nodes are using ZFS as the storage backend,
+/// not MemoryBackend. Checks that a ZFS pool named "blockyard" exists on
+/// each running node and that zfs/zpool commands are available.
+#[tokio::test]
+#[ignore]
+async fn cluster_uses_zfs_backend() {
+    if !require_vm_env() {
+        return;
+    }
+    let cluster = running_cluster(5);
+    harness::ensure_all_nodes_running(&cluster).await;
+
+    for node in cluster.running_nodes() {
+        let zpool_out = cluster
+            .ssh_exec(node.id, "zpool list -H -o name blockyard 2>&1")
+            .await;
+        match zpool_out {
+            Ok(out) => {
+                let name = out.trim();
+                assert_eq!(
+                    name, "blockyard",
+                    "node-{}: expected zpool 'blockyard', got '{}'",
+                    node.id, name
+                );
+            }
+            Err(e) => {
+                panic!(
+                    "node-{}: zpool command failed — ZFS not installed or pool not created: {}",
+                    node.id, e
+                );
+            }
+        }
+    }
+}

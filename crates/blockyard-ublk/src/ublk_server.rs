@@ -42,10 +42,12 @@ pub struct UblkServer {
     state: Arc<std::sync::atomic::AtomicU8>,
     device_path: Arc<parking_lot::Mutex<Option<PathBuf>>>,
     worker: Arc<parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    store: Arc<crate::nbd::MemBlockStore>,
 }
 
 impl UblkServer {
     pub fn new(config: UblkServerConfig, volume_size: u64) -> Self {
+        let store = Arc::new(crate::nbd::MemBlockStore::new(volume_size, 4096));
         Self {
             config,
             volume_size,
@@ -54,6 +56,7 @@ impl UblkServer {
             )),
             device_path: Arc::new(parking_lot::Mutex::new(None)),
             worker: Arc::new(parking_lot::Mutex::new(None)),
+            store,
         }
     }
 
@@ -151,6 +154,7 @@ impl UblkServer {
         let vol_size = self.volume_size;
         let state = self.state.clone();
         let dp = self.device_path.clone();
+        let store = self.store.clone();
 
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<PathBuf, String>>(1);
 
@@ -180,17 +184,42 @@ impl UblkServer {
                 Ok(())
             };
 
-            let q_handler = |qid: u16, dev: &UblkDev| {
+            let store_for_q = store.clone();
+            let q_handler = move |qid: u16, dev: &UblkDev| {
                 let bufs = std::rc::Rc::new(dev.alloc_queue_io_bufs());
+                let store_ref = store_for_q.clone();
                 let io_handler = {
                     let bufs = bufs.clone();
                     move |q: &UblkQueue, tag: u16, _io: &libublk::io::UblkIOCtx| {
                         let iod = q.get_iod(tag);
-                        let bytes = (iod.nr_sectors << 9) as i32;
+                        let op = iod.op_flags & 0xff;
+                        let offset = (iod.start_sector as u64) << 9;
+                        let len = (iod.nr_sectors as u32) << 9;
+
+                        if op == 0 {
+                            let data = store_ref.read(offset, len);
+                            let buf = bufs[tag as usize].as_slice();
+                            let buf_ptr = buf.as_ptr() as *mut u8;
+                            let copy_len = data.len().min(buf.len());
+                            // SAFETY: we own the buffer exclusively for this tag
+                            // during the I/O operation. libublk guarantees single-
+                            // writer access per tag.
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(
+                                    data.as_ptr(),
+                                    buf_ptr,
+                                    copy_len,
+                                );
+                            }
+                        } else if op == 1 {
+                            let buf = bufs[tag as usize].as_slice();
+                            store_ref.write(offset, &buf[..len as usize]);
+                        }
+
                         q.complete_io_cmd_unified(
                             tag,
                             libublk::BufDesc::Slice(bufs[tag as usize].as_slice()),
-                            Ok(libublk::UblkIORes::Result(bytes)),
+                            Ok(libublk::UblkIORes::Result(len as i32)),
                         )
                         .unwrap_or_else(|e| {
                             tracing::error!(tag, error = %e, "complete_io_cmd failed");
