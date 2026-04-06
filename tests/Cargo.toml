@@ -35,3 +35,7 @@ path = "rebalance.rs"
 [[test]]
 name = "ublk"
 path = "ublk.rs"
+
+[[test]]
+name = "erasure"
+path = "erasure.rs"

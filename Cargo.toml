@@ -61,6 +61,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 bytes = "1"
 rand = "0.9"
 parking_lot = "0.12"
+reed-solomon-erasure = "6"
 dashmap = "6"
 libublk = "0.4"
 

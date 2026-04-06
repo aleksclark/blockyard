@@ -62,6 +62,11 @@ enum VolumeCommand {
         affinity: Option<String>,
         #[arg(long, default_value = "node")]
         failure_domain: String,
+        /// Erasure coding configuration in "k+m" format (e.g., "4+2" for
+        /// RS(4,2)).  When set, the volume uses erasure coding instead of
+        /// replication.
+        #[arg(long)]
+        erasure_coding: Option<String>,
     },
     Delete {
         name: String,
@@ -200,17 +205,31 @@ async fn main() -> anyhow::Result<()> {
                     name,
                     size,
                     replicas,
+                    erasure_coding,
                     ..
                 } => {
                     let size_bytes =
                         blockyard_common::parse_size(&size).map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let req = RaftRequest::VolumeCreate {
-                        name: name.clone(),
-                        size_bytes,
-                        replicas,
-                    };
-                    propose(&network, &cli.endpoint, &req).await?;
-                    println!("Created volume '{name}'");
+
+                    if let Some(ref ec) = erasure_coding {
+                        let (k, m) = parse_ec_spec(ec)?;
+                        let req = RaftRequest::VolumeCreateEc {
+                            name: name.clone(),
+                            size_bytes,
+                            data_shards: k,
+                            parity_shards: m,
+                        };
+                        propose(&network, &cli.endpoint, &req).await?;
+                        println!("Created EC({k}+{m}) volume '{name}'");
+                    } else {
+                        let req = RaftRequest::VolumeCreate {
+                            name: name.clone(),
+                            size_bytes,
+                            replicas,
+                        };
+                        propose(&network, &cli.endpoint, &req).await?;
+                        println!("Created volume '{name}'");
+                    }
                 }
                 VolumeCommand::Delete { name } => {
                     let req = RaftRequest::VolumeDelete { name: name.clone() };
@@ -456,6 +475,28 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Parse an erasure-coding spec like "4+2" into (k, m) as (u32, u32).
+fn parse_ec_spec(spec: &str) -> anyhow::Result<(u32, u32)> {
+    let parts: Vec<&str> = spec.split('+').collect();
+    if parts.len() != 2 {
+        anyhow::bail!(
+            "invalid erasure-coding spec '{spec}': expected format 'k+m' (e.g., '4+2')"
+        );
+    }
+    let k: u32 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid data shards in '{spec}': {e}"))?;
+    let m: u32 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid parity shards in '{spec}': {e}"))?;
+    if k < 1 || m < 1 {
+        anyhow::bail!("data shards and parity shards must both be >= 1, got {k}+{m}");
+    }
+    Ok((k, m))
 }
 
 fn format_size(bytes: u64) -> String {

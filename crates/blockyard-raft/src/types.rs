@@ -71,6 +71,18 @@ pub enum RaftRequest {
     VolumeSnapshotList {
         name: String,
     },
+    VolumeCreateEc {
+        name: String,
+        size_bytes: u64,
+        data_shards: u32,
+        parity_shards: u32,
+    },
+    EcChunkWrite {
+        volume_name: String,
+        extent_id: u64,
+        chunk_index: u32,
+        node_id: u64,
+    },
 }
 
 impl std::fmt::Display for RaftRequest {
@@ -126,6 +138,25 @@ impl std::fmt::Display for RaftRequest {
             }
             Self::VolumeSnapshotList { name } => {
                 write!(f, "VolumeSnapshotList({name})")
+            }
+            Self::VolumeCreateEc {
+                name,
+                data_shards,
+                parity_shards,
+                ..
+            } => {
+                write!(f, "VolumeCreateEc({name}, {data_shards}+{parity_shards})")
+            }
+            Self::EcChunkWrite {
+                volume_name,
+                extent_id,
+                chunk_index,
+                node_id,
+            } => {
+                write!(
+                    f,
+                    "EcChunkWrite({volume_name}, ext={extent_id}, chunk={chunk_index}, node={node_id})"
+                )
             }
         }
     }
@@ -291,6 +322,24 @@ mod tests {
                 RaftRequest::VolumeSnapshotList { name: "v".into() },
                 "VolumeSnapshotList(v)",
             ),
+            (
+                RaftRequest::VolumeCreateEc {
+                    name: "v".into(),
+                    size_bytes: 1024,
+                    data_shards: 4,
+                    parity_shards: 2,
+                },
+                "VolumeCreateEc(v, 4+2)",
+            ),
+            (
+                RaftRequest::EcChunkWrite {
+                    volume_name: "v".into(),
+                    extent_id: 10,
+                    chunk_index: 3,
+                    node_id: 7,
+                },
+                "EcChunkWrite(v, ext=10, chunk=3, node=7)",
+            ),
         ];
         for (req, expected) in cases {
             assert_eq!(req.to_string(), expected);
@@ -359,6 +408,18 @@ mod tests {
                 snap_name: "s1".into(),
             },
             RaftRequest::VolumeSnapshotList { name: "v".into() },
+            RaftRequest::VolumeCreateEc {
+                name: "v".into(),
+                size_bytes: 1024,
+                data_shards: 4,
+                parity_shards: 2,
+            },
+            RaftRequest::EcChunkWrite {
+                volume_name: "v".into(),
+                extent_id: 10,
+                chunk_index: 3,
+                node_id: 7,
+            },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();

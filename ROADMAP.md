@@ -162,7 +162,14 @@ Target: WAN, large-scale, and ecosystem integration.
 
 ### 3.2 Scalability
 - [ ] Volume striping across multiple node sets (stripe groups)
-- [ ] Erasure coding (k+m via Reed-Solomon)
+- [x] Erasure coding — RS codec (k+m via reed-solomon-erasure crate)
+- [x] Erasure coding — per-extent chunk placement across nodes with failure domain spreading
+- [x] Erasure coding — reconstruction path (plan + reconstruct from any k available chunks)
+- [x] Erasure coding — Raft types (VolumeCreateEc, EcChunkWrite, ErasureCodingConfig in VolumeRecord)
+- [x] Erasure coding — CLI (`--erasure-coding k+m` flag on volume create)
+- [x] Erasure coding — unit tests (80 tests: codec, placement, reconstruction, all RS configs)
+- [x] Erasure coding — Jepsen-style integration tests (6 scenarios: no-failure, 1/2/3-node crash, heal, concurrent I/O)
+- [~] Erasure coding — wire EC into block I/O path (split writes into chunks, reconstruct on read)
 - [ ] Client write-back cache
 
 ### 3.3 Data Management

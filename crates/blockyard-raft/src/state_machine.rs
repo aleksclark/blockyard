@@ -40,6 +40,12 @@ pub struct AppState {
     pub applied_index: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErasureCodingConfig {
+    pub data_shards: u32,
+    pub parity_shards: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeRecord {
     pub name: String,
@@ -54,6 +60,13 @@ pub struct VolumeRecord {
     pub rebalance_state: Option<RebalanceState>,
     #[serde(default)]
     pub snapshots: Vec<String>,
+    /// Erasure coding configuration.  `None` means the volume uses
+    /// traditional replication.
+    #[serde(default)]
+    pub ec_config: Option<ErasureCodingConfig>,
+    /// Per-extent chunk map: extent_id → [(chunk_index, node_id)].
+    #[serde(default)]
+    pub chunk_map: HashMap<u64, Vec<(u32, u64)>>,
 }
 
 fn default_consistency() -> String {
@@ -127,6 +140,8 @@ impl StateMachine {
                         read_policy: default_read_policy(),
                         rebalance_state: None,
                         snapshots: Vec::new(),
+                        ec_config: None,
+                        chunk_map: HashMap::new(),
                     },
                 );
                 RaftResponse::Ok
@@ -280,6 +295,48 @@ impl StateMachine {
                     RaftResponse::Data(json)
                 } else {
                     RaftResponse::Error(format!("volume not found: {name}"))
+                }
+            }
+            RaftRequest::VolumeCreateEc {
+                name,
+                size_bytes,
+                data_shards,
+                parity_shards,
+            } => {
+                state.volumes.insert(
+                    name.clone(),
+                    VolumeRecord {
+                        name: name.clone(),
+                        size_bytes: *size_bytes,
+                        replicas: 1,
+                        placement: Vec::new(),
+                        consistency: default_consistency(),
+                        read_policy: default_read_policy(),
+                        rebalance_state: None,
+                        snapshots: Vec::new(),
+                        ec_config: Some(ErasureCodingConfig {
+                            data_shards: *data_shards,
+                            parity_shards: *parity_shards,
+                        }),
+                        chunk_map: HashMap::new(),
+                    },
+                );
+                RaftResponse::Ok
+            }
+            RaftRequest::EcChunkWrite {
+                volume_name,
+                extent_id,
+                chunk_index,
+                node_id,
+            } => {
+                if let Some(vol) = state.volumes.get_mut(volume_name) {
+                    vol.chunk_map
+                        .entry(*extent_id)
+                        .or_default()
+                        .push((*chunk_index, *node_id));
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("volume not found: {volume_name}"))
                 }
             }
         }
