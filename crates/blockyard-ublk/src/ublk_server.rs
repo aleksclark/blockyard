@@ -132,7 +132,7 @@ impl UblkServer {
             match self.start_libublk(dev_id_hint) {
                 Ok(path) => return Ok(path),
                 Err(e) => {
-                    debug!(error = %e, "libublk start failed, using fallback path");
+                    warn!(error = %e, "UBLK device creation failed, falling back to stub path");
                 }
             }
         }
