@@ -27,24 +27,24 @@ Build the data node's local storage layer: per-disk XFS management, extent file 
 
 ### 1A — Disk Inventory & Health
 
-- [ ] **P1A.1** Disk discovery: detect physical disks, assign/recover persistent `DiskId` — §5.2, §5.10
-- [ ] **P1A.2** XFS filesystem validation per disk (exactly one dedicated XFS per disk) — §3.3, §5.10.3
-- [ ] **P1A.3** `DiskState` machine with transition rules and policy-driven derivation from telemetry — §5.8, §5.8.1
-- [ ] **P1A.4** Per-disk telemetry collection: read/write errors, checksum mismatches, media errors, timeouts, temperature, latency outliers — §5.8
-- [ ] **P1A.5** Allocation guards: refuse new extents on `degraded`/`draining`/`failed`/`removed` disks — §5.2, invariant 6
-- [ ] **P1A.6** Bad-region map: track localized failures, quarantine regions, report affected extents — §5.9
-- [ ] **P1A.7** Disk qualification state for newly added disks (burn-in before `healthy`) — §5.10.5
+- [x] **P1A.1** Disk discovery: detect physical disks, assign/recover persistent `DiskId` — §5.2, §5.10
+- [x] **P1A.2** XFS filesystem validation per disk (exactly one dedicated XFS per disk) — §3.3, §5.10.3
+- [x] **P1A.3** `DiskState` machine with transition rules and policy-driven derivation from telemetry — §5.8, §5.8.1
+- [x] **P1A.4** Per-disk telemetry collection: read/write errors, checksum mismatches, media errors, timeouts, temperature, latency outliers — §5.8
+- [x] **P1A.5** Allocation guards: refuse new extents on `degraded`/`draining`/`failed`/`removed` disks — §5.2, invariant 6
+- [x] **P1A.6** Bad-region map: track localized failures, quarantine regions, report affected extents — §5.9
+- [x] **P1A.7** Disk qualification state for newly added disks (burn-in before `healthy`) — §5.10.5
 
 ### 1B — Extent File Lifecycle
 
-- [ ] **P1B.1** Extent file layout on XFS: path scheme from `(DiskId, ExtentId, ExtentVersion)` — §5.2
-- [ ] **P1B.2** Write staging: temporary file creation, payload write, integrity metadata (strong checksum) — §5.3, §5.4
-- [ ] **P1B.3** Local durability: `fsync`/`fdatasync`/`O_DSYNC` with crash-consistent guarantees — §5.4, invariant 9
-- [ ] **P1B.4** Atomic promotion from staged → committed local extent (rename after fsync) — §5.3
-- [ ] **P1B.5** Immutability enforcement: committed extent files are never overwritten — §5.3
-- [ ] **P1B.6** Local extent index: `ExtentId` → `(DiskId, path, ExtentVersion, checksum, storage class)` — §5.2
-- [ ] **P1B.7** Orphaned extent cleanup: reclaim uncommitted staged files after safe retention interval — §6.9
-- [ ] **P1B.8** Startup recovery: restore committed extents, discard incomplete staged files, rebuild local index — §6.10
+- [x] **P1B.1** Extent file layout on XFS: path scheme from `(DiskId, ExtentId, ExtentVersion)` — §5.2
+- [x] **P1B.2** Write staging: temporary file creation, payload write, integrity metadata (strong checksum) — §5.3, §5.4
+- [x] **P1B.3** Local durability: `fsync`/`fdatasync`/`O_DSYNC` with crash-consistent guarantees — §5.4, invariant 9
+- [x] **P1B.4** Atomic promotion from staged → committed local extent (rename after fsync) — §5.3
+- [x] **P1B.5** Immutability enforcement: committed extent files are never overwritten — §5.3
+- [x] **P1B.6** Local extent index: `ExtentId` → `(DiskId, path, ExtentVersion, checksum, storage class)` — §5.2
+- [x] **P1B.7** Orphaned extent cleanup: reclaim uncommitted staged files after safe retention interval — §6.9
+- [x] **P1B.8** Startup recovery: restore committed extents, discard incomplete staged files, rebuild local index — §6.10
 
 ---
 
