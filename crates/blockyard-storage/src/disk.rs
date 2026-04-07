@@ -222,8 +222,7 @@ impl DiskInventory {
         disk.health.record(telemetry);
 
         if let Some(derived_state) = disk.health.derive_state() {
-            if derived_state != disk.state
-                && disk.state.validate_transition(derived_state).is_ok()
+            if derived_state != disk.state && disk.state.validate_transition(derived_state).is_ok()
             {
                 debug!(%disk_id, old = %disk.state, new = %derived_state, "telemetry-derived state change");
                 disk.state = derived_state;
@@ -328,10 +327,7 @@ fn validate_xfs(path: &Path) -> Result<(), StorageError> {
     #[cfg(target_os = "linux")]
     {
         let _ = std::fs::metadata(path).map_err(|e| {
-            StorageError::XfsValidation(format!(
-                "cannot stat {}: {e}",
-                path.display()
-            ))
+            StorageError::XfsValidation(format!("cannot stat {}: {e}", path.display()))
         })?;
 
         if let Ok(output) = std::process::Command::new("stat")
@@ -700,9 +696,11 @@ mod tests {
     #[test]
     fn test_bad_region_unknown_disk() {
         let inventory = DiskInventory::new();
-        assert!(inventory
-            .report_bad_region(DiskId::generate(), 0, 100)
-            .is_err());
+        assert!(
+            inventory
+                .report_bad_region(DiskId::generate(), 0, 100)
+                .is_err()
+        );
     }
 
     #[test]
@@ -754,7 +752,11 @@ mod tests {
     fn test_record_telemetry_unknown_disk() {
         let inventory = DiskInventory::new();
         let tel = DiskTelemetry::default();
-        assert!(inventory.record_telemetry(DiskId::generate(), &tel).is_err());
+        assert!(
+            inventory
+                .record_telemetry(DiskId::generate(), &tel)
+                .is_err()
+        );
     }
 
     #[test]

@@ -52,14 +52,14 @@ Build the data node's local storage layer: per-disk XFS management, extent file 
 
 Expose the data node's extent storage over the network. Handle write reception, read service, deduplication, and epoch validation.
 
-- [ ] **P2.1** Define wire protocol messages for data read/write (protobuf or flatbuffers) — §7
-- [ ] **P2.2** Protocol version negotiation on connection handshake — §7
-- [ ] **P2.3** Write reception path: epoch validation → disk eligibility → stage → persist → record op ID → ack — §5.5
-- [ ] **P2.4** Duplicate operation suppression: record operation identifiers, handle retransmission idempotently — §5.5.5, §4.5.4
-- [ ] **P2.5** Read service path: locate extent → verify readable state → read range → checksum validation → return — §5.6
-- [ ] **P2.6** Stale-epoch rejection for writes; conditional stale-epoch reads — §6.5, invariant 4
-- [ ] **P2.7** Checksum mismatch handling on read: fail read, mark disk/region suspect — §5.6, §6.7
-- [ ] **P2.8** XFS error handling: detect filesystem errors, transition disk to `degraded`/`failed` — §6.8
+- [x] **P2.1** Define wire protocol messages for data read/write (protobuf or flatbuffers) — §7
+- [x] **P2.2** Protocol version negotiation on connection handshake — §7
+- [x] **P2.3** Write reception path: epoch validation → disk eligibility → stage → persist → record op ID → ack — §5.5
+- [x] **P2.4** Duplicate operation suppression: record operation identifiers, handle retransmission idempotently — §5.5.5, §4.5.4
+- [x] **P2.5** Read service path: locate extent → verify readable state → read range → checksum validation → return — §5.6
+- [x] **P2.6** Stale-epoch rejection for writes; conditional stale-epoch reads — §6.5, invariant 4
+- [x] **P2.7** Checksum mismatch handling on read: fail read, mark disk/region suspect — §5.6, §6.7
+- [x] **P2.8** XFS error handling: detect filesystem errors, transition disk to `degraded`/`failed` — §6.8
 
 ---
 

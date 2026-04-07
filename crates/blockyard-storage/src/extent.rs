@@ -155,11 +155,7 @@ pub fn staged_extent_path(
 }
 
 /// Compute the metadata path for a committed extent.
-pub fn extent_meta_path(
-    mount_path: &Path,
-    extent_id: ExtentId,
-    version: ExtentVersion,
-) -> PathBuf {
+pub fn extent_meta_path(mount_path: &Path, extent_id: ExtentId, version: ExtentVersion) -> PathBuf {
     let mut p = committed_extent_path(mount_path, extent_id, version);
     let name = p.file_name().unwrap().to_string_lossy().to_string();
     p.set_file_name(format!("{name}{META_SUFFIX}"));
@@ -392,9 +388,7 @@ impl ExtentStore {
             if let Ok(metadata) = fs::metadata(&path) {
                 if let Ok(modified) = metadata.modified() {
                     if let Ok(age) = now.duration_since(modified) {
-                        if age.as_secs() >= retention_secs
-                            && fs::remove_file(&path).is_ok()
-                        {
+                        if age.as_secs() >= retention_secs && fs::remove_file(&path).is_ok() {
                             debug!(path = %path.display(), "cleaned up orphaned staged file");
                             cleaned.push(path);
                         }
@@ -479,11 +473,7 @@ impl ExtentStore {
     }
 
     fn recover_extent_from_file(&self, path: &Path) -> Result<LocalExtentEntry, StorageError> {
-        let meta_path = PathBuf::from(format!(
-            "{}{}",
-            path.to_string_lossy(),
-            META_SUFFIX
-        ));
+        let meta_path = PathBuf::from(format!("{}{}", path.to_string_lossy(), META_SUFFIX));
 
         if !meta_path.exists() {
             return Err(StorageError::ExtentNotFound(format!(
@@ -650,7 +640,8 @@ mod tests {
             .unwrap();
 
         let (_, checksum2) = store.stage_extent(eid, 1, data).unwrap();
-        let result = store.commit_extent(eid, 1, &checksum2, data.len() as u64, StorageClass::Default);
+        let result =
+            store.commit_extent(eid, 1, &checksum2, data.len() as u64, StorageClass::Default);
         assert!(result.is_err());
     }
 
@@ -752,7 +743,9 @@ mod tests {
             .commit_extent(eid2, 1, &c2, data.len() as u64, StorageClass::Default)
             .unwrap();
 
-        store.stage_extent(ExtentId::generate(), 1, b"orphan").unwrap();
+        store
+            .stage_extent(ExtentId::generate(), 1, b"orphan")
+            .unwrap();
 
         let new_index = ExtentIndex::new();
         let report = store.recover(&new_index).unwrap();

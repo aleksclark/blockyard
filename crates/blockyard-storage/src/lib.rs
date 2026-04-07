@@ -8,6 +8,7 @@ pub mod error;
 pub mod extent;
 pub mod health;
 pub mod region;
+pub mod service;
 
 pub use disk::{DiskInventory, DiskMetadata, ManagedDisk, QualificationState};
 pub use error::StorageError;
@@ -17,3 +18,4 @@ pub use extent::{
 };
 pub use health::{DiskHealthTracker, DiskTelemetry, HealthPolicy};
 pub use region::{BadRegion, BadRegionMap};
+pub use service::{DataNodeService, OperationRecord};

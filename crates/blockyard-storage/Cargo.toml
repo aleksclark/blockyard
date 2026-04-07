@@ -9,6 +9,7 @@ description = "Blockyard distributed block storage — storage engine, extent fi
 
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
+blockyard-protocol = { path = "../blockyard-protocol" }
 bytes.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
