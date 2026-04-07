@@ -466,7 +466,6 @@ impl DataNodeService {
 mod tests {
     use super::*;
     use blockyard_common::{SessionId, VolumeId};
-    use std::path::PathBuf;
 
     fn setup_service() -> (tempfile::TempDir, DataNodeService, DiskId) {
         let dir = tempfile::tempdir().unwrap();
