@@ -1,0 +1,50 @@
+//! Metadata service request types applied to the Raft state machine.
+
+use std::collections::BTreeMap;
+use std::ops::Range;
+
+use serde::{Deserialize, Serialize};
+
+use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+
+/// A request to be applied to the metadata state machine via Raft consensus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MetadataRequest {
+    /// Add or update a node in the cluster membership.
+    AddNode { node_id: NodeId, addr: String },
+
+    /// Remove a node from the cluster membership.
+    RemoveNode { node_id: NodeId },
+
+    /// Create a new volume with the given protection policy.
+    CreateVolume {
+        volume_id: VolumeId,
+        size_bytes: u64,
+        protection: ProtectionPolicy,
+    },
+
+    /// Delete a volume and all its extent mappings.
+    DeleteVolume { volume_id: VolumeId },
+
+    /// Advance the placement epoch, returning the new epoch value.
+    AdvanceEpoch,
+
+    /// Commit an extent mapping (§4.5.2).
+    CommitExtentMapping {
+        volume_id: VolumeId,
+        block_range: Range<u64>,
+        extent_id: ExtentId,
+        extent_version: u64,
+        epoch: EpochId,
+        replica_locations: Vec<NodeId>,
+        checksums: Vec<Vec<u8>>,
+        operation_id: Option<OperationId>,
+        /// Previous mapping version for compare-and-swap.
+        previous_version: Option<u64>,
+    },
+
+    /// Update the placement map for a set of nodes.
+    UpdatePlacementMap {
+        assignments: BTreeMap<String, Vec<NodeId>>,
+    },
+}
