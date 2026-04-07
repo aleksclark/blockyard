@@ -184,10 +184,10 @@ VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`
 
 ### 9B — Consistency Tests
 
-- [ ] **P9B.1** Linearizability under `consistency=all` with leader failover
-- [ ] **P9B.2** Majority-ack consistency: no acknowledged write lost after leader failover
-- [ ] **P9B.3** Read-your-own-writes with `read-policy=leader` during leader transitions
-- [ ] **P9B.4** Bounded staleness measurement with `read-policy=any`
+- [x] **P9B.1** Linearizability under `consistency=all` with leader failover
+- [x] **P9B.2** Majority-ack consistency: no acknowledged write lost after leader failover
+- [x] **P9B.3** Read-your-own-writes with `read-policy=leader` during leader transitions
+- [x] **P9B.4** Bounded staleness measurement with `read-policy=any`
 
 ### 9C — Availability Tests
 
@@ -212,9 +212,9 @@ VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`
 
 ### 9F — UBLK Client Tests
 
-- [ ] **P9F.1** Mount → write → kill mount process → remount → verify data
-- [ ] **P9F.2** Mount → partition client from leader → client follows new leader → writes succeed
-- [ ] **P9F.3** Mount → write through ext4 → crash node → remount → fsck passes
+- [x] **P9F.1** Mount → write → kill mount process → remount → verify data
+- [x] **P9F.2** Mount → partition client from leader → client follows new leader → writes succeed
+- [x] **P9F.3** Mount → write through ext4 → crash node → remount → fsck passes
 
 ---
 

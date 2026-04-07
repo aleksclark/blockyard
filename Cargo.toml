@@ -1,3 +1,11 @@
+[package]
+name = "blockyard-workspace"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
 [workspace]
 members = [
     "crates/blockyard",
@@ -34,6 +42,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 reed-solomon-erasure = { version = "6", features = ["simd-accel"] }
+
+[dev-dependencies]
+blockyard-test-harness = { path = "crates/blockyard-test-harness" }
+blockyard-common = { path = "crates/blockyard-common" }
 
 [profile.release]
 lto = true
