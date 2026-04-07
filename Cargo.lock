@@ -229,6 +229,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockyard-integration-tests"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "blockyard-common",
+ "blockyard-test-harness",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "blockyard-protocol"
 version = "0.1.0"
 dependencies = [

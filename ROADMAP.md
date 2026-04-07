@@ -205,10 +205,10 @@ VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`
 
 ### 9E — Data Integrity Tests
 
-- [ ] **P9E.1** Write known pattern → crash all nodes → restart → verify pattern
-- [ ] **P9E.2** Write during partition → heal → verify convergence (no divergent state)
-- [ ] **P9E.3** XFS scrub detects injected corruption → heal from healthy replica
-- [ ] **P9E.4** Snapshot before fault → restore after fault → data matches
+- [x] **P9E.1** Write known pattern → crash all nodes → restart → verify pattern
+- [x] **P9E.2** Write during partition → heal → verify convergence (no divergent state)
+- [x] **P9E.3** XFS scrub detects injected corruption → heal from healthy replica
+- [x] **P9E.4** Snapshot before fault → restore after fault → data matches
 
 ### 9F — UBLK Client Tests
 

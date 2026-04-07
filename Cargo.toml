@@ -1,3 +1,10 @@
+[package]
+name = "blockyard-integration-tests"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
 [workspace]
 members = [
     "crates/blockyard",
@@ -34,6 +41,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 reed-solomon-erasure = { version = "6", features = ["simd-accel"] }
+
+[dev-dependencies]
+blockyard-common = { path = "crates/blockyard-common" }
+blockyard-test-harness = { path = "crates/blockyard-test-harness" }
+blake3.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
 
 [profile.release]
 lto = true
