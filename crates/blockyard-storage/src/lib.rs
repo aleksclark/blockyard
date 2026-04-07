@@ -7,7 +7,13 @@
 //!
 //! - [`failure`] — Data node crash recovery, disk failure handling, and
 //!   node startup ordering (P5.2, P5.3, P5.6, P5.7)
+//!
+//! ## Background Operations (Phase 7)
+//!
+//! - [`background`] — Scrub, repair, drain, rebalance, rate limiting,
+//!   and coordinated scheduling (P7.1–P7.7)
 
+pub mod background;
 pub mod disk;
 pub mod error;
 pub mod extent;
