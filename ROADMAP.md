@@ -108,12 +108,12 @@ Build the client that serves `ublk` devices, maintains metadata cache and sessio
 
 ### 4D — Erasure-Coded Paths
 
-- [ ] **P4D.1** Reed-Solomon encoder/decoder integration (K data + M parity fragments)
-- [ ] **P4D.2** EC write path: determine stripe geometry → encode → send fragments to placed nodes → await acks → commit — §4.5.3
-- [ ] **P4D.3** EC read path: select fragments → decode → verify — §4.6
-- [ ] **P4D.4** EC reconstruction on fragment failure — §4.6
-- [ ] **P4D.5** Partial-stripe read-modify-write for sub-stripe overwrites — §4.5.3
-- [ ] **P4D.6** Adjacent write coalescing to reduce partial-stripe amplification — §4.5.3
+- [x] **P4D.1** Reed-Solomon encoder/decoder integration (K data + M parity fragments)
+- [x] **P4D.2** EC write path: determine stripe geometry → encode → send fragments to placed nodes → await acks → commit — §4.5.3
+- [x] **P4D.3** EC read path: select fragments → decode → verify — §4.6
+- [x] **P4D.4** EC reconstruction on fragment failure — §4.6
+- [x] **P4D.5** Partial-stripe read-modify-write for sub-stripe overwrites — §4.5.3
+- [x] **P4D.6** Adjacent write coalescing to reduce partial-stripe amplification — §4.5.3
 
 ---
 

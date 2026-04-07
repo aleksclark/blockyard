@@ -1,5 +1,5 @@
 //! Blockyard UBLK client — block device serving, session management,
-//! metadata cache, and replicated write pipeline.
+//! metadata cache, replicated write pipeline, and erasure-coded write pipeline.
 //!
 //! # Architecture
 //!
@@ -11,7 +11,9 @@
 //! - [`stale_epoch`] — Stale epoch refresh and retry logic (P4A.6)
 //! - [`traits`] — `DataNodeClient` and `MetadataClient` traits for testability
 //! - [`write_pipeline`] — Replicated write path (P4B.1–P4B.5)
+//! - [`ec_write_pipeline`] — Erasure-coded write path (P4D.2, P4D.5, P4D.6)
 
+pub mod ec_write_pipeline;
 pub mod freshness;
 pub mod metadata_cache;
 pub mod session;
@@ -21,6 +23,10 @@ pub mod ublk;
 pub mod watermark;
 pub mod write_pipeline;
 
+pub use ec_write_pipeline::{
+    CoalescingBuffer, CoalescingConfig, EcFragmentPlacement, EcWritePipeline, EncodedStripe,
+    PendingWrite,
+};
 pub use freshness::FreshnessChecker;
 pub use metadata_cache::MetadataCache;
 pub use session::ClientSession;

@@ -24,6 +24,8 @@
 //! replica. Corruption is reported to the health subsystem and the source
 //! is marked as suspect (§4.9.4).
 
+pub mod ec;
+pub mod ec_read_pipeline;
 pub mod error;
 pub mod pipeline;
 pub mod selector;
@@ -32,6 +34,8 @@ pub(crate) mod testutil;
 pub mod traits;
 pub mod types;
 
+pub use ec::{EcError, ErasureCodec, Fragment};
+pub use ec_read_pipeline::EcReadPipeline;
 pub use error::ReadError;
 pub use pipeline::ReadPipeline;
 pub use selector::LatencyAwareSelector;
