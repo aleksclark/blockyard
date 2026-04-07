@@ -1,195 +1,262 @@
-# Blockyard Roadmap
+# Blockyard Implementation Roadmap
 
-Status tracking for the Blockyard distributed block storage system.
-Last updated: 2026-04-05
+Implementation plan derived from `blockyard_client_data_node_spec.md`. Phases are ordered by dependency: foundational crates first, then data path, then cluster coordination, then hardening.
 
-Legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` deferred
-
----
-
-## Phase 1 — Core (MVP) ✅
-
-Target: single-cluster block storage with Raft replication and UBLK mounting.
-
-### 1.1 Project Foundation
-- [x] Cargo workspace with 8 crates
-- [x] Shared types, config parsing, error types (`blockyard-common`)
-- [x] Example config file matching RFC spec
-- [x] CLI skeleton with subcommands (`start`, `volume`, `node`, `mount`, `status`)
-- [x] Unit tests across all library crates (413 tests)
-- [x] CI pipeline (GitHub Actions: check, clippy, test, fmt)
-- [x] Integration test harness (VM-based, Jepsen-style with QEMU/cloud-init)
-- [x] VM provisioning scripts (`tests/vm-cluster.sh`) with 5-node cluster
-
-### 1.2 Gossip — Cluster Membership (`blockyard-gossip`)
-- [x] SWIM protocol: ping / ping-req / suspect / dead
-- [x] UDP transport with message serialization
-- [x] Seed-based join (contact seeds → receive membership)
-- [x] Piggybacked membership updates on gossip messages
-- [x] Incarnation numbers for crashing/restarting nodes
-- [x] Configurable probe interval, suspect timeout, probe timeout
-- [x] MemberList integration with node state machine
-- [x] Transport trait abstraction (UDP + in-memory for tests)
-- [x] ZFS health propagation via gossip updates
-
-### 1.3 Multi-Raft Consensus (`blockyard-raft`)
-- [x] Multi-Raft group management (create, remove, propose, query state)
-- [x] Meta Group: cluster-wide metadata (volume defs, placement map, node inventory)
-- [x] Volume Groups: per-volume Raft group lifecycle (create, destroy, membership changes)
-- [x] State machine: volume CRUD, placement updates, node register/deregister
-- [x] Snapshot and restore for state machine
-- [x] Heartbeat consolidation across groups sharing a node pair
-- [x] gRPC network transport (`tonic`) for Raft RPCs between nodes
-- [x] gRPC server: AppendEntries, InstallSnapshot, RequestVote, ConsolidatedHeartbeat, ForwardProposal, GetState
-- [x] gRPC client: RaftNetwork with connection pooling and peer management
-- [x] Leader election and automatic failover (in-process via MultiRaft propose)
-- [x] Voter/learner management for Meta Group (via gRPC AddEntries)
-- [ ] Raft log storage on dedicated ZFS dataset (`blockyard/raft-log`) — deferred to production ZFS integration
-- [ ] Raft snapshot via ZFS snapshot — deferred to production ZFS integration
-
-### 1.4 Storage Backend (`blockyard-storage`)
-- [x] StorageBackend trait abstraction
-- [x] ZFS zvol create / destroy / resize via CLI shelling (`ZfsBackend`)
-- [x] MemoryBackend for testing (no ZFS required)
-- [x] Zvol naming convention: `<pool>/vol-<volume-id>`
-- [x] Pool capacity reporting (total / used / available)
-- [x] Placement engine: filter → spread → balance → prefer
-- [x] Failure domain constraint satisfaction
-- [x] ZFS pool health monitoring (`zpool status`, `zpool list`) on periodic interval
-- [x] Detect and report: degraded vdevs, faulted disks, checksum errors, scrub errors
-- [x] Node-local health state machine: healthy → degraded → faulted (based on ZFS pool state)
-- [x] Propagate ZFS health status via gossip (node tags / health metadata)
-- [x] Placement engine excludes nodes with faulted pools from new volume placement
-- [x] Trigger automatic re-replication when a node's pool is persistently degraded
-- [x] Extent-level addressing within zvols (4MB default)
-
-### 1.5 Block Replication (`blockyard-protocol`)
-- [x] Binary wire protocol: request/response framing (33B request header, 13B response header)
-- [x] Op types: READ, WRITE, FLUSH, TRIM
-- [x] Request pipelining (multiple in-flight requests via codec)
-- [x] TCP connection pooling
-- [x] Tokio codec (Encoder/Decoder) for async framed I/O
-- [x] Protocol server with RequestHandler trait and TCP e2e path
-- [x] Write path: client → server → handler → Raft propose → response
-- [x] Read path: client → server → handler → state machine read → response
-
-### 1.6 Volume Mounting (`blockyard-ublk`)
-- [x] Mount/unmount abstraction with UBLK and NBD backends
-- [x] Cluster client: discover volume leader, follow failovers
-- [x] UBLK server with multi-queue I/O configuration
-- [x] `/dev/ublkbN` block device path management
-- [x] Device recovery (recover reclaims existing device)
-- [x] Write batching with configurable alignment (4KB) and max delay (1ms)
-- [x] io_uring UBLK bindings: ioctl constants, ctrl/io command structs, queue config
-- [x] Kernel module loading (`modprobe ublk_drv`)
-
-### 1.7 CLI & Control Plane
-- [x] `blockyard start` — full node startup with gRPC server, protocol server, gossip, health monitor, heartbeat generator
-- [x] `blockyard volume create/delete/list/status/resize` — wired to Meta Raft
-- [x] `blockyard mount <volume>` — UBLK/NBD client
-- [x] `blockyard status` — cluster health summary
-- [x] `blockyard node list` — node inventory table
-- [x] `blockyard node status <name>` — node view with ZFS health info
-
-### 1.8 Integration Testing
-- [x] 5-node QEMU VM cluster with cloud-init provisioning
-- [x] VM lifecycle management (provision, start, stop, SSH, deploy)
-- [x] Fault injection: SIGKILL, SIGSTOP/SIGCONT, iptables, tc netem, dm-delay, dm-flakey, clock skew
-- [x] Workload generator with write/read logs and P99 latency tracking
-- [x] Post-condition checker: write durability, read consistency, ZFS integrity, cluster health
-- [x] Test scenarios: consistency (linearizability, majority-ack), availability (crash survival, leader election), integrity (crash-restart-verify, partition-heal)
-- [x] Verified: fault injection works on real 5-node cluster (node crash → others survive)
+Legend: `[ ]` not started · `[-]` in progress · `[x]` done
 
 ---
 
-## Phase 2 — Production Readiness
+## Phase 0 — Project Skeleton & Shared Types
 
-Target: operational maturity for real workloads.
+Bootstrap the workspace, establish crate boundaries, and define the type vocabulary used by every subsequent phase.
 
-### 2.1 Rebalancing ✅
-- [x] Detect capacity imbalance (configurable threshold, default 20%)
-- [x] Compute new placement map via placement engine
-- [x] Add target node as Raft learner (via RebalanceStart Raft command)
-- [x] Bulk data transfer via ZFS send/receive (send_zvol, send_incremental, receive_zvol)
-- [x] Promote learner → voter, remove old replica (via RebalanceComplete Raft command with atomic placement swap)
-- [x] Throttle: max concurrent moves per node, bandwidth cap (RebalanceConfig)
-- [x] Rebalance status reporting in CLI (`blockyard rebalance status`)
-- [x] Move state machine: Pending → Syncing → Promoting → Completed / Failed
-- [x] 27 unit tests for rebalance engine
-
-### 2.2 Online Operations ✅
-- [x] Online volume expansion (VolumeResize Raft command → zfs set volsize on replicas)
-- [x] Node drain (`blockyard node drain`) — NodeDrain/NodeDrainComplete Raft commands, DrainEngine with move state machine
-- [x] Change replication factor (`blockyard volume set --replicas N`) — VolumeSetReplicas Raft command
-- [x] Change consistency mode at runtime (`blockyard volume set --consistency/--read-policy`) — VolumeSetConsistency/VolumeSetReadPolicy Raft commands
-
-### 2.3 Per-Volume Tuning ✅
-- [x] Write consistency modes: `all` / `majority` / `single` — ConsistencyEnforcer wrapping RequestHandler
-- [x] Read policies: `leader` / `any` / `local` — ReadRouter with round-robin and local preference
-- [x] Per-volume affinity and anti-affinity enforcement — verified with 6 new placement tests
-- [x] Per-volume failure domain spreading — verified with multi-rack tests (3, 4, 5 racks)
-
-### 2.4 Security ✅
-- [x] Mutual TLS for all node-to-node communication — `build_server_config` / `build_client_config` with cert verification
-- [x] Mutual TLS for client-to-cluster communication — same TLS config reused
-- [x] Certificate generation and rotation — `generate_ca()` + `generate_node_cert()` via `rcgen`
-- [x] Token-based authentication (pre-shared bearer tokens) — `TokenStore` with validation
-- [x] Volume-level ACLs (read-only, read-write per client) — `check_volume_access()` with `Permission` enum
-
-### 2.5 Observability ✅
-- [x] Prometheus `/metrics` endpoint on each node — `MetricsServer` via `metrics-exporter-prometheus`
-- [x] Cluster metrics: nodes total by state
-- [x] Per-volume metrics: IOPS, throughput, latency histograms
-- [x] Per-node metrics: ZFS capacity, Raft group count, leader count
-- [x] ZFS health metrics — state, checksum/read/write errors
-- [x] Cluster-wide ZFS health summary — `blockyard_cluster_nodes_zfs_degraded_total`
-- [x] Rebalance progress metrics — `blockyard_node_rebalance_bytes_remaining`
-
-### 2.6 Snapshots ✅
-- [x] Volume snapshots delegated to ZFS — VolumeSnapshot Raft command + `snapshot_zvol()`
-- [x] Snapshot list/delete via CLI — `volume snapshot`, `volume snapshots`, `volume snapshot-delete`
-- [x] Consistent snapshots across replicas (Raft barrier) — snapshot name tracked in VolumeRecord via Raft
+- [x] **P0.1** Create Cargo workspace with crates: `blockyard` (bin), `blockyard-cli` (bin), `blockyard-common`, `blockyard-gossip`, `blockyard-protocol`, `blockyard-raft`, `blockyard-storage`, `blockyard-ublk`
+- [x] **P0.2** Define core ID types in `blockyard-common`: `NodeId`, `VolumeId`, `ExtentId`, `DiskId`, `SessionId`, `OperationId`, `EpochId`, `RaftGroupId`
+- [x] **P0.3** Define `ProtectionPolicy` enum (replication factor N, erasure coding K+M) — §2.10
+- [x] **P0.4** Define `DiskState` enum (`healthy`, `suspect`, `degraded`, `draining`, `failed`, `removed`) — §2.9, §5.8.1
+- [x] **P0.5** Define shared error types with `thiserror`; binary crates use `anyhow`
+- [x] **P0.6** Define config structs (`NodeConfig`, `StorageSection`, `RaftSection`, `GossipSection`, `ProtocolSection`, `TlsSection`, `AuthSection`) with TOML deserialization
+- [x] **P0.7** Set up `tracing` subscriber initialization for both binaries
+- [x] **P0.8** CI pipeline: `cargo fmt`, `cargo clippy`, `cargo test`, coverage gate ≥95%
 
 ---
 
-## Phase 3 — Advanced Features
+## Phase 1 — Local Disk Model & Extent Storage
 
-Target: WAN, large-scale, and ecosystem integration.
+Build the data node's local storage layer: per-disk XFS management, extent file lifecycle, integrity metadata, and crash-consistent durability.
 
-### 3.1 Networking
-- [ ] QUIC transport for WAN / cross-datacenter deployments
-- [ ] NBD fallback for kernels < 6.0
+### 1A — Disk Inventory & Health
 
-### 3.2 Scalability
-- [ ] Volume striping across multiple node sets (stripe groups)
-- [x] Erasure coding — RS codec (k+m via reed-solomon-erasure crate)
-- [x] Erasure coding — per-extent chunk placement across nodes with failure domain spreading
-- [x] Erasure coding — reconstruction path (plan + reconstruct from any k available chunks)
-- [x] Erasure coding — Raft types (VolumeCreateEc, EcChunkWrite, ErasureCodingConfig in VolumeRecord)
-- [x] Erasure coding — CLI (`--erasure-coding k+m` flag on volume create)
-- [x] Erasure coding — unit tests (80 tests: codec, placement, reconstruction, all RS configs)
-- [x] Erasure coding — Jepsen-style integration tests (6 scenarios: no-failure, 1/2/3-node crash, heal, concurrent I/O)
-- [~] Erasure coding — wire EC into block I/O path (split writes into chunks, reconstruct on read)
-- [ ] Client write-back cache
+- [ ] **P1A.1** Disk discovery: detect physical disks, assign/recover persistent `DiskId` — §5.2, §5.10
+- [ ] **P1A.2** XFS filesystem validation per disk (exactly one dedicated XFS per disk) — §3.3, §5.10.3
+- [ ] **P1A.3** `DiskState` machine with transition rules and policy-driven derivation from telemetry — §5.8, §5.8.1
+- [ ] **P1A.4** Per-disk telemetry collection: read/write errors, checksum mismatches, media errors, timeouts, temperature, latency outliers — §5.8
+- [ ] **P1A.5** Allocation guards: refuse new extents on `degraded`/`draining`/`failed`/`removed` disks — §5.2, invariant 6
+- [ ] **P1A.6** Bad-region map: track localized failures, quarantine regions, report affected extents — §5.9
+- [ ] **P1A.7** Disk qualification state for newly added disks (burn-in before `healthy`) — §5.10.5
 
-### 3.3 Data Management
-- [ ] Volume cloning via ZFS clone
-- [ ] Cross-cluster replication (async DR)
+### 1B — Extent File Lifecycle
 
-### 3.4 Ecosystem
-- [ ] REST/gRPC API for orchestrator integration
-- [ ] Kubernetes CSI driver
-- [ ] `libblockyard` client library for direct application integration
+- [ ] **P1B.1** Extent file layout on XFS: path scheme from `(DiskId, ExtentId, ExtentVersion)` — §5.2
+- [ ] **P1B.2** Write staging: temporary file creation, payload write, integrity metadata (strong checksum) — §5.3, §5.4
+- [ ] **P1B.3** Local durability: `fsync`/`fdatasync`/`O_DSYNC` with crash-consistent guarantees — §5.4, invariant 9
+- [ ] **P1B.4** Atomic promotion from staged → committed local extent (rename after fsync) — §5.3
+- [ ] **P1B.5** Immutability enforcement: committed extent files are never overwritten — §5.3
+- [ ] **P1B.6** Local extent index: `ExtentId` → `(DiskId, path, ExtentVersion, checksum, storage class)` — §5.2
+- [ ] **P1B.7** Orphaned extent cleanup: reclaim uncommitted staged files after safe retention interval — §6.9
+- [ ] **P1B.8** Startup recovery: restore committed extents, discard incomplete staged files, rebuild local index — §6.10
 
 ---
 
-## Open Questions (from RFC)
+## Phase 2 — Data Node Read/Write Service
 
-| # | Question | Status |
-|---|----------|--------|
-| 1 | Raft log storage: dedicated ZFS dataset vs. zvol metadata? | Leaning dedicated dataset |
-| 2 | Extent-level vs. volume-level Raft groups? | Volume-level for MVP |
-| 3 | Should Blockyard manage ZFS pool creation? | No — operator pre-creates |
-| 4 | `libblockyard` for direct app integration? | Deferred to Phase 3 |
-| 5 | Log stale reads during partition heal? | Undecided |
-| 6 | Formal maximum cluster size? | Undecided |
+Expose the data node's extent storage over the network. Handle write reception, read service, deduplication, and epoch validation.
+
+- [ ] **P2.1** Define wire protocol messages for data read/write (protobuf or flatbuffers) — §7
+- [ ] **P2.2** Protocol version negotiation on connection handshake — §7
+- [ ] **P2.3** Write reception path: epoch validation → disk eligibility → stage → persist → record op ID → ack — §5.5
+- [ ] **P2.4** Duplicate operation suppression: record operation identifiers, handle retransmission idempotently — §5.5.5, §4.5.4
+- [ ] **P2.5** Read service path: locate extent → verify readable state → read range → checksum validation → return — §5.6
+- [ ] **P2.6** Stale-epoch rejection for writes; conditional stale-epoch reads — §6.5, invariant 4
+- [ ] **P2.7** Checksum mismatch handling on read: fail read, mark disk/region suspect — §5.6, §6.7
+- [ ] **P2.8** XFS error handling: detect filesystem errors, transition disk to `degraded`/`failed` — §6.8
+
+---
+
+## Phase 3 — Metadata Service
+
+Implement the strongly consistent replicated state machine that stores cluster membership, placement, volume metadata, and extent mappings.
+
+- [ ] **P3.1** Raft consensus integration (e.g., `openraft`) for metadata replication
+- [ ] **P3.2** Metadata state machine: cluster membership, placement map, volume metadata, extent mappings, protection policies
+- [ ] **P3.3** Placement epoch: monotonically increasing version, included in all relevant operations — §2.4
+- [ ] **P3.4** Metadata commit path: validate commit request, apply to state machine, return commit version — §4.5.1 step 8
+- [ ] **P3.5** Extent mapping commit: volume ID, block range, extent version, epoch, replica locations, checksums, optional CAS — §4.5.2
+- [ ] **P3.6** Committed state query: lookup extent mapping by operation ID or extent version (for ambiguous write resolution) — §4.9.2
+- [ ] **P3.7** Crash recovery: restore committed metadata, ordered entry application — §5.7, §6.10
+- [ ] **P3.8** Quorum partition handling: minority nodes refuse new commits — §6.4, invariant 10
+
+---
+
+## Phase 4 — Client Core
+
+Build the client that serves `ublk` devices, maintains metadata cache and session watermark, and implements the write/read paths.
+
+### 4A — Client Foundation
+
+- [ ] **P4A.1** `ublk` device driver integration: register block device, handle kernel read/write requests
+- [ ] **P4A.2** Client session: stable `SessionId`, per-operation `OperationId` — §4.2
+- [ ] **P4A.3** Metadata cache: placement epoch, cluster map, volume protection policy, extent mappings — §4.3
+- [ ] **P4A.4** Session write watermark: monotonically non-decreasing, advanced on commit success — §4.4
+- [ ] **P4A.5** Metadata freshness checks: watermark-gated cache validation before reads — §4.3, §4.4
+- [ ] **P4A.6** Stale epoch refresh: stop writes, refresh map, re-resolve, retry — §4.7
+
+### 4B — Replicated Write Path
+
+- [ ] **P4B.1** Write pipeline: validate ownership → resolve mapping → compute placement → create extent version → transmit to replicas → await acks → commit metadata → ack to kernel — §4.5.1
+- [ ] **P4B.2** Durability threshold enforcement: wait for policy-required ack count before commit — §4.5.2
+- [ ] **P4B.3** Never ack write to `ublk` before metadata commit succeeds — invariant 1
+- [ ] **P4B.4** Idempotent retry with stable `OperationId` — §4.5.4
+- [ ] **P4B.5** Partial ack handling: don't commit if insufficient acks; rely on orphan cleanup — §4.9.3
+
+### 4C — Read Path
+
+- [ ] **P4C.1** Read pipeline: resolve min visible version → resolve mapping → verify version ≥ watermark → select source → read → checksum verify → return — §4.6
+- [ ] **P4C.2** Read-your-own-writes enforcement via watermark — invariant 5
+- [ ] **P4C.3** Replica fallback on source failure — §4.6, §4.9.4
+- [ ] **P4C.4** Corruption reporting to health subsystem on read failure — §4.9.4
+
+### 4D — Erasure-Coded Paths
+
+- [ ] **P4D.1** Reed-Solomon encoder/decoder integration (K data + M parity fragments)
+- [ ] **P4D.2** EC write path: determine stripe geometry → encode → send fragments to placed nodes → await acks → commit — §4.5.3
+- [ ] **P4D.3** EC read path: select fragments → decode → verify — §4.6
+- [ ] **P4D.4** EC reconstruction on fragment failure — §4.6
+- [ ] **P4D.5** Partial-stripe read-modify-write for sub-stripe overwrites — §4.5.3
+- [ ] **P4D.6** Adjacent write coalescing to reduce partial-stripe amplification — §4.5.3
+
+---
+
+## Phase 5 — Failure Handling & Recovery
+
+Implement the failure condition requirements from §6 that aren't covered by the happy-path phases above.
+
+- [ ] **P5.1** Client crash recovery: uncommitted extents invisible to reads; committed state resolved via metadata — §6.1, invariant 3
+- [ ] **P5.2** Data node crash after local ack: preserve dedup state or allow metadata interrogation — §6.2
+- [ ] **P5.3** Data node crash before local durability: never claim success for incomplete writes — §6.3
+- [ ] **P5.4** Ambiguous write resolution: client queries metadata for operation/extent status before retry — §4.9.2
+- [ ] **P5.5** Metadata quorum unavailable: block new write acks, allow reads only when policy & watermark permit — §4.9.1
+- [ ] **P5.6** Disk failure: transition to `failed`, stop IO, report extent set for repair, exclude from placement — §6.6
+- [ ] **P5.7** Node startup ordering: local recovery → serve committed extents → hide staged files → rejoin metadata — §6.10
+
+---
+
+## Phase 6 — Ownership, Fencing & Security
+
+- [ ] **P6.1** Volume ownership / exclusive write lease acquisition and renewal — §4.8
+- [ ] **P6.2** Fencing: reject writes from clients with expired/revoked leases — §4.8, §8
+- [ ] **P6.3** Client authentication to cluster — §8
+- [ ] **P6.4** Node-to-node authentication for metadata peers and data replication — §8
+- [ ] **P6.5** Per-volume authorization: validate client is authorized before serving IO — §8
+
+---
+
+## Phase 7 — Background Operations
+
+Data node background workers for scrubbing, repair, rebalance, and drain.
+
+- [ ] **P7.1** Background scrubbing: verify extent file readability, checksum integrity, local metadata recoverability — §5.12
+- [ ] **P7.2** Scrub-detected corruption triggers repair workflow — §5.12
+- [ ] **P7.3** Re-replication: rebuild missing replicas after node/disk failure — §5.13
+- [ ] **P7.4** Erasure-code rebuild: reconstruct missing fragments — §5.13
+- [ ] **P7.5** Disk drain: enumerate live extents, report for relocation, serve reads until empty — §5.11
+- [ ] **P7.6** Capacity rebalance: redistribute extents across nodes for even utilization — §5.13
+- [ ] **P7.7** Rate limiting / scheduling: background work must not starve foreground IO or metadata — §5.13
+
+---
+
+## Phase 8 — Observability
+
+Instrument every layer with the metrics and health indicators required by §9.
+
+- [ ] **P8.1** Per-volume IO success/failure rates
+- [ ] **P8.2** Client watermark and stale-epoch retry counts
+- [ ] **P8.3** Per-node foreground and background IO load
+- [ ] **P8.4** Per-disk health state transitions (with stable disk identifiers) — §9
+- [ ] **P8.5** Scrub findings
+- [ ] **P8.6** Repair backlog
+- [ ] **P8.7** Orphaned extent file counts
+- [ ] **P8.8** Metadata quorum health and commit latency
+
+---
+
+## Phase 9 — Integration Testing
+
+VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`. 5-node minimum cluster on real VMs with UBLK, XFS, and kernel-level fault injection.
+
+### 9A — Test Infrastructure
+
+- [ ] **P9A.1** VM provisioning harness (libvirt/QEMU): create, start, stop, kill, snapshot 5+ VMs with kernel 6.0+
+- [ ] **P9A.2** Network setup: TAP/bridge networking (not SLIRP) for real inter-node connectivity
+- [ ] **P9A.3** Fault injection primitives: SIGKILL, SIGSTOP/SIGCONT, iptables partition, asymmetric partition, tc netem delay/loss, dm-delay, dm-flakey, clock skew, full disk
+- [ ] **P9A.4** Workload generator: wire-protocol-level client with operation log (ack/nack tracking)
+- [ ] **P9A.5** Consistency checker: verify all acked writes readable after recovery; linearizability validation
+
+### 9B — Consistency Tests
+
+- [ ] **P9B.1** Linearizability under `consistency=all` with leader failover
+- [ ] **P9B.2** Majority-ack consistency: no acknowledged write lost after leader failover
+- [ ] **P9B.3** Read-your-own-writes with `read-policy=leader` during leader transitions
+- [ ] **P9B.4** Bounded staleness measurement with `read-policy=any`
+
+### 9C — Availability Tests
+
+- [ ] **P9C.1** 1-of-3 node crash: writes continue within election timeout
+- [ ] **P9C.2** 1-of-5 node crash: zero downtime for unaffected volumes
+- [ ] **P9C.3** Volume readable during minority partition (from majority side)
+- [ ] **P9C.4** New leader elected within 2 seconds after leader crash
+
+### 9D — Rebalancing Tests
+
+- [ ] **P9D.1** Add node → rebalance → data integrity verified
+- [ ] **P9D.2** Remove node (drain) → all volumes migrated → no data loss
+- [ ] **P9D.3** Kill node during rebalance → rebalance resumes after recovery
+- [ ] **P9D.4** Concurrent client IO during rebalance: no errors
+
+### 9E — Data Integrity Tests
+
+- [ ] **P9E.1** Write known pattern → crash all nodes → restart → verify pattern
+- [ ] **P9E.2** Write during partition → heal → verify convergence (no divergent state)
+- [ ] **P9E.3** XFS scrub detects injected corruption → heal from healthy replica
+- [ ] **P9E.4** Snapshot before fault → restore after fault → data matches
+
+### 9F — UBLK Client Tests
+
+- [ ] **P9F.1** Mount → write → kill mount process → remount → verify data
+- [ ] **P9F.2** Mount → partition client from leader → client follows new leader → writes succeed
+- [ ] **P9F.3** Mount → write through ext4 → crash node → remount → fsck passes
+
+---
+
+## Phase 10 — CLI & Operator Tools
+
+- [ ] **P10.1** `byard` CLI: volume create/delete/list/inspect
+- [ ] **P10.2** `byard` CLI: disk list/inspect/drain/remove
+- [ ] **P10.3** `byard` CLI: node list/inspect/decommission
+- [ ] **P10.4** `byard` CLI: cluster status, placement epoch, quorum health
+- [ ] **P10.5** `byard` CLI: mount/unmount volume (ublk attach/detach)
+
+---
+
+## Dependency Graph
+
+```
+Phase 0 ──→ Phase 1 ──→ Phase 2 ──→ Phase 4 (client)
+                │                        │
+                └──→ Phase 3 ────────────┘
+                         │
+                         ├──→ Phase 5 (failure handling)
+                         ├──→ Phase 6 (security/fencing)
+                         └──→ Phase 7 (background ops)
+
+Phase 8 (observability) spans all phases — instrument as you build.
+Phase 9 (integration tests) depends on phases 1–7.
+Phase 10 (CLI) can start after phase 3.
+```
+
+---
+
+## Spec Invariant Cross-Reference
+
+| # | Invariant (§10) | Roadmap Items |
+|---|----------------|---------------|
+| 1 | No write ack before metadata commit | P4B.3 |
+| 2 | No knowingly corrupted data returned | P2.5, P2.7 |
+| 3 | Uncommitted extents invisible to reads | P1B.4, P1B.7, P1B.8, P5.1 |
+| 4 | Stale-epoch writes rejected | P2.6, P4A.6 |
+| 5 | Read-your-own-writes via watermark | P4A.4, P4C.2 |
+| 6 | No allocations on degraded/draining/failed/removed disks | P1A.5 |
+| 7 | Disk failures surfaced to repair logic | P5.6, P7.3 |
+| 8 | One XFS per physical disk | P1A.2 |
+| 9 | Local durability acks are crash-consistent | P1B.3 |
+| 10 | Minority partitions cannot commit | P3.8 |

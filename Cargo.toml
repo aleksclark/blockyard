@@ -1,5 +1,4 @@
 [workspace]
-resolver = "2"
 members = [
     "crates/blockyard",
     "crates/blockyard-cli",
@@ -9,71 +8,29 @@ members = [
     "crates/blockyard-raft",
     "crates/blockyard-storage",
     "crates/blockyard-ublk",
-    "tests",
 ]
+resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
-repository = "https://github.com/blockyard/blockyard"
 rust-version = "1.85"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/blockyardio/blockyard"
 
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["codec"] }
-
-# Raft consensus
-openraft = { version = "0.10.0-alpha.17", features = ["serde"] }
-
-# Serialization
+# Shared across workspace
+anyhow = "1"
+bytes = "1"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
 toml = "0.8"
-
-# Networking
-tonic = "0.12"
-tonic-build = "0.12"
-prost = "0.13"
-quinn = "0.11"
-
-# Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
-
-# Error handling
-thiserror = "2"
-anyhow = "1"
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Crypto / TLS
-rustls = "0.23"
-rcgen = "0.13"
-
-# Misc
 uuid = { version = "1", features = ["v4", "serde"] }
-bytes = "1"
-rand = "0.9"
-parking_lot = "0.12"
-reed-solomon-erasure = "6"
-dashmap = "6"
-libublk = "0.4"
-
-# Internal crates
-blockyard-common = { path = "crates/blockyard-common" }
-blockyard-gossip = { path = "crates/blockyard-gossip" }
-blockyard-protocol = { path = "crates/blockyard-protocol" }
-blockyard-raft = { path = "crates/blockyard-raft" }
-blockyard-storage = { path = "crates/blockyard-storage" }
-blockyard-ublk = { path = "crates/blockyard-ublk" }
 
 [profile.release]
 lto = true
 codegen-units = 1
-strip = true

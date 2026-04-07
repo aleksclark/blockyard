@@ -1,27 +1,19 @@
 [package]
 name = "blockyard"
-description = "Distributed block storage system — single-binary node process"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Blockyard distributed block storage — main node process"
 
 [[bin]]
 name = "blockyard"
 path = "src/main.rs"
 
 [dependencies]
-blockyard-common = { workspace = true }
-blockyard-gossip = { workspace = true }
-blockyard-raft = { workspace = true }
-blockyard-storage = { workspace = true }
-blockyard-protocol = { workspace = true }
-blockyard-ublk = { workspace = true }
-tokio = { workspace = true }
-clap = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
-serde_json = { workspace = true }
-hostname = "0.4"
-bytes = { workspace = true }
+blockyard-common = { path = "../blockyard-common" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

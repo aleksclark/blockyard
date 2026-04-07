@@ -1,101 +1,109 @@
-use thiserror::Error;
+//! Shared error types for Blockyard library crates.
+//!
+//! Binary crates should wrap these with `anyhow` for context.
 
-#[derive(Debug, Error)]
+/// Shared error type for all Blockyard library crates.
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("configuration error: {0}")]
+    /// I/O errors from filesystem, network, or device operations.
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Configuration parsing or validation errors.
+    #[error("config error: {0}")]
     Config(String),
 
-    #[error("storage error: {0}")]
-    Storage(String),
-
+    /// Raft consensus errors.
     #[error("raft error: {0}")]
     Raft(String),
 
-    #[error("gossip error: {0}")]
-    Gossip(String),
+    /// Storage engine errors (extents, disks, placement).
+    #[error("storage error: {0}")]
+    Storage(String),
 
+    /// Wire protocol errors (serialization, version mismatch).
     #[error("protocol error: {0}")]
     Protocol(String),
 
-    #[error("volume not found: {0}")]
-    VolumeNotFound(String),
-
-    #[error("node not found: {0}")]
-    NodeNotFound(String),
-
-    #[error("no quorum available")]
-    NoQuorum,
-
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    /// Authentication or authorization errors.
+    #[error("auth error: {0}")]
+    Auth(String),
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_error_display_config() {
-        let e = Error::Config("bad value".to_string());
-        assert_eq!(e.to_string(), "configuration error: bad value");
-    }
-
-    #[test]
-    fn test_error_display_storage() {
-        let e = Error::Storage("disk full".to_string());
-        assert_eq!(e.to_string(), "storage error: disk full");
-    }
-
-    #[test]
-    fn test_error_display_raft() {
-        let e = Error::Raft("no leader".to_string());
-        assert_eq!(e.to_string(), "raft error: no leader");
-    }
-
-    #[test]
-    fn test_error_display_gossip() {
-        let e = Error::Gossip("timeout".to_string());
-        assert_eq!(e.to_string(), "gossip error: timeout");
-    }
-
-    #[test]
-    fn test_error_display_protocol() {
-        let e = Error::Protocol("invalid frame".to_string());
-        assert_eq!(e.to_string(), "protocol error: invalid frame");
-    }
-
-    #[test]
-    fn test_error_display_volume_not_found() {
-        let e = Error::VolumeNotFound("vol-1".to_string());
-        assert_eq!(e.to_string(), "volume not found: vol-1");
-    }
-
-    #[test]
-    fn test_error_display_node_not_found() {
-        let e = Error::NodeNotFound("node-a".to_string());
-        assert_eq!(e.to_string(), "node not found: node-a");
-    }
-
-    #[test]
-    fn test_error_display_no_quorum() {
-        let e = Error::NoQuorum;
-        assert_eq!(e.to_string(), "no quorum available");
-    }
-
-    #[test]
-    fn test_error_from_io() {
+    fn test_io_error_display() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
-        let e: Error = io_err.into();
-        assert!(e.to_string().contains("file missing"));
+        let err = Error::Io(io_err);
+        assert!(err.to_string().contains("file missing"));
     }
 
     #[test]
-    fn test_result_type_alias() {
-        let ok: Result<i32> = Ok(42);
-        assert_eq!(ok.unwrap(), 42);
-        let err: Result<i32> = Err(Error::NoQuorum);
-        assert!(err.is_err());
+    fn test_io_error_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: Error = io_err.into();
+        assert!(err.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        let err = Error::Config("invalid port".into());
+        assert_eq!(err.to_string(), "config error: invalid port");
+    }
+
+    #[test]
+    fn test_raft_error_display() {
+        let err = Error::Raft("no quorum".into());
+        assert_eq!(err.to_string(), "raft error: no quorum");
+    }
+
+    #[test]
+    fn test_storage_error_display() {
+        let err = Error::Storage("disk full".into());
+        assert_eq!(err.to_string(), "storage error: disk full");
+    }
+
+    #[test]
+    fn test_protocol_error_display() {
+        let err = Error::Protocol("version mismatch".into());
+        assert_eq!(err.to_string(), "protocol error: version mismatch");
+    }
+
+    #[test]
+    fn test_auth_error_display() {
+        let err = Error::Auth("token expired".into());
+        assert_eq!(err.to_string(), "auth error: token expired");
+    }
+
+    #[test]
+    fn test_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Error>();
+    }
+
+    #[test]
+    fn test_error_debug() {
+        let err = Error::Config("bad value".into());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Config"));
+        assert!(debug.contains("bad value"));
+    }
+
+    #[test]
+    fn test_error_source_io() {
+        use std::error::Error as StdError;
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken");
+        let err = Error::Io(io_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn test_error_source_config() {
+        use std::error::Error as StdError;
+        let err = Error::Config("bad".into());
+        assert!(err.source().is_none());
     }
 }

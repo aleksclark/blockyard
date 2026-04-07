@@ -1,21 +1,4 @@
-pub mod backend;
-pub mod drain;
-pub mod ec_placement;
-pub mod ec_reconstruct;
-pub mod erasure;
-pub mod extent;
-pub mod health;
-pub mod placement;
-pub mod rebalance;
-pub mod zfs;
-
-pub use backend::{MemoryBackend, StorageBackend};
-pub use drain::DrainEngine;
-pub use ec_placement::{ChunkLocation, EcPlacement};
-pub use ec_reconstruct::{ReconstructionPlan, plan_reconstruction, reconstruct};
-pub use erasure::{ErasureCodec, ErasureError};
-pub use extent::{Extent, ExtentMap};
-pub use health::HealthMonitor;
-pub use placement::PlacementEngine;
-pub use rebalance::{RebalanceConfig, RebalanceEngine, RebalanceMove};
-pub use zfs::ZfsBackend;
+//! Blockyard storage engine — extent files, disk management, and placement.
+//!
+//! Manages per-disk XFS filesystems, extent file lifecycle (staging, commit,
+//! immutability), local extent index, and background scrub/repair.

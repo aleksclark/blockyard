@@ -1,24 +1,15 @@
 [package]
 name = "blockyard-ublk"
-description = "UBLK (io_uring) and NBD volume exposure for Linux block devices"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
-
-[features]
-default = []
-libublk = ["dep:libublk"]
+license.workspace = true
+repository.workspace = true
+description = "Blockyard distributed block storage — UBLK/NBD volume mounting"
 
 [dependencies]
-blockyard-common = { workspace = true }
-blockyard-protocol = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-thiserror = { workspace = true }
-parking_lot = { workspace = true }
-bytes = { workspace = true }
-libc = "0.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-libublk = { workspace = true, optional = true }
+blockyard-common = { path = "../blockyard-common" }
+bytes.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true

@@ -1,16 +1,19 @@
 [package]
 name = "blockyard-cli"
-description = "Blockyard CLI client for remote cluster management"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Blockyard distributed block storage — lightweight remote client (byard)"
 
 [[bin]]
 name = "byard"
 path = "src/main.rs"
 
 [dependencies]
-blockyard-common = { workspace = true }
-clap = { workspace = true }
-anyhow = { workspace = true }
+blockyard-common = { path = "../blockyard-common" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,538 +1,580 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+//! Configuration structs with TOML deserialization and validation.
+//!
+//! [`NodeConfig`] is the root configuration for a Blockyard node, composed of
+//! typed sections for each subsystem.
+
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
 
-use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 
+use crate::error::Error;
+
+/// Root configuration for a Blockyard node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
-    pub node: NodeSection,
-    pub cluster: ClusterSection,
-    pub storage: StorageSection,
+    /// Human-readable node name (optional).
     #[serde(default)]
-    pub raft: RaftSection,
-    #[serde(default)]
-    pub gossip: GossipSection,
-    #[serde(default)]
-    pub rebalance: RebalanceSection,
-    pub tls: Option<TlsSection>,
-    #[serde(default)]
-    pub tags: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeSection {
     pub name: Option<String>,
-    #[serde(default = "default_listen")]
-    pub listen: SocketAddr,
-    #[serde(default = "default_data_listen")]
-    pub data_listen: SocketAddr,
-    #[serde(default = "default_metrics_listen")]
-    pub metrics_listen: SocketAddr,
+
+    /// Bind address for the data plane.
+    pub listen_addr: SocketAddr,
+
+    /// Data directory for metadata and state.
+    pub data_dir: PathBuf,
+
+    pub storage: StorageSection,
+    pub raft: RaftSection,
+    pub gossip: GossipSection,
+    pub protocol: ProtocolSection,
+
+    #[serde(default)]
+    pub tls: Option<TlsSection>,
+
+    #[serde(default)]
+    pub auth: Option<AuthSection>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClusterSection {
-    pub seeds: Vec<SocketAddr>,
-}
-
+/// Local disk storage configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSection {
-    #[serde(default)]
-    pub zfs_pool: String,
-    #[serde(default)]
-    pub zfs_pools: Vec<String>,
-    #[serde(default = "default_extent_size")]
-    pub extent_size: String,
+    /// Paths to XFS-formatted disk mount points dedicated to Blockyard.
+    pub disk_paths: Vec<PathBuf>,
+
+    /// Maximum concurrent background IO operations per disk.
+    #[serde(default = "default_max_background_io")]
+    pub max_background_io: u32,
+
+    /// Scrub interval in seconds.
+    #[serde(default = "default_scrub_interval_secs")]
+    pub scrub_interval_secs: u64,
 }
 
-impl StorageSection {
-    /// Returns all configured pools.  Prefers `zfs_pools` if non-empty,
-    /// otherwise falls back to the single `zfs_pool` for backward
-    /// compatibility.
-    pub fn all_pools(&self) -> Vec<String> {
-        if !self.zfs_pools.is_empty() {
-            self.zfs_pools.clone()
-        } else if !self.zfs_pool.is_empty() {
-            vec![self.zfs_pool.clone()]
-        } else {
-            Vec::new()
-        }
-    }
-}
-
+/// Raft consensus configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaftSection {
-    #[serde(
-        default = "default_heartbeat_interval",
-        with = "humantime_serde_compat"
-    )]
-    pub heartbeat_interval: Duration,
-    #[serde(
-        default = "default_election_timeout_min",
-        with = "humantime_serde_compat"
-    )]
-    pub election_timeout_min: Duration,
-    #[serde(
-        default = "default_election_timeout_max",
-        with = "humantime_serde_compat"
-    )]
-    pub election_timeout_max: Duration,
-    #[serde(default = "default_snapshot_interval")]
-    pub snapshot_interval: u64,
+    /// Election timeout range lower bound in milliseconds.
+    #[serde(default = "default_election_timeout_min_ms")]
+    pub election_timeout_min_ms: u64,
+
+    /// Election timeout range upper bound in milliseconds.
+    #[serde(default = "default_election_timeout_max_ms")]
+    pub election_timeout_max_ms: u64,
+
+    /// Heartbeat interval in milliseconds.
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+
+    /// Maximum entries per append-entries batch.
+    #[serde(default = "default_max_entries_per_batch")]
+    pub max_entries_per_batch: u64,
+
+    /// Snapshot threshold (number of log entries before compaction).
+    #[serde(default = "default_snapshot_threshold")]
+    pub snapshot_threshold: u64,
 }
 
+/// SWIM gossip protocol configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipSection {
-    #[serde(default = "default_probe_interval", with = "humantime_serde_compat")]
-    pub probe_interval: Duration,
-    #[serde(default = "default_suspect_timeout", with = "humantime_serde_compat")]
-    pub suspect_timeout: Duration,
-    #[serde(default = "default_probe_timeout", with = "humantime_serde_compat")]
-    pub probe_timeout: Duration,
+    /// Bind address for gossip protocol.
+    pub bind_addr: SocketAddr,
+
+    /// Seed nodes for initial cluster join.
+    #[serde(default)]
+    pub seed_nodes: Vec<SocketAddr>,
+
+    /// Gossip protocol period in milliseconds.
+    #[serde(default = "default_gossip_interval_ms")]
+    pub gossip_interval_ms: u64,
+
+    /// Suspicion timeout multiplier (number of protocol periods).
+    #[serde(default = "default_suspicion_mult")]
+    pub suspicion_mult: u32,
 }
 
+/// Wire protocol configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RebalanceSection {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_threshold")]
-    pub threshold: f64,
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: u32,
-    #[serde(default = "default_throttle_bandwidth")]
-    pub throttle_bandwidth: String,
+pub struct ProtocolSection {
+    /// Maximum message size in bytes.
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+
+    /// Connection timeout in milliseconds.
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+
+    /// Request timeout in milliseconds.
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
 }
 
+/// TLS configuration for node-to-node and client-to-node communication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsSection {
-    pub ca_cert: PathBuf,
-    pub cert: PathBuf,
-    pub key: PathBuf,
+    /// Path to the TLS certificate file (PEM).
+    pub cert_path: PathBuf,
+
+    /// Path to the TLS private key file (PEM).
+    pub key_path: PathBuf,
+
+    /// Path to the CA certificate file for peer verification (PEM).
+    pub ca_path: PathBuf,
+
+    /// Whether to require client certificates.
+    #[serde(default)]
+    pub require_client_cert: bool,
+}
+
+/// Authentication configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthSection {
+    /// Shared secret or token for cluster authentication.
+    pub cluster_secret: String,
+}
+
+fn default_max_background_io() -> u32 {
+    4
+}
+fn default_scrub_interval_secs() -> u64 {
+    86400
+}
+fn default_election_timeout_min_ms() -> u64 {
+    150
+}
+fn default_election_timeout_max_ms() -> u64 {
+    300
+}
+fn default_heartbeat_interval_ms() -> u64 {
+    50
+}
+fn default_max_entries_per_batch() -> u64 {
+    64
+}
+fn default_snapshot_threshold() -> u64 {
+    10000
+}
+fn default_gossip_interval_ms() -> u64 {
+    1000
+}
+fn default_suspicion_mult() -> u32 {
+    4
+}
+fn default_max_message_size() -> usize {
+    64 * 1024 * 1024
+}
+fn default_connect_timeout_ms() -> u64 {
+    5000
+}
+fn default_request_timeout_ms() -> u64 {
+    30000
 }
 
 impl NodeConfig {
-    pub fn from_file(path: &std::path::Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!(
-                "failed to read config file {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-        Self::from_toml(&content)
+    /// Parse a [`NodeConfig`] from a TOML string.
+    pub fn from_toml(s: &str) -> Result<Self, Error> {
+        let config: NodeConfig =
+            toml::from_str(s).map_err(|e| Error::Config(format!("TOML parse error: {e}")))?;
+        config.validate()?;
+        Ok(config)
     }
 
-    pub fn from_toml(content: &str) -> Result<Self> {
-        toml::from_str(content).map_err(|e| Error::Config(format!("failed to parse config: {e}")))
+    /// Parse a [`NodeConfig`] from a TOML file.
+    pub fn from_file(path: &Path) -> Result<Self, Error> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_toml(&contents)
     }
-}
 
-fn default_listen() -> SocketAddr {
-    // SAFETY: this is a valid socket address literal
-    "0.0.0.0:7400".parse().unwrap()
-}
-fn default_data_listen() -> SocketAddr {
-    "0.0.0.0:7401".parse().unwrap()
-}
-fn default_metrics_listen() -> SocketAddr {
-    "0.0.0.0:7402".parse().unwrap()
-}
-fn default_extent_size() -> String {
-    "4MB".into()
-}
-fn default_heartbeat_interval() -> Duration {
-    Duration::from_millis(200)
-}
-fn default_election_timeout_min() -> Duration {
-    Duration::from_millis(1000)
-}
-fn default_election_timeout_max() -> Duration {
-    Duration::from_millis(2000)
-}
-fn default_snapshot_interval() -> u64 {
-    10_000
-}
-fn default_probe_interval() -> Duration {
-    Duration::from_millis(500)
-}
-fn default_suspect_timeout() -> Duration {
-    Duration::from_secs(3)
-}
-fn default_probe_timeout() -> Duration {
-    Duration::from_millis(200)
-}
-fn default_true() -> bool {
-    true
-}
-fn default_threshold() -> f64 {
-    0.20
-}
-fn default_max_concurrent() -> u32 {
-    1
-}
-fn default_throttle_bandwidth() -> String {
-    "1Gbps".into()
-}
-
-impl Default for RaftSection {
-    fn default() -> Self {
-        Self {
-            heartbeat_interval: default_heartbeat_interval(),
-            election_timeout_min: default_election_timeout_min(),
-            election_timeout_max: default_election_timeout_max(),
-            snapshot_interval: default_snapshot_interval(),
+    /// Validate configuration values, returning helpful error messages.
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.storage.disk_paths.is_empty() {
+            return Err(Error::Config(
+                "storage.disk_paths must contain at least one path".into(),
+            ));
         }
-    }
-}
 
-impl Default for GossipSection {
-    fn default() -> Self {
-        Self {
-            probe_interval: default_probe_interval(),
-            suspect_timeout: default_suspect_timeout(),
-            probe_timeout: default_probe_timeout(),
+        if self.raft.election_timeout_min_ms >= self.raft.election_timeout_max_ms {
+            return Err(Error::Config(
+                "raft.election_timeout_min_ms must be less than election_timeout_max_ms".into(),
+            ));
         }
-    }
-}
 
-impl Default for RebalanceSection {
-    fn default() -> Self {
-        Self {
-            enabled: default_true(),
-            threshold: default_threshold(),
-            max_concurrent: default_max_concurrent(),
-            throttle_bandwidth: default_throttle_bandwidth(),
+        if self.raft.heartbeat_interval_ms >= self.raft.election_timeout_min_ms {
+            return Err(Error::Config(
+                "raft.heartbeat_interval_ms must be less than election_timeout_min_ms".into(),
+            ));
         }
-    }
-}
 
-pub(crate) mod humantime_serde_compat {
-    use serde::{self, Deserialize, Deserializer, Serializer};
-    use std::time::Duration;
-
-    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let ms = duration.as_millis();
-        if ms >= 1000 && ms % 1000 == 0 {
-            serializer.serialize_str(&format!("{}s", ms / 1000))
-        } else {
-            serializer.serialize_str(&format!("{ms}ms"))
+        if self.protocol.max_message_size == 0 {
+            return Err(Error::Config(
+                "protocol.max_message_size must be greater than 0".into(),
+            ));
         }
-    }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        parse_duration(&s).map_err(serde::de::Error::custom)
-    }
-
-    pub fn parse_duration(s: &str) -> Result<Duration, String> {
-        let s = s.trim();
-        if let Some(ms) = s.strip_suffix("ms") {
-            ms.trim()
-                .parse::<u64>()
-                .map(Duration::from_millis)
-                .map_err(|e| e.to_string())
-        } else if let Some(secs) = s.strip_suffix('s') {
-            secs.trim()
-                .parse::<u64>()
-                .map(Duration::from_secs)
-                .map_err(|e| e.to_string())
-        } else {
-            Err(format!("unsupported duration format: {s}"))
+        if let Some(ref tls) = self.tls {
+            if tls.cert_path.as_os_str().is_empty() {
+                return Err(Error::Config("tls.cert_path must not be empty".into()));
+            }
+            if tls.key_path.as_os_str().is_empty() {
+                return Err(Error::Config("tls.key_path must not be empty".into()));
+            }
+            if tls.ca_path.as_os_str().is_empty() {
+                return Err(Error::Config("tls.ca_path must not be empty".into()));
+            }
         }
+
+        Ok(())
+    }
+
+    /// Generate an example TOML configuration string.
+    pub fn example_toml() -> String {
+        r#"# Blockyard Node Configuration
+
+name = "node-1"
+listen_addr = "0.0.0.0:9800"
+data_dir = "/var/lib/blockyard"
+
+[storage]
+disk_paths = ["/mnt/disk0", "/mnt/disk1"]
+max_background_io = 4
+scrub_interval_secs = 86400
+
+[raft]
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 50
+max_entries_per_batch = 64
+snapshot_threshold = 10000
+
+[gossip]
+bind_addr = "0.0.0.0:9801"
+seed_nodes = ["10.0.0.2:9801", "10.0.0.3:9801"]
+gossip_interval_ms = 1000
+suspicion_mult = 4
+
+[protocol]
+max_message_size = 67108864
+connect_timeout_ms = 5000
+request_timeout_ms = 30000
+
+# [tls]
+# cert_path = "/etc/blockyard/tls/node.crt"
+# key_path = "/etc/blockyard/tls/node.key"
+# ca_path = "/etc/blockyard/tls/ca.crt"
+# require_client_cert = false
+
+# [auth]
+# cluster_secret = "change-me"
+"#
+        .to_string()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::humantime_serde_compat::parse_duration;
     use super::*;
 
-    const MINIMAL_CONFIG: &str = r#"
-[node]
-listen = "0.0.0.0:7400"
-
-[cluster]
-seeds = ["10.0.1.1:7400"]
+    fn minimal_toml() -> String {
+        r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
 
 [storage]
-zfs_pool = "blockyard"
-"#;
-
-    const FULL_CONFIG: &str = r#"
-[node]
-name = "node-a"
-listen = "0.0.0.0:7400"
-data_listen = "0.0.0.0:7401"
-metrics_listen = "0.0.0.0:7402"
-
-[cluster]
-seeds = ["10.0.1.1:7400", "10.0.1.2:7400"]
-
-[storage]
-zfs_pool = "blockyard"
-extent_size = "4MB"
+disk_paths = ["/mnt/disk0"]
 
 [raft]
-heartbeat_interval = "200ms"
-election_timeout_min = "1000ms"
-election_timeout_max = "2000ms"
-snapshot_interval = 10000
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 50
 
 [gossip]
-probe_interval = "500ms"
-suspect_timeout = "3s"
-probe_timeout = "200ms"
+bind_addr = "127.0.0.1:9801"
 
-[rebalance]
-enabled = true
-threshold = 0.20
-max_concurrent = 1
-throttle_bandwidth = "1Gbps"
-
-[tags]
-storage_class = "ssd"
-rack = "rack-1"
-"#;
-
-    #[test]
-    fn test_from_str_minimal() {
-        let cfg = NodeConfig::from_toml(MINIMAL_CONFIG).unwrap();
-        assert_eq!(cfg.storage.zfs_pool, "blockyard");
-        assert_eq!(cfg.cluster.seeds.len(), 1);
-        assert!(cfg.node.name.is_none());
+[protocol]
+"#
+        .to_string()
     }
 
     #[test]
-    fn test_from_str_full() {
-        let cfg = NodeConfig::from_toml(FULL_CONFIG).unwrap();
-        assert_eq!(cfg.node.name.as_deref(), Some("node-a"));
-        assert_eq!(cfg.cluster.seeds.len(), 2);
-        assert_eq!(cfg.storage.extent_size, "4MB");
-        assert_eq!(cfg.raft.heartbeat_interval, Duration::from_millis(200));
-        assert_eq!(cfg.raft.election_timeout_min, Duration::from_millis(1000));
-        assert_eq!(cfg.raft.snapshot_interval, 10_000);
-        assert_eq!(cfg.gossip.probe_interval, Duration::from_millis(500));
-        assert_eq!(cfg.gossip.suspect_timeout, Duration::from_secs(3));
-        assert!(cfg.rebalance.enabled);
-        assert!((cfg.rebalance.threshold - 0.20).abs() < f64::EPSILON);
-        assert_eq!(cfg.tags.get("storage_class").unwrap(), "ssd");
-        assert_eq!(cfg.tags.get("rack").unwrap(), "rack-1");
-    }
-
-    #[test]
-    fn test_from_str_defaults() {
-        let cfg = NodeConfig::from_toml(MINIMAL_CONFIG).unwrap();
-        assert_eq!(cfg.raft.heartbeat_interval, Duration::from_millis(200));
-        assert_eq!(cfg.raft.election_timeout_min, Duration::from_millis(1000));
-        assert_eq!(cfg.raft.election_timeout_max, Duration::from_millis(2000));
-        assert_eq!(cfg.raft.snapshot_interval, 10_000);
-        assert_eq!(cfg.gossip.probe_interval, Duration::from_millis(500));
-        assert_eq!(cfg.gossip.suspect_timeout, Duration::from_secs(3));
-        assert_eq!(cfg.gossip.probe_timeout, Duration::from_millis(200));
-        assert!(cfg.rebalance.enabled);
-        assert_eq!(cfg.rebalance.max_concurrent, 1);
-        assert_eq!(cfg.storage.extent_size, "4MB");
-        assert!(cfg.tls.is_none());
-    }
-
-    #[test]
-    fn test_from_str_invalid() {
-        assert!(NodeConfig::from_toml("this is not toml [[[").is_err());
-    }
-
-    #[test]
-    fn test_from_str_missing_required() {
-        let r = NodeConfig::from_toml("[node]\n[cluster]\nseeds = []\n");
-        assert!(r.is_err());
-    }
-
-    #[test]
-    fn test_from_file_not_found() {
-        let r = NodeConfig::from_file(std::path::Path::new("/nonexistent/config.toml"));
-        assert!(r.is_err());
-        let err = r.unwrap_err();
-        assert!(err.to_string().contains("configuration error"));
-    }
-
-    #[test]
-    fn test_raft_section_default() {
-        let r = RaftSection::default();
-        assert_eq!(r.heartbeat_interval, Duration::from_millis(200));
-        assert_eq!(r.snapshot_interval, 10_000);
-    }
-
-    #[test]
-    fn test_gossip_section_default() {
-        let g = GossipSection::default();
-        assert_eq!(g.probe_interval, Duration::from_millis(500));
-        assert_eq!(g.suspect_timeout, Duration::from_secs(3));
-    }
-
-    #[test]
-    fn test_rebalance_section_default() {
-        let r = RebalanceSection::default();
-        assert!(r.enabled);
-        assert!((r.threshold - 0.20).abs() < f64::EPSILON);
-        assert_eq!(r.max_concurrent, 1);
-    }
-
-    #[test]
-    fn test_parse_duration_ms() {
-        assert_eq!(parse_duration("200ms").unwrap(), Duration::from_millis(200));
-        assert_eq!(parse_duration("0ms").unwrap(), Duration::from_millis(0));
-    }
-
-    #[test]
-    fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("3s").unwrap(), Duration::from_secs(3));
-        assert_eq!(parse_duration("0s").unwrap(), Duration::from_secs(0));
-    }
-
-    #[test]
-    fn test_parse_duration_whitespace() {
+    fn test_parse_minimal_config() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
         assert_eq!(
-            parse_duration("  200ms  ").unwrap(),
-            Duration::from_millis(200)
+            config.listen_addr,
+            "127.0.0.1:9800".parse::<SocketAddr>().unwrap()
         );
+        assert_eq!(config.storage.disk_paths.len(), 1);
     }
 
     #[test]
-    fn test_parse_duration_invalid() {
-        assert!(parse_duration("200").is_err());
-        assert!(parse_duration("abc").is_err());
-        assert!(parse_duration("ms").is_err());
+    fn test_parse_with_name() {
+        let toml = format!("name = \"test-node\"\n{}", minimal_toml());
+        let config = NodeConfig::from_toml(&toml).unwrap();
+        assert_eq!(config.name.as_deref(), Some("test-node"));
     }
 
     #[test]
-    fn test_config_with_tls() {
-        let cfg_str = r#"
-[node]
-listen = "0.0.0.0:7400"
+    fn test_parse_defaults() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
+        assert_eq!(config.storage.max_background_io, 4);
+        assert_eq!(config.storage.scrub_interval_secs, 86400);
+        assert_eq!(config.raft.max_entries_per_batch, 64);
+        assert_eq!(config.raft.snapshot_threshold, 10000);
+        assert_eq!(config.gossip.gossip_interval_ms, 1000);
+        assert_eq!(config.gossip.suspicion_mult, 4);
+        assert_eq!(config.protocol.max_message_size, 64 * 1024 * 1024);
+        assert_eq!(config.protocol.connect_timeout_ms, 5000);
+        assert_eq!(config.protocol.request_timeout_ms, 30000);
+    }
 
-[cluster]
-seeds = ["10.0.1.1:7400"]
+    #[test]
+    fn test_validate_empty_disk_paths() {
+        let toml = r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
 
 [storage]
-zfs_pool = "blockyard"
+disk_paths = []
 
+[raft]
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 50
+
+[gossip]
+bind_addr = "127.0.0.1:9801"
+
+[protocol]
+"#;
+        let err = NodeConfig::from_toml(toml).unwrap_err();
+        assert!(err.to_string().contains("disk_paths"));
+    }
+
+    #[test]
+    fn test_validate_election_timeout_order() {
+        let toml = r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
+
+[storage]
+disk_paths = ["/mnt/disk0"]
+
+[raft]
+election_timeout_min_ms = 300
+election_timeout_max_ms = 150
+heartbeat_interval_ms = 50
+
+[gossip]
+bind_addr = "127.0.0.1:9801"
+
+[protocol]
+"#;
+        let err = NodeConfig::from_toml(toml).unwrap_err();
+        assert!(err.to_string().contains("election_timeout"));
+    }
+
+    #[test]
+    fn test_validate_heartbeat_vs_election() {
+        let toml = r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
+
+[storage]
+disk_paths = ["/mnt/disk0"]
+
+[raft]
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 200
+
+[gossip]
+bind_addr = "127.0.0.1:9801"
+
+[protocol]
+"#;
+        let err = NodeConfig::from_toml(toml).unwrap_err();
+        assert!(err.to_string().contains("heartbeat"));
+    }
+
+    #[test]
+    fn test_validate_zero_message_size() {
+        let toml = r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
+
+[storage]
+disk_paths = ["/mnt/disk0"]
+
+[raft]
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 50
+
+[gossip]
+bind_addr = "127.0.0.1:9801"
+
+[protocol]
+max_message_size = 0
+"#;
+        let err = NodeConfig::from_toml(toml).unwrap_err();
+        assert!(err.to_string().contains("max_message_size"));
+    }
+
+    #[test]
+    fn test_parse_with_tls() {
+        let toml = format!(
+            r#"{}
 [tls]
-ca_cert = "/etc/blockyard/ca.pem"
-cert = "/etc/blockyard/node.pem"
-key = "/etc/blockyard/node-key.pem"
-"#;
-        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
-        let tls = cfg.tls.unwrap();
-        assert_eq!(tls.ca_cert, PathBuf::from("/etc/blockyard/ca.pem"));
-        assert_eq!(tls.cert, PathBuf::from("/etc/blockyard/node.pem"));
-        assert_eq!(tls.key, PathBuf::from("/etc/blockyard/node-key.pem"));
-    }
-
-    #[test]
-    fn test_config_roundtrip() {
-        let cfg = NodeConfig::from_toml(FULL_CONFIG).unwrap();
-        let toml_str = toml::to_string(&cfg).unwrap();
-        let cfg2 = NodeConfig::from_toml(&toml_str).unwrap();
-        assert_eq!(cfg2.storage.zfs_pool, cfg.storage.zfs_pool);
-        assert_eq!(cfg2.raft.heartbeat_interval, cfg.raft.heartbeat_interval);
-    }
-
-    // ── Multi-zpool config tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_config_single_pool_backward_compat() {
-        let cfg = NodeConfig::from_toml(MINIMAL_CONFIG).unwrap();
-        assert_eq!(cfg.storage.zfs_pool, "blockyard");
-        assert!(cfg.storage.zfs_pools.is_empty());
-        assert_eq!(cfg.storage.all_pools(), vec!["blockyard"]);
-    }
-
-    #[test]
-    fn test_config_multiple_pools() {
-        let cfg_str = r#"
-[node]
-listen = "0.0.0.0:7400"
-
-[cluster]
-seeds = ["10.0.1.1:7400"]
-
-[storage]
-zfs_pools = ["blockyard-ssd", "blockyard-hdd"]
-"#;
-        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
-        assert_eq!(
-            cfg.storage.zfs_pools,
-            vec!["blockyard-ssd", "blockyard-hdd"]
+cert_path = "/etc/certs/node.crt"
+key_path = "/etc/certs/node.key"
+ca_path = "/etc/certs/ca.crt"
+require_client_cert = true
+"#,
+            minimal_toml()
         );
-        assert_eq!(
-            cfg.storage.all_pools(),
-            vec!["blockyard-ssd", "blockyard-hdd"]
+        let config = NodeConfig::from_toml(&toml).unwrap();
+        let tls = config.tls.unwrap();
+        assert!(tls.require_client_cert);
+        assert_eq!(tls.cert_path, PathBuf::from("/etc/certs/node.crt"));
+    }
+
+    #[test]
+    fn test_validate_tls_empty_cert() {
+        let toml = format!(
+            r#"{}
+[tls]
+cert_path = ""
+key_path = "/etc/certs/node.key"
+ca_path = "/etc/certs/ca.crt"
+"#,
+            minimal_toml()
         );
+        let err = NodeConfig::from_toml(&toml).unwrap_err();
+        assert!(err.to_string().contains("cert_path"));
     }
 
     #[test]
-    fn test_config_multiple_pools_preferred_over_single() {
-        let cfg_str = r#"
-[node]
-listen = "0.0.0.0:7400"
+    fn test_validate_tls_empty_key() {
+        let toml = format!(
+            r#"{}
+[tls]
+cert_path = "/etc/certs/node.crt"
+key_path = ""
+ca_path = "/etc/certs/ca.crt"
+"#,
+            minimal_toml()
+        );
+        let err = NodeConfig::from_toml(&toml).unwrap_err();
+        assert!(err.to_string().contains("key_path"));
+    }
 
-[cluster]
-seeds = ["10.0.1.1:7400"]
+    #[test]
+    fn test_validate_tls_empty_ca() {
+        let toml = format!(
+            r#"{}
+[tls]
+cert_path = "/etc/certs/node.crt"
+key_path = "/etc/certs/node.key"
+ca_path = ""
+"#,
+            minimal_toml()
+        );
+        let err = NodeConfig::from_toml(&toml).unwrap_err();
+        assert!(err.to_string().contains("ca_path"));
+    }
+
+    #[test]
+    fn test_parse_with_auth() {
+        let toml = format!(
+            r#"{}
+[auth]
+cluster_secret = "my-secret"
+"#,
+            minimal_toml()
+        );
+        let config = NodeConfig::from_toml(&toml).unwrap();
+        let auth = config.auth.unwrap();
+        assert_eq!(auth.cluster_secret, "my-secret");
+    }
+
+    #[test]
+    fn test_parse_with_seed_nodes() {
+        let toml = r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
 
 [storage]
-zfs_pool = "old-pool"
-zfs_pools = ["new-ssd", "new-hdd"]
+disk_paths = ["/mnt/disk0"]
+
+[raft]
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 50
+
+[gossip]
+bind_addr = "127.0.0.1:9801"
+seed_nodes = ["10.0.0.2:9801", "10.0.0.3:9801"]
+
+[protocol]
 "#;
-        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
-        // zfs_pools takes precedence.
-        assert_eq!(cfg.storage.all_pools(), vec!["new-ssd", "new-hdd"]);
+        let config = NodeConfig::from_toml(toml).unwrap();
+        assert_eq!(config.gossip.seed_nodes.len(), 2);
     }
 
     #[test]
-    fn test_config_no_pools() {
-        let cfg_str = r#"
-[node]
-listen = "0.0.0.0:7400"
-
-[cluster]
-seeds = ["10.0.1.1:7400"]
-
-[storage]
-"#;
-        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
-        assert!(cfg.storage.all_pools().is_empty());
+    fn test_invalid_toml_syntax() {
+        let err = NodeConfig::from_toml("not valid toml [[[").unwrap_err();
+        assert!(err.to_string().contains("TOML parse error"));
     }
 
     #[test]
-    fn test_all_pools_method() {
-        // Direct struct construction tests.
-        let s = StorageSection {
-            zfs_pool: String::new(),
-            zfs_pools: vec!["a".into(), "b".into()],
-            extent_size: "4MB".into(),
-        };
-        assert_eq!(s.all_pools(), vec!["a", "b"]);
+    fn test_example_toml_parses() {
+        let example = NodeConfig::example_toml();
+        let config = NodeConfig::from_toml(&example).unwrap();
+        assert_eq!(config.name.as_deref(), Some("node-1"));
+        assert_eq!(config.storage.disk_paths.len(), 2);
+    }
 
-        let s2 = StorageSection {
-            zfs_pool: "single".into(),
-            zfs_pools: Vec::new(),
-            extent_size: "4MB".into(),
-        };
-        assert_eq!(s2.all_pools(), vec!["single"]);
+    #[test]
+    fn test_from_file_missing() {
+        let result = NodeConfig::from_file(Path::new("/nonexistent/config.toml"));
+        assert!(result.is_err());
+    }
 
-        let s3 = StorageSection {
-            zfs_pool: String::new(),
-            zfs_pools: Vec::new(),
-            extent_size: "4MB".into(),
-        };
-        assert!(s3.all_pools().is_empty());
+    #[test]
+    fn test_from_file_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, minimal_toml()).unwrap();
+        let config = NodeConfig::from_file(&path).unwrap();
+        assert_eq!(config.storage.disk_paths.len(), 1);
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        let reparsed: NodeConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(config.listen_addr, reparsed.listen_addr);
+    }
+
+    #[test]
+    fn test_config_debug() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("NodeConfig"));
+    }
+
+    #[test]
+    fn test_storage_section_debug() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
+        let debug = format!("{:?}", config.storage);
+        assert!(debug.contains("StorageSection"));
+    }
+
+    #[test]
+    fn test_raft_section_debug() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
+        let debug = format!("{:?}", config.raft);
+        assert!(debug.contains("RaftSection"));
     }
 }

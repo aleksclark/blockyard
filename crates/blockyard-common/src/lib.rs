@@ -1,11 +1,20 @@
-pub mod auth;
-pub mod config;
-pub mod error;
-pub mod metrics;
-pub mod metrics_server;
-pub mod tls;
-pub mod types;
+//! Blockyard common types, configuration, and error definitions.
+//!
+//! This crate provides the shared vocabulary used by all Blockyard components:
+//! core identifier types, protection policies, disk state management,
+//! configuration, and error types.
 
-pub use config::NodeConfig;
-pub use error::{Error, Result};
-pub use types::parse_size;
+pub mod config;
+pub mod disk_state;
+pub mod error;
+pub mod id;
+pub mod protection;
+
+pub use config::{
+    AuthSection, GossipSection, NodeConfig, ProtocolSection, RaftSection, StorageSection,
+    TlsSection,
+};
+pub use disk_state::DiskState;
+pub use error::Error;
+pub use id::{DiskId, EpochId, ExtentId, NodeId, OperationId, RaftGroupId, SessionId, VolumeId};
+pub use protection::ProtectionPolicy;

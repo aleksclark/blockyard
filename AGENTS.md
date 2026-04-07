@@ -4,25 +4,21 @@ Instructions for AI agents and human contributors working on this codebase.
 
 ## Project Overview
 
-Blockyard is a distributed block-level storage system written in Rust. It prioritizes CA (Consistency + Availability), runs a single process per node, delegates local storage to ZFS zvols, uses Multi-Raft for consensus, exposes volumes via UBLK, and discovers peers through gossip.
+Blockyard is a distributed block-level storage system written in Rust. It prioritizes CA (Consistency + Availability), delegates local storage to XFS disks, uses Raft for metadata consensus, exposes volumes via UBLK, and discovers peers through gossip.
 
 Read these before starting any work:
 - [`README.md`](README.md) — architecture and quick start
 - [`ROADMAP.md`](ROADMAP.md) — current status of every deliverable
-- [`config/blockyard.example.toml`](config/blockyard.example.toml) — full configuration reference
+- [`TEST_CHECKLIST.md`](TEST_CHECKLIST.md) — integration testing checklist
 
 ## Workspace Layout
 
 ```
 crates/
 ├── blockyard/            # Main binary — node process, CLI entry point
-├── blockyard-cli/        # Lightweight remote client binary (byard)
+├── blockyard-cli/        # Remote client binary (byard)
 ├── blockyard-common/     # Shared types, config, errors — depended on by all other crates
-├── blockyard-gossip/     # SWIM gossip protocol, MemberList, failure detection
-├── blockyard-protocol/   # Client↔cluster binary wire protocol
-├── blockyard-raft/       # Multi-Raft engine (openraft), Meta Group, Volume Groups
-├── blockyard-storage/    # ZFS zvol backend, placement engine
-└── blockyard-ublk/       # UBLK (io_uring) and NBD volume mounting
+├── ETC
 ```
 
 Dependency direction: `blockyard-common` is the leaf. All other library crates depend on it. The `blockyard` binary crate depends on all library crates. `blockyard-cli` depends only on `blockyard-common`.
@@ -53,7 +49,7 @@ Minimum toolchain: Rust 1.85+ (edition 2024).
 
 ### Naming
 - Crate names: `blockyard-<subsystem>`
-- Type aliases for IDs: `NodeId`, `VolumeId`, `ExtentId`, `RaftGroupId` (defined in `blockyard-common::types`)
+- Type aliases for IDs: `NodeId`, `VolumeId`, `ExtentId`, `RaftGroupId`
 - Config structs: `<Thing>Section` (e.g., `RaftSection`, `GossipSection`)
 - Error variants: `Error::<Category>(String)` or `Error::<Category>(#[from] SourceError)`
 
@@ -66,7 +62,7 @@ Minimum toolchain: Rust 1.85+ (edition 2024).
 
 ### Unit Tests — 95% Line Coverage Required
 
-Every library crate (`blockyard-common`, `blockyard-gossip`, `blockyard-raft`, `blockyard-storage`, `blockyard-protocol`, `blockyard-ublk`) must maintain **≥95% line coverage** in unit tests.
+Every library crate must maintain **≥95% line coverage** in unit tests.
 
 Measure coverage with:
 ```bash
@@ -83,20 +79,15 @@ Rules:
 - Use `#[tokio::test]` for async tests.
 - No `#[ignore]` without a tracking issue comment.
 - Mocks and fakes: create them in a `testutil` module within the crate (e.g., `src/testutil.rs`), gated behind `#[cfg(test)]`. Prefer hand-written fakes over mocking frameworks.
-- For `blockyard-storage`: the ZFS backend must be tested against a trait abstraction so that unit tests run without a real ZFS pool. Define a `StorageBackend` trait and implement it for both `ZfsBackend` (production) and `MemoryBackend` (tests).
-- For `blockyard-gossip`: the UDP transport must be abstracted behind a trait so unit tests can use in-memory channels.
-- For `blockyard-raft`: use `openraft`'s in-memory network and storage implementations for unit tests. Do not require a running cluster.
 
 ### Integration Tests — VM-Based, Jepsen-Style
 
-**Docker is not acceptable for integration tests.** Blockyard depends on ZFS (kernel module), UBLK (kernel 6.0+), and real block device semantics. Docker containers share the host kernel and cannot properly isolate these. All integration tests must run in real virtual machines.
+**Docker is not acceptable for integration tests.** Blockyard depends on XFS (kernel module), UBLK (kernel 6.0+), and real block device semantics. Docker containers share the host kernel and cannot properly isolate these. All integration tests must run in real virtual machines.
 
 #### Infrastructure
 
 Tests run against a cluster of VMs managed by an automation tool (e.g., libvirt/QEMU via `testinfra`, Vagrant, or a custom Rust harness). Each VM:
 - Runs its own Linux kernel (6.0+ for UBLK tests)
-- Has its own ZFS pool on a virtual disk
-- Runs a single `blockyard` process
 - Is independently controllable (start, stop, kill, network partition, disk fault)
 
 Minimum cluster size for integration tests: **5 nodes** (allows 2-node failures with 3-replica quorum).
@@ -113,7 +104,7 @@ Integration tests must systematically verify correctness under failures. The tes
 | **Asymmetric partition** | Node A can reach B, but B cannot reach A |
 | **Network delay** | `tc netem` to add latency (e.g., 100ms, 500ms) |
 | **Network packet loss** | `tc netem` with configurable loss percentage |
-| **Disk slow** | `dm-delay` or cgroup I/O throttling on the ZFS pool's backing device |
+| **Disk slow** | `dm-delay` or cgroup I/O throttling on the XFS pool's backing device |
 | **Disk fault** | `dm-flakey` to inject transient I/O errors |
 | **Clock skew** | Adjust VM system clock forward/backward |
 | **Full disk** | Fill the ZFS pool to capacity |
@@ -135,7 +126,7 @@ Each scenario runs concurrent client workloads while injecting faults, then veri
 - Volume remains readable during minority partition (from majority side)
 - New leader elected within 2 seconds after leader crash
 
-**Rebalancing tests (Phase 2+):**
+**Rebalancing tests:**
 - Add node → volumes rebalance → data integrity preserved
 - Remove node (drain) → all volumes migrated → no data loss
 - Kill node during rebalancing → rebalance resumes after recovery
@@ -158,25 +149,12 @@ All integration tests must use a **checker** that validates post-conditions:
 
 1. **Write log**: the client records every attempted write (offset, data, ack status). After the test, read back every acknowledged offset and verify the data matches.
 2. **Raft log consistency**: dump Raft logs from all surviving nodes. Verify no committed entry is missing from any replica that was in the group at commit time.
-3. **ZFS integrity**: run `zpool scrub` and `zpool status` on every surviving node. Zero checksum errors.
+3. **XFS integrity**: check it's good
 4. **No zombie state**: after cluster recovery, all volumes report `Healthy` (or `Degraded` with correct replica count).
 
 #### Running Integration Tests
 
 Integration tests live in a top-level `tests/` directory (not inside any crate):
-```
-tests/
-├── harness/          # VM provisioning, fault injection, client workload generators
-│   ├── cluster.rs    # Cluster lifecycle (create, destroy, per-node control)
-│   ├── faults.rs     # Fault injection primitives
-│   ├── workload.rs   # Read/write workload generators
-│   └── checker.rs    # Post-condition verification
-├── consistency/      # Linearizability, write durability, read staleness
-├── availability/     # Failover timing, quorum behavior
-├── rebalance/        # Data migration under faults
-├── integrity/        # Data corruption, recovery, snapshots
-└── ublk/             # Client mount/unmount, failover, filesystem
-```
 
 ```bash
 # Run the full integration suite (provisions VMs, slow)
