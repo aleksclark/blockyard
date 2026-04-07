@@ -67,14 +67,14 @@ Expose the data node's extent storage over the network. Handle write reception, 
 
 Implement the strongly consistent replicated state machine that stores cluster membership, placement, volume metadata, and extent mappings.
 
-- [ ] **P3.1** Raft consensus integration (e.g., `openraft`) for metadata replication
-- [ ] **P3.2** Metadata state machine: cluster membership, placement map, volume metadata, extent mappings, protection policies
-- [ ] **P3.3** Placement epoch: monotonically increasing version, included in all relevant operations — §2.4
-- [ ] **P3.4** Metadata commit path: validate commit request, apply to state machine, return commit version — §4.5.1 step 8
-- [ ] **P3.5** Extent mapping commit: volume ID, block range, extent version, epoch, replica locations, checksums, optional CAS — §4.5.2
-- [ ] **P3.6** Committed state query: lookup extent mapping by operation ID or extent version (for ambiguous write resolution) — §4.9.2
-- [ ] **P3.7** Crash recovery: restore committed metadata, ordered entry application — §5.7, §6.10
-- [ ] **P3.8** Quorum partition handling: minority nodes refuse new commits — §6.4, invariant 10
+- [x] **P3.1** Raft consensus integration (e.g., `openraft`) for metadata replication
+- [x] **P3.2** Metadata state machine: cluster membership, placement map, volume metadata, extent mappings, protection policies
+- [x] **P3.3** Placement epoch: monotonically increasing version, included in all relevant operations — §2.4
+- [x] **P3.4** Metadata commit path: validate commit request, apply to state machine, return commit version — §4.5.1 step 8
+- [x] **P3.5** Extent mapping commit: volume ID, block range, extent version, epoch, replica locations, checksums, optional CAS — §4.5.2
+- [x] **P3.6** Committed state query: lookup extent mapping by operation ID or extent version (for ambiguous write resolution) — §4.9.2
+- [x] **P3.7** Crash recovery: restore committed metadata, ordered entry application — §5.7, §6.10
+- [x] **P3.8** Quorum partition handling: minority nodes refuse new commits — §6.4, invariant 10
 
 ---
 
