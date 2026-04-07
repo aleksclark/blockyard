@@ -4,16 +4,11 @@ use std::sync::Arc;
 use blockyard_common::{
     DiskId, EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
 };
-use blockyard_raft::{
-    LogStore, MetadataService, NetworkFactory, Router,
-    StateMachineStore,
-};
-use blockyard_storage::{
-    ExtentIndex, ExtentStore, StorageClass,
-};
+use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
 use blockyard_storage::extent::{
     committed_extent_path, compute_checksum, staged_extent_path, verify_checksum,
 };
+use blockyard_storage::{ExtentIndex, ExtentStore, StorageClass};
 use openraft::BasicNode;
 use parking_lot::RwLock;
 use tempfile::TempDir;
@@ -29,9 +24,7 @@ fn create_extent_store(tmpdir: &TempDir) -> (ExtentStore, DiskId) {
     (store, disk_id)
 }
 
-async fn create_raft_cluster(
-    node_count: u64,
-) -> (Vec<MetadataService>, Arc<RwLock<Router>>) {
+async fn create_raft_cluster(node_count: u64) -> (Vec<MetadataService>, Arc<RwLock<Router>>) {
     let router = Arc::new(RwLock::new(Router::new()));
     let config = Arc::new(openraft::Config {
         heartbeat_interval: 100,
@@ -104,7 +97,13 @@ async fn test_crash_recovery_extents_survive() {
             .expect("stage extent");
 
         let entry = store
-            .commit_extent(extent_id, i + 1, &checksum, data.len() as u64, StorageClass::Default)
+            .commit_extent(
+                extent_id,
+                i + 1,
+                &checksum,
+                data.len() as u64,
+                StorageClass::Default,
+            )
             .expect("commit extent");
         index.insert(entry.clone()).expect("insert into index");
         committed_extents.push((extent_id, i + 1, checksum, data));
@@ -164,7 +163,11 @@ async fn test_partition_convergence_metadata_state_machine() {
 
     let vol_id = VolumeId::generate();
     leader
-        .create_volume(vol_id, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .create_volume(
+            vol_id,
+            1_000_000,
+            ProtectionPolicy::Replicated { replicas: 3 },
+        )
         .await
         .expect("create volume");
 
@@ -245,7 +248,8 @@ async fn test_partition_convergence_metadata_state_machine() {
     let leader_epoch = follower_epochs[leader_idx];
     for (i, e) in follower_epochs.iter().enumerate() {
         assert_eq!(
-            *e, leader_epoch,
+            *e,
+            leader_epoch,
             "node {} epoch {:?} must match leader epoch {:?}",
             i + 1,
             e,
@@ -269,7 +273,13 @@ async fn test_corruption_detected_checksum_mismatch() {
         .expect("stage extent");
 
     let _entry = store
-        .commit_extent(extent_id, 1, &checksum, data.len() as u64, StorageClass::Default)
+        .commit_extent(
+            extent_id,
+            1,
+            &checksum,
+            data.len() as u64,
+            StorageClass::Default,
+        )
         .expect("commit extent");
 
     let (read_data, read_checksum) = store
@@ -278,11 +288,7 @@ async fn test_corruption_detected_checksum_mismatch() {
     assert_eq!(read_data, data);
     assert_eq!(read_checksum, checksum);
 
-    let committed_path = committed_extent_path(
-        tmpdir.path(),
-        extent_id,
-        1,
-    );
+    let committed_path = committed_extent_path(tmpdir.path(), extent_id, 1);
     let mut corrupted = std::fs::read(&committed_path).expect("read file for corruption");
     for byte in corrupted.iter_mut().take(128) {
         *byte ^= 0xFF;
@@ -322,7 +328,11 @@ async fn test_snapshot_verify_state_matches() {
 
     let vol_id = VolumeId::generate();
     leader
-        .create_volume(vol_id, 5_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .create_volume(
+            vol_id,
+            5_000_000,
+            ProtectionPolicy::Replicated { replicas: 3 },
+        )
         .await
         .expect("create volume");
 
@@ -358,7 +368,11 @@ async fn test_snapshot_verify_state_matches() {
 
     for (_, version) in &committed_extents {
         let m = leader.lookup_by_extent_version(*version);
-        assert!(m.is_some(), "mapping version {} must exist pre-snapshot", version);
+        assert!(
+            m.is_some(),
+            "mapping version {} must exist pre-snapshot",
+            version
+        );
     }
 
     let new_ext = ExtentId::generate();

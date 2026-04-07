@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use blockyard_common::{
-    DiskId, DiskState, EpochId, ExtentId, LeaseVersion, OperationId, SessionId, VolumeId,
+    DiskId, DiskState, EpochId, ExtentId, LeaseVersion, OperationId, PeerIdentity, SessionId,
+    VolumeAcl, VolumeId,
 };
 use blockyard_protocol::{
     ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
@@ -45,6 +46,7 @@ pub struct DataNodeService {
     inventory: DiskInventory,
     index: ExtentIndex,
     lease_cache: RwLock<HashMap<VolumeId, CachedLease>>,
+    volume_acl: VolumeAcl,
 }
 
 impl DataNodeService {
@@ -56,6 +58,7 @@ impl DataNodeService {
             inventory,
             index,
             lease_cache: RwLock::new(HashMap::new()),
+            volume_acl: VolumeAcl::new(),
         }
     }
 
@@ -82,7 +85,29 @@ impl DataNodeService {
         request: &WriteExtentRequest,
         payload: &[u8],
     ) -> WriteExtentResponse {
+        self.handle_write_as(request, payload, None)
+    }
+
+    /// Handle a write extent request with per-volume ACL check (P6.5).
+    pub fn handle_write_as(
+        &self,
+        request: &WriteExtentRequest,
+        payload: &[u8],
+        caller: Option<&PeerIdentity>,
+    ) -> WriteExtentResponse {
         let op_id = request.operation_id;
+
+        if let Some(identity) = caller {
+            if !self.volume_acl.check_write(&request.volume_id, identity) {
+                return self.write_error(
+                    request,
+                    format!(
+                        "write denied: {} not authorized for volume {}",
+                        identity, request.volume_id
+                    ),
+                );
+            }
+        }
 
         if let Some(record) = self.check_duplicate(op_id) {
             debug!(%op_id, "duplicate write operation detected");
@@ -195,7 +220,31 @@ impl DataNodeService {
         &self,
         request: &ReadExtentRequest,
     ) -> (ReadExtentResponse, Option<Vec<u8>>) {
+        self.handle_read_as(request, None)
+    }
+
+    /// Handle a read extent request with per-volume ACL check (P6.5).
+    pub fn handle_read_as(
+        &self,
+        request: &ReadExtentRequest,
+        caller: Option<&PeerIdentity>,
+    ) -> (ReadExtentResponse, Option<Vec<u8>>) {
         let op_id = request.operation_id;
+
+        if let Some(identity) = caller {
+            if !self.volume_acl.check_read(&request.volume_id, identity) {
+                return (
+                    self.read_error(
+                        request,
+                        format!(
+                            "read denied: {} not authorized for volume {}",
+                            identity, request.volume_id
+                        ),
+                    ),
+                    None,
+                );
+            }
+        }
 
         if let Err(msg) = self.validate_epoch_for_read(request.epoch) {
             return (self.read_error(request, msg), None);
@@ -458,6 +507,11 @@ impl DataNodeService {
             payload_size: 0,
             error: Some(message),
         }
+    }
+
+    /// Get a reference to the volume ACL.
+    pub fn volume_acl(&self) -> &VolumeAcl {
+        &self.volume_acl
     }
 
     /// Get a reference to the extent index.
@@ -1245,5 +1299,288 @@ mod tests {
         let (_dir, service, _) = setup_service();
         let vid = VolumeId::generate();
         assert!(service.get_cached_lease(&vid).is_none());
+    }
+
+    #[test]
+    fn test_write_as_authorized_client() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let identity = blockyard_common::PeerIdentity::Client(sid);
+        let eid = ExtentId::generate();
+        let data = b"acl write test";
+        let checksum = compute_checksum(data);
+
+        service.volume_acl().grant(
+            vid,
+            &identity.to_string(),
+            blockyard_common::VolumePermission::read_write(),
+        );
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        let resp = service.handle_write_as(&req, data, Some(&identity));
+        assert!(
+            resp.success,
+            "authorized write should succeed: {:?}",
+            resp.error
+        );
+    }
+
+    #[test]
+    fn test_write_as_unauthorized_client_denied() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let identity = blockyard_common::PeerIdentity::Client(sid);
+        let eid = ExtentId::generate();
+        let data = b"denied write";
+        let checksum = compute_checksum(data);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        let resp = service.handle_write_as(&req, data, Some(&identity));
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("write denied"));
+    }
+
+    #[test]
+    fn test_write_as_read_only_client_denied() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let identity = blockyard_common::PeerIdentity::Client(sid);
+        let eid = ExtentId::generate();
+        let data = b"read-only client";
+        let checksum = compute_checksum(data);
+
+        service.volume_acl().grant(
+            vid,
+            &identity.to_string(),
+            blockyard_common::VolumePermission::read_only(),
+        );
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        let resp = service.handle_write_as(&req, data, Some(&identity));
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("write denied"));
+    }
+
+    #[test]
+    fn test_write_as_node_always_authorized() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let nid = blockyard_common::NodeId::generate();
+        let identity = blockyard_common::PeerIdentity::Node(nid);
+        let eid = ExtentId::generate();
+        let data = b"node write";
+        let checksum = compute_checksum(data);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: SessionId::generate(),
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        let resp = service.handle_write_as(&req, data, Some(&identity));
+        assert!(resp.success, "node writes always allowed: {:?}", resp.error);
+    }
+
+    #[test]
+    fn test_read_as_authorized_client() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let identity = blockyard_common::PeerIdentity::Client(sid);
+        let eid = ExtentId::generate();
+        let data = b"acl read test";
+        let checksum = compute_checksum(data);
+
+        service.volume_acl().grant(
+            vid,
+            &identity.to_string(),
+            blockyard_common::VolumePermission::read_only(),
+        );
+
+        let write_req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        service.handle_write(&write_req, data);
+
+        let read_req = ReadExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            offset: 0,
+            length: 0,
+        };
+        let (resp, payload) = service.handle_read_as(&read_req, Some(&identity));
+        assert!(
+            resp.success,
+            "authorized read should succeed: {:?}",
+            resp.error
+        );
+        assert_eq!(payload.unwrap(), data.to_vec());
+    }
+
+    #[test]
+    fn test_read_as_unauthorized_client_denied() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let identity = blockyard_common::PeerIdentity::Client(sid);
+        let eid = ExtentId::generate();
+        let data = b"deny read";
+        let checksum = compute_checksum(data);
+
+        let write_req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        service.handle_write(&write_req, data);
+
+        let read_req = ReadExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            offset: 0,
+            length: 0,
+        };
+        let (resp, payload) = service.handle_read_as(&read_req, Some(&identity));
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("read denied"));
+        assert!(payload.is_none());
+    }
+
+    #[test]
+    fn test_read_as_node_always_authorized() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let nid = blockyard_common::NodeId::generate();
+        let identity = blockyard_common::PeerIdentity::Node(nid);
+        let eid = ExtentId::generate();
+        let data = b"node read";
+        let checksum = compute_checksum(data);
+
+        let write_req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: SessionId::generate(),
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        service.handle_write(&write_req, data);
+
+        let read_req = ReadExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: SessionId::generate(),
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            offset: 0,
+            length: 0,
+        };
+        let (resp, payload) = service.handle_read_as(&read_req, Some(&identity));
+        assert!(resp.success, "node reads always allowed: {:?}", resp.error);
+        assert_eq!(payload.unwrap(), data.to_vec());
+    }
+
+    #[test]
+    fn test_write_without_caller_skips_acl() {
+        let (_dir, service, disk_id) = setup_service();
+        let eid = ExtentId::generate();
+        let data = b"no caller";
+        let checksum = compute_checksum(data);
+        let req = make_write_request(
+            eid,
+            1,
+            EpochId::new(1),
+            Some(disk_id),
+            &checksum,
+            data.len() as u64,
+        );
+        let resp = service.handle_write_as(&req, data, None);
+        assert!(resp.success, "no caller means no ACL check");
+    }
+
+    #[test]
+    fn test_volume_acl_accessor() {
+        let (_dir, service, _) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let identity = blockyard_common::PeerIdentity::Client(sid);
+
+        service.volume_acl().grant(
+            vid,
+            &identity.to_string(),
+            blockyard_common::VolumePermission::read_write(),
+        );
+        assert!(service.volume_acl().check_write(&vid, &identity));
     }
 }

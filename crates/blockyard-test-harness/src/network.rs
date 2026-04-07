@@ -86,7 +86,10 @@ mod tests {
         let config = NetworkConfig::default();
         assert_eq!(config.base_listen_port, 20000);
         assert_eq!(config.base_gossip_port, 21000);
-        assert_eq!(config.host, std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(
+            config.host,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! (protobuf/flatbuffers) is a future optimization.
 
 use blockyard_common::{
-    DiskId, EpochId, ExtentId, LeaseVersion, NodeId, OperationId, SessionId, VolumeId,
+    AuthToken, DiskId, EpochId, ExtentId, LeaseVersion, NodeId, OperationId, SessionId, VolumeId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,16 +18,18 @@ pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = 1;
 /// Minimum supported protocol version.
 pub const MIN_PROTOCOL_VERSION: ProtocolVersion = 1;
 
-/// Connection handshake request (P2.2).
+/// Connection handshake request (P2.2, P6.3, P6.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeRequest {
     pub protocol_version: ProtocolVersion,
     pub node_id: Option<NodeId>,
     pub session_id: Option<SessionId>,
     pub features: Vec<String>,
+    #[serde(default)]
+    pub auth_token: Option<AuthToken>,
 }
 
-/// Connection handshake response (P2.2).
+/// Connection handshake response (P2.2, P6.3, P6.4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeResponse {
     pub protocol_version: ProtocolVersion,
@@ -35,6 +37,8 @@ pub struct HandshakeResponse {
     pub accepted: bool,
     pub message: Option<String>,
     pub supported_features: Vec<String>,
+    #[serde(default)]
+    pub authenticated: bool,
 }
 
 /// Write extent request from client to data node (§5.5).
@@ -143,6 +147,7 @@ mod tests {
             node_id: None,
             session_id: Some(SessionId::generate()),
             features: vec!["compression".into()],
+            auth_token: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: HandshakeRequest = serde_json::from_str(&json).unwrap();
@@ -158,6 +163,7 @@ mod tests {
             accepted: true,
             message: None,
             supported_features: vec![],
+            authenticated: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: HandshakeResponse = serde_json::from_str(&json).unwrap();
@@ -320,6 +326,7 @@ mod tests {
             node_id: None,
             session_id: None,
             features: vec![],
+            auth_token: None,
         };
         let msg = ProtocolMessage::HandshakeReq(req);
         let json = serde_json::to_string(&msg).unwrap();

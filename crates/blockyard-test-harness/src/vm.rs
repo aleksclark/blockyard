@@ -112,7 +112,10 @@ impl Node {
                 return Ok(());
             }
             NodeState::Paused => {
-                anyhow::bail!("{}: cannot start a paused node, use resume()", self.config.id);
+                anyhow::bail!(
+                    "{}: cannot start a paused node, use resume()",
+                    self.config.id
+                );
             }
             _ => {}
         }
@@ -192,7 +195,11 @@ impl Node {
     pub fn pause(&self) -> anyhow::Result<()> {
         let current_state = *self.state.read();
         if current_state != NodeState::Running {
-            anyhow::bail!("{}: can only pause a running node, current={}", self.config.id, current_state);
+            anyhow::bail!(
+                "{}: can only pause a running node, current={}",
+                self.config.id,
+                current_state
+            );
         }
 
         info!("{}: sending SIGSTOP", self.config.id);
@@ -209,7 +216,11 @@ impl Node {
     pub fn resume(&self) -> anyhow::Result<()> {
         let current_state = *self.state.read();
         if current_state != NodeState::Paused {
-            anyhow::bail!("{}: can only resume a paused node, current={}", self.config.id, current_state);
+            anyhow::bail!(
+                "{}: can only resume a paused node, current={}",
+                self.config.id,
+                current_state
+            );
         }
 
         info!("{}: sending SIGCONT", self.config.id);
@@ -344,7 +355,12 @@ mod tests {
         let node = Node::new(config);
         let result = node.pause();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("can only pause a running node"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("can only pause a running node")
+        );
     }
 
     #[test]
@@ -353,7 +369,12 @@ mod tests {
         let node = Node::new(config);
         let result = node.resume();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("can only resume a paused node"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("can only resume a paused node")
+        );
     }
 
     #[test]
@@ -503,7 +524,12 @@ mod tests {
         node.pause().unwrap();
         let result = node.start();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot start a paused node"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot start a paused node")
+        );
 
         node.resume().unwrap();
         node.stop().unwrap();
@@ -530,10 +556,7 @@ mod tests {
             pid = node.pid().unwrap();
         }
         std::thread::sleep(Duration::from_millis(50));
-        let result = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid as i32),
-            None,
-        );
+        let result = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None);
         assert!(result.is_err());
     }
 }

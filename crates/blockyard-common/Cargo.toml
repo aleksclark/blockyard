@@ -10,6 +10,8 @@ description = "Blockyard distributed block storage — shared types, config, and
 [dependencies]
 blake3.workspace = true
 bytes.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

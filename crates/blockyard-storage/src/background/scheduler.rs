@@ -74,7 +74,8 @@ pub struct BackgroundScheduler {
 impl BackgroundScheduler {
     /// Create a new background scheduler with the given configuration.
     pub fn new(config: SchedulerConfig) -> Self {
-        let rate_limiter = TokenBucket::new(config.burst_capacity, config.total_budget_tokens_per_sec);
+        let rate_limiter =
+            TokenBucket::new(config.burst_capacity, config.total_budget_tokens_per_sec);
         let scrub_worker = ScrubWorker::new(config.scrub.clone());
         let repair_worker = RepairWorker::new(config.repair.clone());
         let rebalance_worker = RebalanceWorker::new(config.rebalance.clone());
@@ -363,8 +364,9 @@ mod tests {
         let scheduler = BackgroundScheduler::new(SchedulerConfig::default());
 
         // Enqueue some repair requests
-        scheduler.repair_worker().enqueue(
-            crate::background::repair::RepairRequest {
+        scheduler
+            .repair_worker()
+            .enqueue(crate::background::repair::RepairRequest {
                 extent_id: blockyard_common::ExtentId::generate(),
                 version: 1,
                 target_disk_id: blockyard_common::DiskId::generate(),
@@ -372,8 +374,7 @@ mod tests {
                     healthy_sources: vec![],
                 },
                 priority: 0,
-            },
-        );
+            });
 
         let status = scheduler.status();
         assert_eq!(status.repair_backlog, 1);

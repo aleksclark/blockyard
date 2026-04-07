@@ -273,7 +273,9 @@ mod tests {
     struct FakeExtentReader {
         disks: Vec<DiskId>,
         extents: Vec<ScrubExtentEntry>,
-        read_results: parking_lot::Mutex<std::collections::HashMap<ExtentId, Result<(Vec<u8>, String), String>>>,
+        read_results: parking_lot::Mutex<
+            std::collections::HashMap<ExtentId, Result<(Vec<u8>, String), String>>,
+        >,
     }
 
     impl FakeExtentReader {
@@ -290,7 +292,11 @@ mod tests {
             self
         }
 
-        fn with_extent(mut self, entry: ScrubExtentEntry, result: Result<(Vec<u8>, String), String>) -> Self {
+        fn with_extent(
+            mut self,
+            entry: ScrubExtentEntry,
+            result: Result<(Vec<u8>, String), String>,
+        ) -> Self {
             let eid = entry.extent_id;
             self.extents.push(entry);
             self.read_results.lock().insert(eid, result);
@@ -418,17 +424,15 @@ mod tests {
         let eid = ExtentId::generate();
         let checksum = "abc123".to_string();
 
-        let reader = FakeExtentReader::new()
-            .with_disk(disk_id)
-            .with_extent(
-                ScrubExtentEntry {
-                    extent_id: eid,
-                    disk_id,
-                    expected_checksum: checksum.clone(),
-                    version: 1,
-                },
-                Ok((vec![1, 2, 3], checksum)),
-            );
+        let reader = FakeExtentReader::new().with_disk(disk_id).with_extent(
+            ScrubExtentEntry {
+                extent_id: eid,
+                disk_id,
+                expected_checksum: checksum.clone(),
+                version: 1,
+            },
+            Ok((vec![1, 2, 3], checksum)),
+        );
 
         let worker = ScrubWorker::new(ScrubConfig::default());
         let rate_limiter = TokenBucket::new(1000, 1000);
@@ -446,17 +450,15 @@ mod tests {
         let disk_id = DiskId::generate();
         let eid = ExtentId::generate();
 
-        let reader = FakeExtentReader::new()
-            .with_disk(disk_id)
-            .with_extent(
-                ScrubExtentEntry {
-                    extent_id: eid,
-                    disk_id,
-                    expected_checksum: "expected".to_string(),
-                    version: 1,
-                },
-                Ok((vec![1, 2, 3], "actual_different".to_string())),
-            );
+        let reader = FakeExtentReader::new().with_disk(disk_id).with_extent(
+            ScrubExtentEntry {
+                extent_id: eid,
+                disk_id,
+                expected_checksum: "expected".to_string(),
+                version: 1,
+            },
+            Ok((vec![1, 2, 3], "actual_different".to_string())),
+        );
 
         let worker = ScrubWorker::new(ScrubConfig::default());
         let rate_limiter = TokenBucket::new(1000, 1000);
@@ -465,7 +467,9 @@ mod tests {
         let results = worker.scrub_pass(&reader, &rate_limiter, &tx).await;
         assert_eq!(results[0].checksum_errors, 1);
 
-        let notification = rx.try_recv().expect("should receive corruption notification");
+        let notification = rx
+            .try_recv()
+            .expect("should receive corruption notification");
         assert_eq!(notification.extent_id, eid);
         match notification.reason {
             CorruptionReason::ChecksumMismatch { expected, actual } => {
@@ -481,17 +485,15 @@ mod tests {
         let disk_id = DiskId::generate();
         let eid = ExtentId::generate();
 
-        let reader = FakeExtentReader::new()
-            .with_disk(disk_id)
-            .with_extent(
-                ScrubExtentEntry {
-                    extent_id: eid,
-                    disk_id,
-                    expected_checksum: "abc".to_string(),
-                    version: 1,
-                },
-                Err("io error".to_string()),
-            );
+        let reader = FakeExtentReader::new().with_disk(disk_id).with_extent(
+            ScrubExtentEntry {
+                extent_id: eid,
+                disk_id,
+                expected_checksum: "abc".to_string(),
+                version: 1,
+            },
+            Err("io error".to_string()),
+        );
 
         let worker = ScrubWorker::new(ScrubConfig::default());
         let rate_limiter = TokenBucket::new(1000, 1000);
@@ -512,17 +514,15 @@ mod tests {
         let disk_id = DiskId::generate();
         let eid = ExtentId::generate();
 
-        let reader = FakeExtentReader::new()
-            .with_disk(disk_id)
-            .with_extent(
-                ScrubExtentEntry {
-                    extent_id: eid,
-                    disk_id,
-                    expected_checksum: "abc".to_string(),
-                    version: 1,
-                },
-                Err("metadata not found".to_string()),
-            );
+        let reader = FakeExtentReader::new().with_disk(disk_id).with_extent(
+            ScrubExtentEntry {
+                extent_id: eid,
+                disk_id,
+                expected_checksum: "abc".to_string(),
+                version: 1,
+            },
+            Err("metadata not found".to_string()),
+        );
 
         let worker = ScrubWorker::new(ScrubConfig::default());
         let rate_limiter = TokenBucket::new(1000, 1000);
@@ -589,7 +589,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_scrub_worker_run_cancellation() {
-        let worker = ScrubWorker::new(ScrubConfig { interval_secs: 3600, tokens_per_extent: 1 });
+        let worker = ScrubWorker::new(ScrubConfig {
+            interval_secs: 3600,
+            tokens_per_extent: 1,
+        });
         let reader = FakeExtentReader::new();
         let rate_limiter = TokenBucket::new(1000, 1000);
         let (tx, _rx) = mpsc::channel(100);

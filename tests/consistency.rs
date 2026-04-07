@@ -1,21 +1,17 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use blockyard_common::LeaseResponse;
 use blockyard_common::{
     EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
 };
-use blockyard_raft::{
-    LogStore, MetadataService, NetworkFactory, Router, StateMachineStore,
-};
+use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
+use blockyard_ublk::freshness::FreshnessStatus;
+use blockyard_ublk::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
 use blockyard_ublk::{
     ClientSession, DataNodeClient, FreshnessChecker, MetadataCache, MetadataClient,
     StaleEpochHandler, WriteOutcome, WritePipeline, WriteRequest, WriteWatermark,
 };
-use blockyard_ublk::freshness::FreshnessStatus;
-use blockyard_ublk::traits::{
-    CommitRequest, CommittedMapping, WriteAck, WriteAckError,
-};
-use blockyard_common::LeaseResponse;
 use bytes::Bytes;
 use openraft::BasicNode;
 use parking_lot::RwLock;
@@ -31,14 +27,12 @@ struct RaftCluster {
 
 async fn create_raft_cluster(node_count: u64) -> RaftCluster {
     let router = Arc::new(RwLock::new(Router::new()));
-    let config = Arc::new(
-        openraft::Config {
-            heartbeat_interval: 100,
-            election_timeout_min: 300,
-            election_timeout_max: 600,
-            ..Default::default()
-        },
-    );
+    let config = Arc::new(openraft::Config {
+        heartbeat_interval: 100,
+        election_timeout_min: 300,
+        election_timeout_max: 600,
+        ..Default::default()
+    });
 
     let mut services = Vec::new();
 
@@ -182,9 +176,7 @@ impl MetadataClient for MockMetadataClient {
         request: CommitRequest,
     ) -> Result<EpochId, blockyard_common::Error> {
         if *self.fail_commit.lock() {
-            return Err(blockyard_common::Error::Raft(
-                "commit failed".to_string(),
-            ));
+            return Err(blockyard_common::Error::Raft("commit failed".to_string()));
         }
         let epoch = *self.epoch.lock();
         self.committed.lock().push(request);
@@ -286,11 +278,7 @@ async fn test_linearizability_all_ack_leader_failover() {
 
     for (i, svc) in cluster.services.iter().enumerate() {
         let vol = svc.get_volume(&vol_id);
-        assert!(
-            vol.is_some(),
-            "node {} must see the created volume",
-            i + 1
-        );
+        assert!(vol.is_some(), "node {} must see the created volume", i + 1);
         assert_eq!(vol.unwrap().volume_id, vol_id);
 
         let mapping = svc.lookup_by_extent_version(1);
@@ -305,8 +293,7 @@ async fn test_linearizability_all_ack_leader_failover() {
     }
 
     let old_leader_id = (leader_idx + 1) as u64;
-    cluster
-        .services[leader_idx]
+    cluster.services[leader_idx]
         .raft()
         .shutdown()
         .await
@@ -545,9 +532,7 @@ impl blockyard_client::MetadataProvider for MockMetadataProvider {
 }
 
 struct MockDataNodeReader {
-    data: parking_lot::Mutex<
-        std::collections::HashMap<(NodeId, ExtentId), (Bytes, String)>,
-    >,
+    data: parking_lot::Mutex<std::collections::HashMap<(NodeId, ExtentId), (Bytes, String)>>,
 }
 
 impl MockDataNodeReader {

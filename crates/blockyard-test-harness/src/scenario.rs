@@ -8,9 +8,7 @@ use crate::checker::{CheckReport, ConsistencyChecker};
 use crate::cluster::{Cluster, ClusterConfig, ProcessCluster};
 use crate::network::NetworkConfig;
 use crate::vm::NodeId;
-use crate::workload::{
-    AckStatus, Operation, OperationLog, WorkloadConfig, WorkloadGenerator,
-};
+use crate::workload::{AckStatus, Operation, OperationLog, WorkloadConfig, WorkloadGenerator};
 use blockyard_common::VolumeId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +136,11 @@ impl ScenarioContext {
 
     pub fn recover_node(&mut self, id: NodeId) {
         self.alive_nodes.insert(id);
-        info!("simulated recovery: {} (alive={})", id, self.alive_nodes.len());
+        info!(
+            "simulated recovery: {} (alive={})",
+            id,
+            self.alive_nodes.len()
+        );
     }
 
     pub fn simulate_leader_election(&mut self, crashed_leader: NodeId) -> NodeId {
@@ -158,11 +160,7 @@ impl ScenarioContext {
         new_leader
     }
 
-    pub fn simulate_writes_with_acks(
-        &self,
-        count: usize,
-        volume_id: VolumeId,
-    ) -> Vec<Operation> {
+    pub fn simulate_writes_with_acks(&self, count: usize, volume_id: VolumeId) -> Vec<Operation> {
         let mut operations = Vec::with_capacity(count);
         for i in 0..count {
             let offset = (i as u64) * self.workload.config().block_size as u64;
@@ -188,11 +186,7 @@ impl ScenarioContext {
                         Operation::new_read(write_op.volume_id, write_op.offset, write_op.length);
                     read_op.complete(AckStatus::Acked);
                     self.workload.log().record(read_op);
-                    checker.record_read_back(
-                        write_op.volume_id,
-                        write_op.offset,
-                        checksum.clone(),
-                    );
+                    checker.record_read_back(write_op.volume_id, write_op.offset, checksum.clone());
                 }
             }
         }
@@ -275,10 +269,7 @@ impl UblkMount {
     pub fn mount(&mut self, leader: NodeId) {
         self.state = MountState::Mounted;
         self.connected_leader = Some(leader);
-        info!(
-            "ublk mount: volume={} leader={}",
-            self.volume_id, leader
-        );
+        info!("ublk mount: volume={} leader={}", self.volume_id, leader);
     }
 
     pub fn unmount(&mut self) {
@@ -295,10 +286,7 @@ impl UblkMount {
     pub fn remount(&mut self, leader: NodeId) {
         self.state = MountState::Mounted;
         self.connected_leader = Some(leader);
-        info!(
-            "ublk remount: volume={} leader={}",
-            self.volume_id, leader
-        );
+        info!("ublk remount: volume={} leader={}", self.volume_id, leader);
     }
 
     pub fn follow_new_leader(&mut self, new_leader: NodeId) {

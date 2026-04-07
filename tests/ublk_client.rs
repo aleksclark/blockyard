@@ -4,12 +4,12 @@ use std::sync::Arc;
 use blockyard_common::{
     EpochId, ExtentId, LeaseResponse, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
 };
-use blockyard_ublk::{
-    ClientSession, DataNodeClient, MetadataCache, MetadataClient, StaleEpochHandler,
-    WriteOutcome, WritePipeline, WriteRequest, WriteWatermark,
-};
 use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
 use blockyard_ublk::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
+use blockyard_ublk::{
+    ClientSession, DataNodeClient, MetadataCache, MetadataClient, StaleEpochHandler, WriteOutcome,
+    WritePipeline, WriteRequest, WriteWatermark,
+};
 use bytes::Bytes;
 
 // ---------------------------------------------------------------------------
@@ -201,8 +201,7 @@ fn setup_pipeline(
     cache.set_epoch(epoch);
 
     for (i, nid) in node_ids.iter().enumerate() {
-        let addr: std::net::SocketAddr =
-            format!("127.0.0.1:{}", 9000 + i).parse().unwrap();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 9000 + i).parse().unwrap();
         cache.set_node(*nid, addr);
     }
 
@@ -272,10 +271,7 @@ async fn test_mount_write_crash_remount_verify() {
     };
     let result = pipeline.execute(request).await;
     assert!(result.is_ok(), "write should succeed: {:?}", result.err());
-    assert!(matches!(
-        result.unwrap(),
-        WriteOutcome::Committed { .. }
-    ));
+    assert!(matches!(result.unwrap(), WriteOutcome::Committed { .. }));
 
     let stored_before_crash = data_client.stored_data();
     assert!(

@@ -154,10 +154,7 @@ impl Cluster for ProcessCluster {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(anyhow::anyhow!(
-                "failed to stop {} nodes",
-                errors.len()
-            ))
+            Err(anyhow::anyhow!("failed to stop {} nodes", errors.len()))
         }
     }
 
@@ -196,11 +193,7 @@ impl Drop for ProcessCluster {
     }
 }
 
-pub async fn poll_for<F>(
-    timeout: Duration,
-    interval: Duration,
-    mut predicate: F,
-) -> bool
+pub async fn poll_for<F>(timeout: Duration, interval: Duration, mut predicate: F) -> bool
 where
     F: FnMut() -> bool,
 {
@@ -365,22 +358,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_poll_for_immediate_success() {
-        let result = poll_for(
-            Duration::from_secs(1),
-            Duration::from_millis(10),
-            || true,
-        )
-        .await;
+        let result = poll_for(Duration::from_secs(1), Duration::from_millis(10), || true).await;
         assert!(result);
     }
 
     #[tokio::test]
     async fn test_poll_for_timeout() {
-        let result = poll_for(
-            Duration::from_millis(50),
-            Duration::from_millis(10),
-            || false,
-        )
+        let result = poll_for(Duration::from_millis(50), Duration::from_millis(10), || {
+            false
+        })
         .await;
         assert!(!result);
     }
@@ -392,9 +378,7 @@ mod tests {
         let result = poll_for(
             Duration::from_secs(1),
             Duration::from_millis(10),
-            move || {
-                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 3
-            },
+            move || c.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 3,
         )
         .await;
         assert!(result);

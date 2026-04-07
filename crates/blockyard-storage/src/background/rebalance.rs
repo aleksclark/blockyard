@@ -564,8 +564,7 @@ mod tests {
         let eid = ExtentId::generate();
 
         let worker = RebalanceWorker::new(RebalanceConfig::default());
-        let inventory = FakeRebalanceInventory::new()
-            .with_disk(disk1, 500, 1000, vec![(eid, 1)]);
+        let inventory = FakeRebalanceInventory::new().with_disk(disk1, 500, 1000, vec![(eid, 1)]);
         let repair = RepairWorker::new(crate::background::repair::RepairConfig::default());
         let limiter = TokenBucket::new(1000, 1000);
 
@@ -599,9 +598,7 @@ mod tests {
         let repair = RepairWorker::new(crate::background::repair::RepairConfig::default());
         let limiter = TokenBucket::new(1000, 1000);
 
-        let plan = worker
-            .rebalance_pass(&inventory, &repair, &limiter)
-            .await;
+        let plan = worker.rebalance_pass(&inventory, &repair, &limiter).await;
         assert!(!plan.needed);
         assert_eq!(repair.queue_len(), 0);
     }
@@ -625,9 +622,7 @@ mod tests {
         let repair = RepairWorker::new(crate::background::repair::RepairConfig::default());
         let limiter = TokenBucket::new(1000, 1000);
 
-        let plan = worker
-            .rebalance_pass(&inventory, &repair, &limiter)
-            .await;
+        let plan = worker.rebalance_pass(&inventory, &repair, &limiter).await;
         assert!(plan.needed);
         assert!(repair.queue_len() > 0);
     }
@@ -644,9 +639,7 @@ mod tests {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
-            worker
-                .run(&inventory, &repair, &limiter, cancel_rx)
-                .await;
+            worker.run(&inventory, &repair, &limiter, cancel_rx).await;
         });
 
         cancel_tx.send(true).unwrap_or(());

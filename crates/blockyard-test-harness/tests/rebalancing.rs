@@ -12,11 +12,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use blockyard_common::VolumeId;
+use blockyard_test_harness::TestNodeId as NodeId;
 use blockyard_test_harness::{
     AckStatus, Cluster, ClusterConfig, ConsistencyChecker, NetworkConfig, OperationLog,
     ProcessCluster, WorkloadConfig, WorkloadGenerator,
 };
-use blockyard_test_harness::TestNodeId as NodeId;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,11 +96,7 @@ fn simulate_rebalance(
 }
 
 // Pending Phase 7: simulates draining a node.
-fn simulate_drain(
-    drain_node: NodeId,
-    remaining: &[NodeId],
-    volumes: &[VolumeId],
-) -> Vec<VolumeId> {
+fn simulate_drain(drain_node: NodeId, remaining: &[NodeId], volumes: &[VolumeId]) -> Vec<VolumeId> {
     assert!(
         !remaining.is_empty(),
         "need at least one remaining node to drain to"

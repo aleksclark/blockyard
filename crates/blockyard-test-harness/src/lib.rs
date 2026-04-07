@@ -9,15 +9,14 @@ pub mod vm;
 pub mod workload;
 
 pub use checker::{CheckReport, CheckResult, ConsistencyChecker};
-pub use cluster::{poll_for, Cluster, ClusterConfig, ProcessCluster};
+pub use cluster::{Cluster, ClusterConfig, ProcessCluster, poll_for};
 pub use fault::{Fault, FaultInjector, FaultRecord, ProcessFaultInjector};
 pub use network::{NetworkConfig, NodeAddress, PortAllocator};
 pub use pattern::{
     PatternBlock, PatternConfig, PatternGenerator, PatternKind, PatternVerifyResult,
 };
 pub use scenario::{
-    AckPolicy, MountState, ReadPolicy, ScenarioConfig, ScenarioContext, StalenessResult,
-    UblkMount,
+    AckPolicy, MountState, ReadPolicy, ScenarioConfig, ScenarioContext, StalenessResult, UblkMount,
 };
 pub use snapshot::{
     BlockRecord, SnapshotId, SnapshotManager, SnapshotMismatch, SnapshotVerifyResult,

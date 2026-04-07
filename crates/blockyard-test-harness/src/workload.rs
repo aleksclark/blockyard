@@ -213,7 +213,10 @@ pub enum KeyDistribution {
     Sequential,
     Uniform,
     Zipfian,
-    Hotspot { hot_fraction: u32, hot_ops_percent: u32 },
+    Hotspot {
+        hot_fraction: u32,
+        hot_ops_percent: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -290,7 +293,7 @@ impl WorkloadGenerator {
     }
 
     pub fn generate_operation(&self) -> Operation {
-        let mut rng = rand::thread_rng();  // noqa: gen is reserved in 2024
+        let mut rng = rand::thread_rng(); // noqa: gen is reserved in 2024
 
         let volume_id = if self.config.volume_ids.is_empty() {
             VolumeId::generate()
@@ -321,7 +324,7 @@ impl WorkloadGenerator {
     }
 
     pub fn generate_write(&self, volume_id: VolumeId, offset: u64) -> (Operation, Bytes) {
-        let mut rng = rand::thread_rng();  // rng via thread_rng
+        let mut rng = rand::thread_rng(); // rng via thread_rng
         let data = self.generate_data(&mut rng);
         let checksum = blake3::hash(&data).to_hex().to_string();
         let op = Operation::new_write(volume_id, offset, self.config.block_size, checksum);

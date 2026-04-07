@@ -309,7 +309,10 @@ mod tests {
         assert_eq!(block.offset, 0);
         assert_eq!(block.data.len(), 4096);
         assert!(!block.checksum.is_empty());
-        assert!(block.data.iter().any(|&b| b != 0), "data should not be all zeros");
+        assert!(
+            block.data.iter().any(|&b| b != 0),
+            "data should not be all zeros"
+        );
     }
 
     #[test]
@@ -416,7 +419,11 @@ mod tests {
         let blocks_map = HashMap::new();
         let results = pgen.verify_all(&blocks_map);
         assert_eq!(results.len(), 4);
-        assert!(results.iter().all(|r| matches!(r, PatternVerifyResult::Missing { .. })));
+        assert!(
+            results
+                .iter()
+                .all(|r| matches!(r, PatternVerifyResult::Missing { .. }))
+        );
     }
 
     #[test]
@@ -510,25 +517,29 @@ mod tests {
     fn test_pattern_verify_result_display() {
         assert!(format!("{}", PatternVerifyResult::Ok { block_index: 0 }).contains("OK"));
         assert!(format!("{}", PatternVerifyResult::Missing { block_index: 1 }).contains("MISSING"));
-        assert!(format!(
-            "{}",
-            PatternVerifyResult::LengthMismatch {
-                block_index: 2,
-                expected: 4096,
-                actual: 100
-            }
-        )
-        .contains("LENGTH MISMATCH"));
-        assert!(format!(
-            "{}",
-            PatternVerifyResult::DataMismatch {
-                block_index: 3,
-                expected_checksum: "abc".to_string(),
-                actual_checksum: "def".to_string(),
-                first_diff_offset: Some(42),
-            }
-        )
-        .contains("DATA MISMATCH"));
+        assert!(
+            format!(
+                "{}",
+                PatternVerifyResult::LengthMismatch {
+                    block_index: 2,
+                    expected: 4096,
+                    actual: 100
+                }
+            )
+            .contains("LENGTH MISMATCH")
+        );
+        assert!(
+            format!(
+                "{}",
+                PatternVerifyResult::DataMismatch {
+                    block_index: 3,
+                    expected_checksum: "abc".to_string(),
+                    actual_checksum: "def".to_string(),
+                    first_diff_offset: Some(42),
+                }
+            )
+            .contains("DATA MISMATCH")
+        );
     }
 
     #[test]

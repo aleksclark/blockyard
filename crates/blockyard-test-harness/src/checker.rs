@@ -157,7 +157,10 @@ impl ConsistencyChecker {
             CheckReport {
                 name: "acked_writes_readable".to_string(),
                 result: CheckResult::Pass,
-                details: vec![format!("all {} acked writes have read-back data", acked.len())],
+                details: vec![format!(
+                    "all {} acked writes have read-back data",
+                    acked.len()
+                )],
             }
         } else {
             let fail_count = missing.len();

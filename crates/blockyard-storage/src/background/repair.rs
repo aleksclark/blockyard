@@ -192,12 +192,7 @@ impl RepairWorker {
 
         let outcome = match &request.repair_type {
             RepairType::Replication { healthy_sources } => {
-                self.repair_replication(
-                    &request,
-                    healthy_sources,
-                    extent_reader,
-                    extent_writer,
-                )
+                self.repair_replication(&request, healthy_sources, extent_reader, extent_writer)
             }
             RepairType::ErasureCode {
                 data_count,
@@ -897,7 +892,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!outcome.success);
-        assert!(outcome.error.as_ref().is_some_and(|e| e.contains("insufficient")));
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("insufficient"))
+        );
     }
 
     #[tokio::test]
@@ -934,7 +934,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!outcome.success);
-        assert!(outcome.error.as_ref().is_some_and(|e| e.contains("reconstruction")));
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("reconstruction"))
+        );
     }
 
     #[tokio::test]
@@ -1061,7 +1066,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!outcome.success);
-        assert!(outcome.error.as_ref().is_some_and(|e| e.contains("write failed")));
+        assert!(
+            outcome
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("write failed"))
+        );
     }
 
     #[tokio::test]

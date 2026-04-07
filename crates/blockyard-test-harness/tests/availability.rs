@@ -8,12 +8,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use blockyard_common::{
-    ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
-};
-use blockyard_raft::{
-    LogStore, MetadataService, NetworkFactory, Router, StateMachineStore,
-};
+use blockyard_common::{ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
 use openraft::BasicNode;
 use parking_lot::RwLock;
 
@@ -189,11 +185,19 @@ async fn test_1_of_5_crash_zero_downtime_unaffected() {
     let vol1 = VolumeId::generate();
     let vol2 = VolumeId::generate();
     leader
-        .create_volume(vol1, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .create_volume(
+            vol1,
+            1_000_000,
+            ProtectionPolicy::Replicated { replicas: 3 },
+        )
         .await
         .expect("create vol1");
     leader
-        .create_volume(vol2, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .create_volume(
+            vol2,
+            1_000_000,
+            ProtectionPolicy::Replicated { replicas: 3 },
+        )
         .await
         .expect("create vol2");
 
@@ -384,10 +388,7 @@ async fn test_volume_readable_minority_partition() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let m2 = leader.lookup_by_extent_version(2);
-    assert!(
-        m2.is_some(),
-        "post-partition writes should be committed"
-    );
+    assert!(m2.is_some(), "post-partition writes should be committed");
 }
 
 // ---------------------------------------------------------------------------

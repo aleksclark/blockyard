@@ -11,4 +11,6 @@ pub use messages::{
     ProtocolMessage, ProtocolVersion, ReadExtentRequest, ReadExtentResponse, WriteExtentRequest,
     WriteExtentResponse,
 };
-pub use version::{NegotiationResult, is_version_supported, negotiate_version};
+pub use version::{
+    NegotiationResult, is_version_supported, negotiate_version, negotiate_version_with_auth,
+};

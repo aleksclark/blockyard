@@ -210,10 +210,7 @@ impl FaultInjector for ProcessFaultInjector<'_> {
                 node_id,
                 loss_percent,
             } => {
-                info!(
-                    "simulating {}% packet loss on {}",
-                    loss_percent, node_id
-                );
+                info!("simulating {}% packet loss on {}", loss_percent, node_id);
                 debug!(
                     "process-mode packet loss: requires tc netem or proxy, \
                      use VM mode for real packet loss"
@@ -221,10 +218,7 @@ impl FaultInjector for ProcessFaultInjector<'_> {
                 self.record_fault(fault);
             }
             Fault::DiskSlow { node_id, delay } => {
-                info!(
-                    "simulating slow disk ({:?} delay) on {}",
-                    delay, node_id
-                );
+                info!("simulating slow disk ({:?} delay) on {}", delay, node_id);
                 debug!(
                     "process-mode disk slow: requires dm-delay, \
                      use VM mode for real disk delay"
@@ -482,9 +476,7 @@ mod tests {
         assert_eq!(nodes.get(&id).unwrap().state(), NodeState::Running);
 
         let injector = ProcessFaultInjector::new(&nodes);
-        injector
-            .inject(&Fault::NodeCrash { node_id: id })
-            .unwrap();
+        injector.inject(&Fault::NodeCrash { node_id: id }).unwrap();
         assert_eq!(nodes.get(&id).unwrap().state(), NodeState::Crashed);
         assert_eq!(injector.active_faults().len(), 1);
     }
@@ -510,15 +502,11 @@ mod tests {
 
         let injector = ProcessFaultInjector::new(&nodes);
 
-        injector
-            .inject(&Fault::NodePause { node_id: id })
-            .unwrap();
+        injector.inject(&Fault::NodePause { node_id: id }).unwrap();
         assert_eq!(nodes.get(&id).unwrap().state(), NodeState::Paused);
         assert_eq!(injector.active_faults().len(), 1);
 
-        injector
-            .inject(&Fault::NodeResume { node_id: id })
-            .unwrap();
+        injector.inject(&Fault::NodeResume { node_id: id }).unwrap();
         assert_eq!(nodes.get(&id).unwrap().state(), NodeState::Running);
         assert_eq!(injector.active_faults().len(), 0);
 

@@ -4,6 +4,7 @@
 //! core identifier types, protection policies, disk state management,
 //! configuration, and error types.
 
+pub mod auth;
 pub mod checksum;
 pub mod config;
 pub mod disk_state;
@@ -12,6 +13,10 @@ pub mod id;
 pub mod lease;
 pub mod protection;
 
+pub use auth::{
+    AuthProvider, AuthToken, DEFAULT_TOKEN_TTL_MS, PeerIdentity, SharedSecretAuth, VolumeAcl,
+    VolumePermission,
+};
 pub use config::{
     AuthSection, GossipSection, NodeConfig, ProtocolSection, RaftSection, StorageSection,
     TlsSection,
