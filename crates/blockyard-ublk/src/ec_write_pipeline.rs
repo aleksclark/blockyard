@@ -109,7 +109,17 @@ impl CoalescingBuffer {
             w.received_at.elapsed() >= self.config.max_delay
         });
 
-        pending.insert(stripe_start, write);
+        // Merge within the same stripe instead of replacing: concatenate data
+        // and extend the block range so no writes are silently dropped.
+        if let Some(existing) = pending.get_mut(&stripe_start) {
+            let mut merged = existing.data.to_vec();
+            merged.extend_from_slice(&write.data);
+            existing.data = Bytes::from(merged);
+            existing.block_range = std::cmp::min(existing.block_range.start, write.block_range.start)
+                ..std::cmp::max(existing.block_range.end, write.block_range.end);
+        } else {
+            pending.insert(stripe_start, write);
+        }
 
         if should_flush || time_exceeded {
             let flushed: Vec<PendingWrite> = pending.values().cloned().collect();
@@ -286,7 +296,8 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         let encoded = encode_data(data, data_chunks, parity_chunks)?;
 
         let extent_id = ExtentId::generate();
-        let extent_version = epoch.as_u64() * 1000 + block_range.start;
+        let extent_version = crate::write_pipeline::EXTENT_VERSION_COUNTER
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _checksum = compute_checksum(data);
 
         let acks = self
@@ -320,10 +331,14 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
             .map(|a| a.checksum.as_bytes().to_vec())
             .collect();
 
-        if successful_acks.len() < total_required {
+        // EC can tolerate up to M failures, so we require K + min(1, M) acks
+        // (at least one parity for protection), not all K+M.
+        let min_parity = std::cmp::min(1, parity_chunks);
+        let required_acks = data_chunks + min_parity;
+        if successful_acks.len() < required_acks {
             return Ok(WriteOutcome::InsufficientAcks {
                 acked: successful_acks.len(),
-                required: total_required,
+                required: required_acks,
             });
         }
 
@@ -384,41 +399,53 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         extent_version: u64,
         epoch: EpochId,
     ) -> Vec<WriteAck> {
-        let mut acks = Vec::with_capacity(nodes.len());
+        let mut join_set = tokio::task::JoinSet::new();
 
         for (i, (&node_id, fragment)) in nodes.iter().zip(encoded.fragments.iter()).enumerate() {
             let frag_checksum = compute_checksum(&fragment.data);
+            let client = Arc::clone(&self.data_client);
+            let session_id = self.session.session_id();
+            let frag_data = fragment.data.clone();
+            join_set.spawn(async move {
+                let result = client
+                    .write_extent(
+                        node_id,
+                        operation_id,
+                        session_id,
+                        volume_id,
+                        extent_id,
+                        extent_version,
+                        epoch,
+                        frag_data,
+                        frag_checksum,
+                    )
+                    .await;
+                match result {
+                    Ok(ack) => ack,
+                    Err(e) => {
+                        tracing::warn!(
+                            node = %node_id,
+                            fragment = i,
+                            error = %e,
+                            "EC fragment write failed"
+                        );
+                        WriteAck {
+                            node_id,
+                            success: false,
+                            checksum: String::new(),
+                            error: Some(WriteAckError::InternalError(e.to_string())),
+                        }
+                    }
+                }
+            });
+        }
 
-            let result = self
-                .data_client
-                .write_extent(
-                    node_id,
-                    operation_id,
-                    self.session.session_id(),
-                    volume_id,
-                    extent_id,
-                    extent_version,
-                    epoch,
-                    fragment.data.clone(),
-                    frag_checksum,
-                )
-                .await;
-
+        let mut acks = Vec::with_capacity(nodes.len());
+        while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(ack) => acks.push(ack),
                 Err(e) => {
-                    tracing::warn!(
-                        node = %node_id,
-                        fragment = i,
-                        error = %e,
-                        "EC fragment write failed"
-                    );
-                    acks.push(WriteAck {
-                        node_id,
-                        success: false,
-                        checksum: String::new(),
-                        error: Some(WriteAckError::InternalError(e.to_string())),
-                    });
+                    tracing::error!(error = %e, "EC fragment write task panicked");
                 }
             }
         }
@@ -528,12 +555,7 @@ pub fn encode_data(
 }
 
 fn compute_checksum(data: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{:016x}", hash)
+    blockyard_common::checksum::compute_checksum(data)
 }
 
 #[cfg(test)]
@@ -735,7 +757,8 @@ mod tests {
         match result {
             WriteOutcome::InsufficientAcks { acked, required } => {
                 assert_eq!(acked, 0);
-                assert_eq!(required, 6);
+                // EC 4+2 requires K + min(1, M) = 5 acks, not all 6
+                assert_eq!(required, 5);
             }
             other => panic!("expected InsufficientAcks, got {:?}", other),
         }

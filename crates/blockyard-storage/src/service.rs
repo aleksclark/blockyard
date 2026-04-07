@@ -315,7 +315,7 @@ impl DataNodeService {
     /// Validate epoch for read operations (P2.6: conditional stale-epoch reads).
     fn validate_epoch_for_read(&self, request_epoch: EpochId) -> Result<(), String> {
         let current = *self.current_epoch.read();
-        if request_epoch.as_u64() + 1 < current.as_u64() {
+        if request_epoch.as_u64().saturating_add(1) < current.as_u64() {
             Err(format!(
                 "stale epoch for read: request epoch {} < current {} (tolerance exceeded)",
                 request_epoch, current
@@ -332,9 +332,22 @@ impl DataNodeService {
     }
 
     /// Record a completed operation for dedup.
+    ///
+    /// Evicts the oldest entries when the log exceeds the maximum size (10,000)
+    /// to prevent unbounded memory growth.
     fn record_operation(&self, record: OperationRecord) {
+        const MAX_OPERATION_LOG_SIZE: usize = 10_000;
         let mut log = self.operation_log.write();
         log.insert(record.operation_id, record);
+        if log.len() > MAX_OPERATION_LOG_SIZE {
+            // Evict ~10% of oldest entries to amortize eviction cost.
+            let evict_count = log.len() - MAX_OPERATION_LOG_SIZE + MAX_OPERATION_LOG_SIZE / 10;
+            let keys_to_remove: Vec<OperationId> =
+                log.keys().take(evict_count).copied().collect();
+            for key in keys_to_remove {
+                log.remove(&key);
+            }
+        }
     }
 
     /// Select a disk for writing, validating eligibility (P2.3 step 2).
@@ -399,11 +412,12 @@ impl DataNodeService {
     }
 
     fn write_error(&self, request: &WriteExtentRequest, message: String) -> WriteExtentResponse {
+        let disk_id = request.target_disk_id.unwrap_or_else(DiskId::generate);
         let record = OperationRecord {
             operation_id: request.operation_id,
             extent_id: request.extent_id,
             extent_version: request.extent_version,
-            disk_id: request.target_disk_id.unwrap_or_else(DiskId::generate),
+            disk_id,
             checksum: String::new(),
             success: false,
         };
@@ -413,7 +427,7 @@ impl DataNodeService {
             operation_id: request.operation_id,
             extent_id: request.extent_id,
             extent_version: request.extent_version,
-            disk_id: request.target_disk_id.unwrap_or_else(DiskId::generate),
+            disk_id,
             success: false,
             checksum: String::new(),
             error: Some(message),

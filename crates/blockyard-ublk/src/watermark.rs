@@ -30,6 +30,11 @@ impl WriteWatermark {
         }
     }
 
+    /// Get the current watermark value as a u64 commit version.
+    pub fn current_version(&self) -> u64 {
+        self.value.load(Ordering::Acquire)
+    }
+
     /// Get the current watermark value.
     pub fn current(&self) -> EpochId {
         EpochId::new(self.value.load(Ordering::Acquire))
@@ -38,15 +43,20 @@ impl WriteWatermark {
     /// Advance the watermark to `epoch` if it is greater than the current value.
     /// Returns `true` if the watermark was actually advanced.
     pub fn advance(&self, epoch: EpochId) -> bool {
-        let new_val = epoch.as_u64();
+        self.advance_to(epoch.as_u64())
+    }
+
+    /// Advance the watermark to the given commit version if it is greater.
+    /// Returns `true` if the watermark was actually advanced.
+    pub fn advance_to(&self, version: u64) -> bool {
         loop {
             let current = self.value.load(Ordering::Acquire);
-            if new_val <= current {
+            if version <= current {
                 return false;
             }
             match self.value.compare_exchange_weak(
                 current,
-                new_val,
+                version,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {

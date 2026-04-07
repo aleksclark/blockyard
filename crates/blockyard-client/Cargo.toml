@@ -10,6 +10,7 @@ description = "Blockyard distributed block storage — client read path"
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
 blockyard-protocol = { path = "../blockyard-protocol" }
+blake3.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

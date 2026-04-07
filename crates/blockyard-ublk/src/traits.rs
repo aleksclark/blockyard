@@ -60,9 +60,8 @@ pub struct CommittedMapping {
 /// Abstracts the data plane so tests can mock network communication.
 #[allow(async_fn_in_trait)]
 pub trait DataNodeClient: Send + Sync + 'static {
-    /// Send extent data to a specific data node for local storage.
     #[allow(clippy::too_many_arguments)]
-    async fn write_extent(
+    fn write_extent(
         &self,
         node_id: NodeId,
         operation_id: OperationId,
@@ -73,7 +72,7 @@ pub trait DataNodeClient: Send + Sync + 'static {
         epoch: EpochId,
         data: Bytes,
         checksum: String,
-    ) -> Result<WriteAck, Error>;
+    ) -> impl std::future::Future<Output = Result<WriteAck, Error>> + Send;
 }
 
 /// Trait for interacting with the metadata service.

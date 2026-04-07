@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Blockyard distributed block storage — shared types, config, and errors"
 
 [dependencies]
+blake3.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
 serde.workspace = true

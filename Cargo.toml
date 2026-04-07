@@ -21,6 +21,7 @@ repository = "https://github.com/blockyardio/blockyard"
 [workspace.dependencies]
 # Shared across workspace
 anyhow = "1"
+blake3 = "1"
 bytes = "1"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }

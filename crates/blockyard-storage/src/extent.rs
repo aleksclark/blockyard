@@ -521,9 +521,18 @@ pub struct RecoveryReport {
 /// Sync the parent directory of a path for crash consistency.
 fn sync_parent_dir(path: &Path) -> Result<(), StorageError> {
     if let Some(parent) = path.parent() {
-        if let Ok(dir) = OpenOptions::new().read(true).open(parent) {
-            let _ = dir.sync_all();
-        }
+        let dir = OpenOptions::new().read(true).open(parent).map_err(|e| {
+            StorageError::StagingError(format!(
+                "failed to open parent dir {} for sync: {e}",
+                parent.display()
+            ))
+        })?;
+        dir.sync_all().map_err(|e| {
+            StorageError::StagingError(format!(
+                "failed to sync parent dir {}: {e}",
+                parent.display()
+            ))
+        })?;
     }
     Ok(())
 }

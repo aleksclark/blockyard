@@ -159,7 +159,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 #[derive(Debug)]
 pub struct StateMachineStore {
     data: Arc<RwLock<MetadataStateMachineData>>,
-    snapshot_idx: u64,
+    snapshot_idx: Arc<std::sync::atomic::AtomicU64>,
     current_snapshot: Arc<RwLock<Option<StoredSnapshot>>>,
 }
 
@@ -175,7 +175,7 @@ impl StateMachineStore {
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(MetadataStateMachineData::new())),
-            snapshot_idx: 0,
+            snapshot_idx: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             current_snapshot: Arc::new(RwLock::new(None)),
         }
     }
@@ -196,7 +196,7 @@ impl Clone for StateMachineStore {
     fn clone(&self) -> Self {
         Self {
             data: Arc::clone(&self.data),
-            snapshot_idx: self.snapshot_idx,
+            snapshot_idx: Arc::clone(&self.snapshot_idx),
             current_snapshot: Arc::clone(&self.current_snapshot),
         }
     }
@@ -212,11 +212,12 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             (data.last_applied, data.last_membership.clone(), json)
         };
 
-        self.snapshot_idx += 1;
+        self.snapshot_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let idx = self.snapshot_idx.load(std::sync::atomic::Ordering::Relaxed);
         let snapshot_id = if let Some(last) = last_applied {
-            format!("{}-{}-{}", last.leader_id, last.index, self.snapshot_idx)
+            format!("{}-{}-{}", last.leader_id, last.index, idx)
         } else {
-            format!("--{}", self.snapshot_idx)
+            format!("--{}", idx)
         };
 
         let meta = SnapshotMeta {

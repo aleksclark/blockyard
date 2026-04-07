@@ -19,10 +19,15 @@ use crate::traits::MetadataClient;
 /// - Refreshing metadata from the metadata service
 /// - Updating the cache
 /// - Signaling readiness to retry
+///
+/// Uses a `tokio::sync::Mutex` to deduplicate concurrent refresh calls —
+/// only the first caller performs the actual refresh; subsequent callers
+/// wait and reuse the result.
 #[derive(Debug)]
 pub struct StaleEpochHandler {
     paused: std::sync::atomic::AtomicBool,
     refresh_count: std::sync::atomic::AtomicU64,
+    refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl StaleEpochHandler {
@@ -30,6 +35,7 @@ impl StaleEpochHandler {
         Self {
             paused: std::sync::atomic::AtomicBool::new(false),
             refresh_count: std::sync::atomic::AtomicU64::new(0),
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -59,6 +65,9 @@ impl StaleEpochHandler {
         client: &M,
         stale_epoch: EpochId,
     ) -> Result<EpochId, Error> {
+        // Acquire lock to deduplicate concurrent refresh calls (I8).
+        let _guard = self.refresh_lock.lock().await;
+
         self.paused
             .store(true, std::sync::atomic::Ordering::Release);
 

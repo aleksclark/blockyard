@@ -15,8 +15,12 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use bytes::Bytes;
+
+/// Global atomic counter for generating unique extent versions.
+pub static EXTENT_VERSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 use blockyard_common::error::Error;
 use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
@@ -148,7 +152,7 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
         }
 
         let extent_id = ExtentId::generate();
-        let extent_version = epoch.as_u64() * 1000 + request.block_range.start;
+        let extent_version = EXTENT_VERSION_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         let checksum = compute_checksum(&request.data);
 
         let acks = self
@@ -245,9 +249,15 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
 
         match protection {
             ProtectionPolicy::Replicated { replicas } => {
-                let required = *replicas as usize;
+                let total = *replicas as usize;
                 let available: Vec<NodeId> =
-                    nodes.iter().take(required).map(|n| n.node_id).collect();
+                    nodes.iter().take(total).map(|n| n.node_id).collect();
+                // Allow majority acks: ceil((replicas+1)/2) when replicas > 1.
+                let required = if total > 1 {
+                    (total / 2) + 1
+                } else {
+                    total
+                };
                 Ok((required, available))
             }
             ProtectionPolicy::ErasureCoded {
@@ -274,34 +284,48 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
         data: &Bytes,
         checksum: &str,
     ) -> Vec<crate::traits::WriteAck> {
-        let mut acks = Vec::with_capacity(nodes.len());
+        let mut join_set = tokio::task::JoinSet::new();
 
         for &node_id in nodes {
-            let result = self
-                .data_client
-                .write_extent(
-                    node_id,
-                    operation_id,
-                    self.session.session_id(),
-                    volume_id,
-                    extent_id,
-                    extent_version,
-                    epoch,
-                    data.clone(),
-                    checksum.to_string(),
-                )
-                .await;
+            let client = Arc::clone(&self.data_client);
+            let session_id = self.session.session_id();
+            let data = data.clone();
+            let checksum = checksum.to_string();
+            join_set.spawn(async move {
+                let result = client
+                    .write_extent(
+                        node_id,
+                        operation_id,
+                        session_id,
+                        volume_id,
+                        extent_id,
+                        extent_version,
+                        epoch,
+                        data,
+                        checksum,
+                    )
+                    .await;
+                match result {
+                    Ok(ack) => ack,
+                    Err(e) => {
+                        tracing::warn!(node = %node_id, error = %e, "write to data node failed");
+                        crate::traits::WriteAck {
+                            node_id,
+                            success: false,
+                            checksum: String::new(),
+                            error: Some(WriteAckError::InternalError(e.to_string())),
+                        }
+                    }
+                }
+            });
+        }
 
+        let mut acks = Vec::with_capacity(nodes.len());
+        while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(ack) => acks.push(ack),
                 Err(e) => {
-                    tracing::warn!(node = %node_id, error = %e, "write to data node failed");
-                    acks.push(crate::traits::WriteAck {
-                        node_id,
-                        success: false,
-                        checksum: String::new(),
-                        error: Some(WriteAckError::InternalError(e.to_string())),
-                    });
+                    tracing::error!(error = %e, "replica write task panicked");
                 }
             }
         }
@@ -319,12 +343,7 @@ impl<D: DataNodeClient, M: MetadataClient> std::fmt::Debug for WritePipeline<D, 
 }
 
 fn compute_checksum(data: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{:016x}", hash)
+    blockyard_common::checksum::compute_checksum(data)
 }
 
 #[cfg(test)]
@@ -532,7 +551,8 @@ mod tests {
         match result {
             WriteOutcome::InsufficientAcks { acked, required } => {
                 assert_eq!(acked, 0);
-                assert_eq!(required, 3);
+                // With majority acks, 3 replicas requires 2 acks
+                assert_eq!(required, 2);
             }
             other => panic!("expected InsufficientAcks, got {:?}", other),
         }
@@ -922,12 +942,10 @@ mod tests {
             data: Bytes::from(vec![0x66; 512]),
         };
         let result = pipeline.execute(req).await.unwrap();
+        // With majority acks (2/3 required), 2 successful acks is now sufficient
         assert!(matches!(
             result,
-            WriteOutcome::InsufficientAcks {
-                acked: 2,
-                required: 3
-            }
+            WriteOutcome::Committed { .. }
         ));
     }
 

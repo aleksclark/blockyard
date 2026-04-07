@@ -96,6 +96,26 @@ where
             .await?;
 
         if ec_mapping.base.extent_version < watermark {
+            // Attempt metadata refresh before returning StaleMapping (§4.4).
+            let refreshed = self
+                .metadata
+                .refresh_extent_mapping(request.volume_id, request.extent_id)
+                .await?;
+
+            if let Some(refreshed_mapping) = refreshed {
+                if refreshed_mapping.extent_version >= watermark {
+                    // Caller should retry with the refreshed mapping;
+                    // for now we still return StaleMapping so the caller
+                    // can obtain the new EcExtentMapping and retry.
+                    tracing::debug!(
+                        extent_id = %request.extent_id,
+                        old_version = ec_mapping.base.extent_version,
+                        new_version = refreshed_mapping.extent_version,
+                        "refreshed stale EC mapping"
+                    );
+                }
+            }
+
             return Err(ReadError::StaleMapping {
                 extent_id: request.extent_id,
                 mapping_version: ec_mapping.base.extent_version,
@@ -275,12 +295,7 @@ where
 }
 
 fn compute_checksum(data: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{:016x}", hash)
+    blockyard_common::checksum::compute_checksum(data)
 }
 
 #[cfg(test)]

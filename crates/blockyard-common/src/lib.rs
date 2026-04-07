@@ -4,6 +4,7 @@
 //! core identifier types, protection policies, disk state management,
 //! configuration, and error types.
 
+pub mod checksum;
 pub mod config;
 pub mod disk_state;
 pub mod error;
