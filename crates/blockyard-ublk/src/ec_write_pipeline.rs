@@ -105,9 +105,9 @@ impl CoalescingBuffer {
         let total_bytes: usize = pending.values().map(|w| w.data.len()).sum();
         let should_flush = total_bytes + write.data.len() >= self.config.max_bytes;
 
-        let time_exceeded = pending.values().any(|w| {
-            w.received_at.elapsed() >= self.config.max_delay
-        });
+        let time_exceeded = pending
+            .values()
+            .any(|w| w.received_at.elapsed() >= self.config.max_delay);
 
         // Merge within the same stripe instead of replacing: concatenate data
         // and extend the block range so no writes are silently dropped.
@@ -115,8 +115,9 @@ impl CoalescingBuffer {
             let mut merged = existing.data.to_vec();
             merged.extend_from_slice(&write.data);
             existing.data = Bytes::from(merged);
-            existing.block_range = std::cmp::min(existing.block_range.start, write.block_range.start)
-                ..std::cmp::max(existing.block_range.end, write.block_range.end);
+            existing.block_range =
+                std::cmp::min(existing.block_range.start, write.block_range.start)
+                    ..std::cmp::max(existing.block_range.end, write.block_range.end);
         } else {
             pending.insert(stripe_start, write);
         }
@@ -261,9 +262,10 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
 
         let epoch = self.cache.current_epoch();
 
-        let volume_info = self.cache.get_volume(&volume_id).ok_or_else(|| {
-            Error::Storage(format!("volume {} not found in cache", volume_id))
-        })?;
+        let volume_info = self
+            .cache
+            .get_volume(&volume_id)
+            .ok_or_else(|| Error::Storage(format!("volume {} not found in cache", volume_id)))?;
 
         let (data_chunks, parity_chunks) = match volume_info.protection {
             ProtectionPolicy::ErasureCoded {
@@ -273,7 +275,7 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
             _ => {
                 return Err(Error::Storage(
                     "EC write pipeline requires ErasureCoded protection policy".into(),
-                ))
+                ));
             }
         };
 
@@ -467,16 +469,17 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         existing_stripe_data: Bytes,
         stripe_offset: usize,
     ) -> Result<WriteOutcome, Error> {
-        let volume_info = self.cache.get_volume(&volume_id).ok_or_else(|| {
-            Error::Storage(format!("volume {} not found in cache", volume_id))
-        })?;
+        let volume_info = self
+            .cache
+            .get_volume(&volume_id)
+            .ok_or_else(|| Error::Storage(format!("volume {} not found in cache", volume_id)))?;
 
         match volume_info.protection {
             ProtectionPolicy::ErasureCoded { .. } => {}
             _ => {
                 return Err(Error::Storage(
                     "partial stripe write requires ErasureCoded policy".into(),
-                ))
+                ));
             }
         };
 
@@ -485,8 +488,7 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
 
         let end = std::cmp::min(stripe_offset + new_data.len(), stripe_size);
         let copy_len = end - stripe_offset;
-        modified[stripe_offset..stripe_offset + copy_len]
-            .copy_from_slice(&new_data[..copy_len]);
+        modified[stripe_offset..stripe_offset + copy_len].copy_from_slice(&new_data[..copy_len]);
 
         let modified_bytes = Bytes::from(modified);
 
@@ -677,6 +679,38 @@ mod tests {
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.commit_epoch)
         }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
+        }
     }
 
     fn setup_ec_cache(epoch: u64, num_nodes: usize, k: u8, m: u8) -> (MetadataCache, VolumeId) {
@@ -858,10 +892,7 @@ mod tests {
             .execute(vid, 0..64, Bytes::from(vec![0x11; 512]))
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("ErasureCoded"));
+        assert!(result.unwrap_err().to_string().contains("ErasureCoded"));
     }
 
     #[tokio::test]

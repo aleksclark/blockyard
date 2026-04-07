@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use blockyard_common::{DiskId, DiskState, EpochId, ExtentId, OperationId};
+use blockyard_common::{
+    DiskId, DiskState, EpochId, ExtentId, LeaseVersion, OperationId, SessionId, VolumeId,
+};
 use blockyard_protocol::{
     ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
 };
@@ -27,6 +29,13 @@ pub struct OperationRecord {
     pub success: bool,
 }
 
+/// Active lease record cached on the data node for write fencing (P6.2).
+#[derive(Debug, Clone)]
+pub struct CachedLease {
+    pub session_id: SessionId,
+    pub lease_version: LeaseVersion,
+}
+
 /// Data node service managing read/write operations.
 #[derive(Debug)]
 pub struct DataNodeService {
@@ -35,6 +44,7 @@ pub struct DataNodeService {
     stores: RwLock<HashMap<DiskId, ExtentStore>>,
     inventory: DiskInventory,
     index: ExtentIndex,
+    lease_cache: RwLock<HashMap<VolumeId, CachedLease>>,
 }
 
 impl DataNodeService {
@@ -45,6 +55,7 @@ impl DataNodeService {
             stores: RwLock::new(HashMap::new()),
             inventory,
             index,
+            lease_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -91,6 +102,10 @@ impl DataNodeService {
         }
 
         if let Err(msg) = self.validate_epoch(request.epoch) {
+            return self.write_error(request, msg);
+        }
+
+        if let Err(msg) = self.validate_write_lease(request) {
             return self.write_error(request, msg);
         }
 
@@ -342,8 +357,7 @@ impl DataNodeService {
         if log.len() > MAX_OPERATION_LOG_SIZE {
             // Evict ~10% of oldest entries to amortize eviction cost.
             let evict_count = log.len() - MAX_OPERATION_LOG_SIZE + MAX_OPERATION_LOG_SIZE / 10;
-            let keys_to_remove: Vec<OperationId> =
-                log.keys().take(evict_count).copied().collect();
+            let keys_to_remove: Vec<OperationId> = log.keys().take(evict_count).copied().collect();
             for key in keys_to_remove {
                 log.remove(&key);
             }
@@ -460,6 +474,81 @@ impl DataNodeService {
     pub fn operation_count(&self) -> usize {
         self.operation_log.read().len()
     }
+
+    /// Update the cached lease for a volume (P6.2).
+    ///
+    /// Called when the data node learns about a new lease grant/renewal
+    /// (e.g., via metadata refresh or piggybacked on write request).
+    pub fn update_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+        lease_version: LeaseVersion,
+    ) {
+        let mut cache = self.lease_cache.write();
+        match cache.get(&volume_id) {
+            Some(existing) if existing.lease_version >= lease_version => {}
+            _ => {
+                cache.insert(
+                    volume_id,
+                    CachedLease {
+                        session_id,
+                        lease_version,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Revoke (remove) the cached lease for a volume.
+    pub fn revoke_lease(&self, volume_id: &VolumeId) {
+        self.lease_cache.write().remove(volume_id);
+    }
+
+    /// Validate a write request against the cached lease (P6.2 — fencing).
+    ///
+    /// If the volume has a lease registered, the write must come from the
+    /// lease holder with a matching (non-stale) lease version.
+    /// If no lease is registered for the volume, writes are allowed (backwards
+    /// compatibility for volumes without lease enforcement).
+    fn validate_write_lease(&self, request: &WriteExtentRequest) -> Result<(), String> {
+        let cache = self.lease_cache.read();
+        let cached = match cache.get(&request.volume_id) {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+
+        let request_version = match request.lease_version {
+            Some(v) => v,
+            None => {
+                return Err(format!(
+                    "volume {} requires lease, but write has no lease_version",
+                    request.volume_id
+                ));
+            }
+        };
+
+        if request.session_id != cached.session_id {
+            return Err(format!(
+                "lease for volume {} held by session {}, write from {}",
+                request.volume_id, cached.session_id, request.session_id
+            ));
+        }
+
+        if request_version < cached.lease_version {
+            return Err(format!(
+                "stale lease version for volume {}: request has {}, current is {}",
+                request.volume_id, request_version, cached.lease_version
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get the cached lease for a volume.
+    pub fn get_cached_lease(&self, volume_id: &VolumeId) -> Option<CachedLease> {
+        self.lease_cache.read().get(volume_id).cloned()
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +593,7 @@ mod tests {
             target_disk_id: disk_id,
             checksum: checksum.into(),
             payload_size,
+            lease_version: None,
         }
     }
 
@@ -924,5 +1014,236 @@ mod tests {
 
         let state = service.inventory().get_state(disk_id).unwrap();
         assert_eq!(state, DiskState::Suspect);
+    }
+
+    #[test]
+    fn test_update_lease() {
+        let (_dir, service, _) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        service.update_lease(vid, sid, 1);
+
+        let cached = service.get_cached_lease(&vid).unwrap();
+        assert_eq!(cached.session_id, sid);
+        assert_eq!(cached.lease_version, 1);
+    }
+
+    #[test]
+    fn test_update_lease_higher_version_wins() {
+        let (_dir, service, _) = setup_service();
+        let vid = VolumeId::generate();
+        let sid1 = SessionId::generate();
+        let sid2 = SessionId::generate();
+
+        service.update_lease(vid, sid1, 1);
+        service.update_lease(vid, sid2, 2);
+
+        let cached = service.get_cached_lease(&vid).unwrap();
+        assert_eq!(cached.session_id, sid2);
+        assert_eq!(cached.lease_version, 2);
+    }
+
+    #[test]
+    fn test_update_lease_lower_version_ignored() {
+        let (_dir, service, _) = setup_service();
+        let vid = VolumeId::generate();
+        let sid1 = SessionId::generate();
+        let sid2 = SessionId::generate();
+
+        service.update_lease(vid, sid1, 5);
+        service.update_lease(vid, sid2, 3);
+
+        let cached = service.get_cached_lease(&vid).unwrap();
+        assert_eq!(cached.session_id, sid1);
+        assert_eq!(cached.lease_version, 5);
+    }
+
+    #[test]
+    fn test_revoke_lease() {
+        let (_dir, service, _) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+
+        service.update_lease(vid, sid, 1);
+        assert!(service.get_cached_lease(&vid).is_some());
+
+        service.revoke_lease(&vid);
+        assert!(service.get_cached_lease(&vid).is_none());
+    }
+
+    #[test]
+    fn test_write_without_lease_allowed() {
+        let (_dir, service, disk_id) = setup_service();
+        let eid = ExtentId::generate();
+        let data = b"no lease needed";
+        let checksum = compute_checksum(data);
+
+        let req = make_write_request(
+            eid,
+            1,
+            EpochId::new(1),
+            Some(disk_id),
+            &checksum,
+            data.len() as u64,
+        );
+        let resp = service.handle_write(&req, data);
+        assert!(
+            resp.success,
+            "write without lease should succeed when no lease is registered"
+        );
+    }
+
+    #[test]
+    fn test_write_with_valid_lease() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let eid = ExtentId::generate();
+        let data = b"leased write";
+        let checksum = compute_checksum(data);
+
+        service.update_lease(vid, sid, 5);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: Some(5),
+        };
+        let resp = service.handle_write(&req, data);
+        assert!(
+            resp.success,
+            "write with valid lease should succeed: {:?}",
+            resp.error
+        );
+    }
+
+    #[test]
+    fn test_write_with_no_lease_version_rejected_when_lease_exists() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let eid = ExtentId::generate();
+        let data = b"missing lease version";
+        let checksum = compute_checksum(data);
+
+        service.update_lease(vid, sid, 1);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: None,
+        };
+        let resp = service.handle_write(&req, data);
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("requires lease"));
+    }
+
+    #[test]
+    fn test_write_with_wrong_session_rejected() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid_holder = SessionId::generate();
+        let sid_attacker = SessionId::generate();
+        let eid = ExtentId::generate();
+        let data = b"wrong session";
+        let checksum = compute_checksum(data);
+
+        service.update_lease(vid, sid_holder, 1);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid_attacker,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: Some(1),
+        };
+        let resp = service.handle_write(&req, data);
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("held by session"));
+    }
+
+    #[test]
+    fn test_write_with_stale_lease_version_rejected() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let eid = ExtentId::generate();
+        let data = b"stale lease";
+        let checksum = compute_checksum(data);
+
+        service.update_lease(vid, sid, 5);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: Some(3),
+        };
+        let resp = service.handle_write(&req, data);
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("stale lease version"));
+    }
+
+    #[test]
+    fn test_write_after_lease_revoked() {
+        let (_dir, service, disk_id) = setup_service();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+        let eid = ExtentId::generate();
+        let data = b"after revoke";
+        let checksum = compute_checksum(data);
+
+        service.update_lease(vid, sid, 1);
+        service.revoke_lease(&vid);
+
+        let req = WriteExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: sid,
+            volume_id: vid,
+            extent_id: eid,
+            extent_version: 1,
+            epoch: EpochId::new(1),
+            target_disk_id: Some(disk_id),
+            checksum: checksum.clone(),
+            payload_size: data.len() as u64,
+            lease_version: Some(1),
+        };
+        let resp = service.handle_write(&req, data);
+        assert!(
+            resp.success,
+            "write after lease revoked should succeed (no lease registered)"
+        );
+    }
+
+    #[test]
+    fn test_get_cached_lease_none() {
+        let (_dir, service, _) = setup_service();
+        let vid = VolumeId::generate();
+        assert!(service.get_cached_lease(&vid).is_none());
     }
 }

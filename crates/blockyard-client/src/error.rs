@@ -20,7 +20,9 @@ pub enum ReadError {
     #[error("all replicas returned corrupt data for extent {extent_id}")]
     AllReplicasCorrupt { extent_id: ExtentId },
 
-    #[error("checksum mismatch on node {node_id} for extent {extent_id}: expected={expected}, got={actual}")]
+    #[error(
+        "checksum mismatch on node {node_id} for extent {extent_id}: expected={expected}, got={actual}"
+    )]
     ChecksumMismatch {
         node_id: NodeId,
         extent_id: ExtentId,
@@ -28,7 +30,9 @@ pub enum ReadError {
         actual: String,
     },
 
-    #[error("stale mapping for extent {extent_id}: mapping_version={mapping_version}, required={required_version}")]
+    #[error(
+        "stale mapping for extent {extent_id}: mapping_version={mapping_version}, required={required_version}"
+    )]
     StaleMapping {
         extent_id: ExtentId,
         mapping_version: u64,
@@ -39,10 +43,7 @@ pub enum ReadError {
     MetadataRefreshFailed(String),
 
     #[error("data node read failed on node {node_id}: {reason}")]
-    DataNodeReadFailed {
-        node_id: NodeId,
-        reason: String,
-    },
+    DataNodeReadFailed { node_id: NodeId, reason: String },
 
     #[error("invalid read request: {0}")]
     InvalidRequest(String),

@@ -8,7 +8,9 @@ use std::ops::Range;
 use bytes::Bytes;
 
 use blockyard_common::error::Error;
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
+use blockyard_common::{
+    EpochId, ExtentId, LeaseResponse, NodeId, OperationId, SessionId, VolumeId,
+};
 
 use crate::metadata_cache::MetadataCache;
 
@@ -96,6 +98,31 @@ pub trait MetadataClient: Send + Sync + 'static {
 
     /// Get the current placement epoch from the metadata service.
     async fn current_epoch(&self) -> Result<EpochId, Error>;
+
+    /// Acquire a volume write lease (P6.1).
+    async fn acquire_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<LeaseResponse, Error>;
+
+    /// Renew a volume write lease (P6.1).
+    async fn renew_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<LeaseResponse, Error>;
+
+    /// Release a volume write lease (P6.1).
+    async fn release_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+    ) -> Result<LeaseResponse, Error>;
 }
 
 #[cfg(test)]

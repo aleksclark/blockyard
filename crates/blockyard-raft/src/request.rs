@@ -5,7 +5,9 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+use blockyard_common::{
+    EpochId, ExtentId, LeaseRequest, NodeId, OperationId, ProtectionPolicy, VolumeId,
+};
 
 /// A request to be applied to the metadata state machine via Raft consensus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,4 +49,7 @@ pub enum MetadataRequest {
     UpdatePlacementMap {
         assignments: BTreeMap<String, Vec<NodeId>>,
     },
+
+    /// Acquire, renew, or release a volume write lease (P6.1).
+    Lease(LeaseRequest),
 }

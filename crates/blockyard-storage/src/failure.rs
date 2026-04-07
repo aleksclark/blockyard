@@ -225,30 +225,22 @@ pub fn recover_node(
 ///
 /// Returns extent IDs from the failed disk that should be re-replicated
 /// or reconstructed by the cluster repair subsystem.
-pub fn extents_needing_repair(
-    index: &ExtentIndex,
-    failed_disk: DiskId,
-) -> Vec<LocalExtentEntry> {
+pub fn extents_needing_repair(index: &ExtentIndex, failed_disk: DiskId) -> Vec<LocalExtentEntry> {
     index.list_for_disk(failed_disk)
 }
 
 /// Check if a node is ready to advertise itself as writable.
 ///
 /// A node must complete local recovery before accepting writes (§6.10).
-pub fn node_ready_for_writes(
-    inventory: &DiskInventory,
-    _index: &ExtentIndex,
-) -> bool {
+pub fn node_ready_for_writes(inventory: &DiskInventory, _index: &ExtentIndex) -> bool {
     let disks = inventory.list_disks();
     if disks.is_empty() {
         return false;
     }
 
-    disks.iter().any(|disk_id| {
-        inventory
-            .allows_allocation(*disk_id)
-            .unwrap_or(false)
-    })
+    disks
+        .iter()
+        .any(|disk_id| inventory.allows_allocation(*disk_id).unwrap_or(false))
 }
 
 /// Check if a node is ready to serve reads from committed extents.
@@ -256,18 +248,15 @@ pub fn node_ready_for_writes(
 /// A node can serve reads as soon as local recovery has rebuilt the
 /// extent index from committed files. It does not need to wait for
 /// metadata rejoin.
-pub fn node_ready_for_reads(
-    inventory: &DiskInventory,
-    _index: &ExtentIndex,
-) -> bool {
+pub fn node_ready_for_reads(inventory: &DiskInventory, _index: &ExtentIndex) -> bool {
     let disks = inventory.list_disks();
     if disks.is_empty() {
         return false;
     }
 
-    disks.iter().any(|disk_id| {
-        inventory.allows_reads(*disk_id).unwrap_or(false)
-    })
+    disks
+        .iter()
+        .any(|disk_id| inventory.allows_reads(*disk_id).unwrap_or(false))
 }
 
 #[cfg(test)]
@@ -308,8 +297,7 @@ mod tests {
         let eid = ExtentId::generate();
         index.insert(make_index_entry(disk_id, eid)).unwrap();
 
-        let report =
-            handle_disk_failure(&inventory, &index, disk_id, "test failure").unwrap();
+        let report = handle_disk_failure(&inventory, &index, disk_id, "test failure").unwrap();
 
         assert_eq!(report.disk_id, disk_id);
         assert_eq!(report.previous_state, DiskState::Healthy);
@@ -330,8 +318,7 @@ mod tests {
             .unwrap();
 
         let index = ExtentIndex::new();
-        let report =
-            handle_disk_failure(&inventory, &index, disk_id, "already failed").unwrap();
+        let report = handle_disk_failure(&inventory, &index, disk_id, "already failed").unwrap();
 
         assert_eq!(report.previous_state, DiskState::Failed);
         assert!(report.affected_extents.is_empty());
@@ -352,8 +339,7 @@ mod tests {
         }
 
         let report =
-            handle_disk_failure(&inventory, &index, disk_id, "multi extent failure")
-                .unwrap();
+            handle_disk_failure(&inventory, &index, disk_id, "multi extent failure").unwrap();
         assert_eq!(report.affected_extents.len(), 5);
     }
 
@@ -456,7 +442,10 @@ mod tests {
             .unwrap();
 
         let mut stores = HashMap::new();
-        stores.insert(disk_id, ExtentStore::new(store.mount_path().to_path_buf(), disk_id));
+        stores.insert(
+            disk_id,
+            ExtentStore::new(store.mount_path().to_path_buf(), disk_id),
+        );
         stores.get(&disk_id).unwrap().init_directories().unwrap();
 
         let index = ExtentIndex::new();
@@ -640,7 +629,10 @@ mod tests {
             DedupCheckResult::PreviouslyFailed,
             DedupCheckResult::PreviouslyFailed
         );
-        assert_ne!(DedupCheckResult::Unknown, DedupCheckResult::PreviouslyFailed);
+        assert_ne!(
+            DedupCheckResult::Unknown,
+            DedupCheckResult::PreviouslyFailed
+        );
     }
 
     #[test]
@@ -659,7 +651,9 @@ mod tests {
         let (_d1, p1) = setup_disk_dir();
         let (_d2, p2) = setup_disk_dir();
         let inventory = DiskInventory::new();
-        let ids = inventory.discover_disks(&[p1.clone(), p2.clone()], false).unwrap();
+        let ids = inventory
+            .discover_disks(&[p1.clone(), p2.clone()], false)
+            .unwrap();
 
         let mut stores = HashMap::new();
         for (i, &disk_id) in ids.iter().enumerate() {
@@ -680,7 +674,9 @@ mod tests {
         let inventory = DiskInventory::new();
         let ids = inventory.discover_disks(&[path], false).unwrap();
         let disk_id = ids[0];
-        inventory.transition_state(disk_id, DiskState::Suspect).unwrap();
+        inventory
+            .transition_state(disk_id, DiskState::Suspect)
+            .unwrap();
 
         let index = ExtentIndex::new();
         let report = handle_disk_failure(&inventory, &index, disk_id, "from suspect").unwrap();

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use blockyard_common::EpochId;
+use blockyard_common::{EpochId, LeaseResponse};
 
 /// Response from applying a [`MetadataRequest`](crate::request::MetadataRequest) to the state machine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,6 +15,9 @@ pub enum MetadataResponse {
 
     /// An application-level error (e.g., CAS failure, volume not found).
     Error(String),
+
+    /// Response to a lease request (P6.1).
+    Lease(LeaseResponse),
 }
 
 impl MetadataResponse {

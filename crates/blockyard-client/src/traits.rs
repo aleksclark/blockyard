@@ -65,16 +65,10 @@ pub trait DataNodeReader: Send + Sync {
 /// reports it so the cluster can schedule repair (§4.9.4).
 pub trait HealthReporter: Send + Sync {
     /// Report a checksum corruption event.
-    fn report_corruption(
-        &self,
-        report: CorruptionReport,
-    ) -> impl Future<Output = ()> + Send;
+    fn report_corruption(&self, report: CorruptionReport) -> impl Future<Output = ()> + Send;
 
     /// Report a read failure (non-corruption) event.
-    fn report_read_failure(
-        &self,
-        report: ReadFailureReport,
-    ) -> impl Future<Output = ()> + Send;
+    fn report_read_failure(&self, report: ReadFailureReport) -> impl Future<Output = ()> + Send;
 }
 
 /// Selects the best source replica for a read operation.
@@ -84,10 +78,7 @@ pub trait HealthReporter: Send + Sync {
 pub trait ReplicaSelector: Send + Sync {
     /// Order replicas by preference for a read. Returns an ordered list
     /// of node IDs, best candidate first.
-    fn select_replicas(
-        &self,
-        replicas: &[ReplicaLocation],
-    ) -> Vec<NodeId>;
+    fn select_replicas(&self, replicas: &[ReplicaLocation]) -> Vec<NodeId>;
 
     /// Get current stats for a replica.
     fn get_stats(&self, node_id: NodeId) -> Option<ReplicaStats>;
