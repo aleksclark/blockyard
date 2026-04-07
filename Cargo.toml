@@ -45,10 +45,21 @@ reed-solomon-erasure = { version = "6", features = ["simd-accel"] }
 
 [dev-dependencies]
 blockyard-common = { path = "crates/blockyard-common" }
+blockyard-raft = { path = "crates/blockyard-raft" }
+blockyard-storage = { path = "crates/blockyard-storage" }
+blockyard-ublk = { path = "crates/blockyard-ublk" }
+blockyard-client = { path = "crates/blockyard-client" }
 blockyard-test-harness = { path = "crates/blockyard-test-harness" }
 blake3.workspace = true
+bytes.workspace = true
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [profile.release]
 lto = true

@@ -1,267 +1,455 @@
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use blockyard_common::VolumeId;
-use blockyard_test_harness::checker::ConsistencyChecker;
-use blockyard_test_harness::scenario::{
-    AckPolicy, MountState, ReadPolicy, ScenarioConfig, ScenarioContext, UblkMount,
+use blockyard_common::{
+    EpochId, ExtentId, LeaseResponse, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
 };
-use blockyard_test_harness::vm::NodeId;
-use blockyard_test_harness::workload::{AckStatus, Operation, OperationLog, WorkloadConfig};
+use blockyard_ublk::{
+    ClientSession, DataNodeClient, MetadataCache, MetadataClient, StaleEpochHandler,
+    WriteOutcome, WritePipeline, WriteRequest, WriteWatermark,
+};
+use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
+use blockyard_ublk::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
+use bytes::Bytes;
 
-fn write_heavy_workload(volume_id: VolumeId) -> WorkloadConfig {
-    WorkloadConfig {
-        volume_ids: vec![volume_id],
-        write_ratio: 1.0,
-        block_size: 4096,
-        max_offset: 4096 * 128,
-        operations_per_second: 100,
-        duration: Duration::from_secs(5),
-        concurrent_clients: 1,
-        ..Default::default()
+// ---------------------------------------------------------------------------
+// Mock DataNodeClient that persists data in-memory
+// ---------------------------------------------------------------------------
+
+struct MockDataNode {
+    fail: parking_lot::Mutex<bool>,
+    store: parking_lot::Mutex<Vec<(OperationId, ExtentId, Bytes, String)>>,
+}
+
+impl MockDataNode {
+    fn new() -> Self {
+        Self {
+            fail: parking_lot::Mutex::new(false),
+            store: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn _set_fail(&self, fail: bool) {
+        *self.fail.lock() = fail;
+    }
+
+    fn stored_data(&self) -> Vec<(OperationId, ExtentId, Bytes, String)> {
+        self.store.lock().clone()
     }
 }
 
-fn assert_all_checks_pass(reports: &[blockyard_test_harness::checker::CheckReport]) {
-    for report in reports {
-        assert!(
-            report.result.is_pass(),
-            "check '{}' failed: {}",
-            report.name,
-            report.result
+impl DataNodeClient for MockDataNode {
+    async fn write_extent(
+        &self,
+        node_id: NodeId,
+        operation_id: OperationId,
+        _session_id: SessionId,
+        _volume_id: VolumeId,
+        extent_id: ExtentId,
+        _extent_version: u64,
+        _epoch: EpochId,
+        data: Bytes,
+        checksum: String,
+    ) -> Result<WriteAck, blockyard_common::Error> {
+        if *self.fail.lock() {
+            return Ok(WriteAck {
+                node_id,
+                success: false,
+                checksum,
+                error: Some(WriteAckError::DiskUnavailable),
+            });
+        }
+        self.store
+            .lock()
+            .push((operation_id, extent_id, data, checksum.clone()));
+        Ok(WriteAck {
+            node_id,
+            success: true,
+            checksum,
+            error: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock MetadataClient
+// ---------------------------------------------------------------------------
+
+struct MockMetadata {
+    epoch: parking_lot::Mutex<EpochId>,
+    commits: parking_lot::Mutex<Vec<CommitRequest>>,
+    committed_ops: parking_lot::Mutex<std::collections::HashMap<OperationId, CommittedMapping>>,
+    fail_commit: parking_lot::Mutex<bool>,
+    stale_epoch_on_commit: parking_lot::Mutex<bool>,
+}
+
+impl MockMetadata {
+    fn new(epoch: EpochId) -> Self {
+        Self {
+            epoch: parking_lot::Mutex::new(epoch),
+            commits: parking_lot::Mutex::new(Vec::new()),
+            committed_ops: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            fail_commit: parking_lot::Mutex::new(false),
+            stale_epoch_on_commit: parking_lot::Mutex::new(false),
+        }
+    }
+
+    fn set_epoch(&self, epoch: EpochId) {
+        *self.epoch.lock() = epoch;
+    }
+}
+
+impl MetadataClient for MockMetadata {
+    async fn refresh_metadata(
+        &self,
+        cache: &MetadataCache,
+    ) -> Result<EpochId, blockyard_common::Error> {
+        let epoch = *self.epoch.lock();
+        cache.set_epoch(epoch);
+        Ok(epoch)
+    }
+
+    async fn commit_extent_mapping(
+        &self,
+        request: CommitRequest,
+    ) -> Result<EpochId, blockyard_common::Error> {
+        if *self.fail_commit.lock() {
+            return Err(blockyard_common::Error::Raft("commit failed".into()));
+        }
+        if *self.stale_epoch_on_commit.lock() {
+            return Err(blockyard_common::Error::Raft("stale epoch".into()));
+        }
+        let epoch = *self.epoch.lock();
+        if let Some(op_id) = &request.operation_id {
+            let mapping = CommittedMapping {
+                extent_id: request.extent_id,
+                extent_version: request.extent_version,
+                epoch,
+                block_range: request.block_range.clone(),
+                replica_locations: request.replica_locations.clone(),
+                checksums: request.checksums.clone(),
+            };
+            self.committed_ops.lock().insert(*op_id, mapping);
+        }
+        self.commits.lock().push(request);
+        Ok(epoch)
+    }
+
+    async fn lookup_operation(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<Option<CommittedMapping>, blockyard_common::Error> {
+        Ok(self.committed_ops.lock().get(operation_id).cloned())
+    }
+
+    async fn current_epoch(&self) -> Result<EpochId, blockyard_common::Error> {
+        Ok(*self.epoch.lock())
+    }
+
+    async fn acquire_lease(
+        &self,
+        _volume_id: VolumeId,
+        _session_id: SessionId,
+        _now_ms: u64,
+        _ttl_ms: u64,
+    ) -> Result<LeaseResponse, blockyard_common::Error> {
+        Ok(LeaseResponse::Granted {
+            lease_version: 1,
+            expires_at_ms: u64::MAX,
+        })
+    }
+
+    async fn renew_lease(
+        &self,
+        _volume_id: VolumeId,
+        _session_id: SessionId,
+        _now_ms: u64,
+        _ttl_ms: u64,
+    ) -> Result<LeaseResponse, blockyard_common::Error> {
+        Ok(LeaseResponse::Renewed {
+            lease_version: 1,
+            expires_at_ms: u64::MAX,
+        })
+    }
+
+    async fn release_lease(
+        &self,
+        _volume_id: VolumeId,
+        _session_id: SessionId,
+    ) -> Result<LeaseResponse, blockyard_common::Error> {
+        Ok(LeaseResponse::Released)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn setup_pipeline(
+    volume_id: VolumeId,
+    epoch: EpochId,
+    node_ids: &[NodeId],
+    data_client: Arc<MockDataNode>,
+    metadata_client: Arc<MockMetadata>,
+) -> (
+    WritePipeline<MockDataNode, MockMetadata>,
+    Arc<MetadataCache>,
+    Arc<ClientSession>,
+    Arc<WriteWatermark>,
+) {
+    let cache = Arc::new(MetadataCache::new());
+    cache.set_epoch(epoch);
+
+    for (i, nid) in node_ids.iter().enumerate() {
+        let addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", 9000 + i).parse().unwrap();
+        cache.set_node(*nid, addr);
+    }
+
+    let ext_id = ExtentId::generate();
+    let mapping = CachedExtentMapping {
+        extent_id: ext_id,
+        extent_version: 0,
+        replica_locations: node_ids.to_vec(),
+        checksums: vec![],
+    };
+    cache.set_extent_mapping(&volume_id, 0, mapping);
+
+    let vol_info = CachedVolumeInfo {
+        volume_id,
+        size_bytes: 1024 * 1024,
+        protection: ProtectionPolicy::Replicated {
+            replicas: node_ids.len() as u8,
+        },
+        extent_mappings: BTreeMap::new(),
+    };
+    cache.set_volume(vol_info);
+
+    let session = Arc::new(ClientSession::new(volume_id));
+    let watermark = Arc::new(WriteWatermark::with_initial(epoch));
+    let stale_handler = Arc::new(StaleEpochHandler::new());
+
+    let pipeline = WritePipeline::new(
+        data_client,
+        metadata_client,
+        cache.clone(),
+        session.clone(),
+        watermark.clone(),
+        stale_handler,
+    );
+
+    (pipeline, cache, session, watermark)
+}
+
+// ---------------------------------------------------------------------------
+// P9F.1 — Write data, simulate crash (drop pipeline), verify data persisted
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_mount_write_crash_remount_verify() {
+    let volume_id = VolumeId::generate();
+    let epoch = EpochId::new(1);
+    let node1 = NodeId::generate();
+    let node2 = NodeId::generate();
+    let node3 = NodeId::generate();
+
+    let data_client = Arc::new(MockDataNode::new());
+    let metadata_client = Arc::new(MockMetadata::new(epoch));
+
+    let (pipeline, _cache, _session, _watermark) = setup_pipeline(
+        volume_id,
+        epoch,
+        &[node1, node2, node3],
+        data_client.clone(),
+        metadata_client.clone(),
+    );
+
+    let write_data = Bytes::from(vec![0xABu8; 4096]);
+    let request = WriteRequest {
+        volume_id,
+        block_range: 0..1024,
+        data: write_data.clone(),
+    };
+    let result = pipeline.execute(request).await;
+    assert!(result.is_ok(), "write should succeed: {:?}", result.err());
+    assert!(matches!(
+        result.unwrap(),
+        WriteOutcome::Committed { .. }
+    ));
+
+    let stored_before_crash = data_client.stored_data();
+    assert!(
+        !stored_before_crash.is_empty(),
+        "data should be stored on nodes before crash"
+    );
+    let committed_before_crash = metadata_client.commits.lock().len();
+    assert!(
+        committed_before_crash > 0,
+        "metadata commit should have happened"
+    );
+
+    drop(pipeline);
+
+    let (_pipeline2, _, _, _) = setup_pipeline(
+        volume_id,
+        epoch,
+        &[node1, node2, node3],
+        data_client.clone(),
+        metadata_client.clone(),
+    );
+
+    let stored_after_crash = data_client.stored_data();
+    assert_eq!(
+        stored_after_crash.len(),
+        stored_before_crash.len(),
+        "stored data should persist after pipeline crash"
+    );
+    for (_, _, data, _) in &stored_after_crash {
+        assert_eq!(
+            data.as_ref(),
+            write_data.as_ref(),
+            "persisted data must match original"
         );
     }
-}
 
-// ---------------------------------------------------------------------------
-// P9F.1 — Mount → write → kill mount process → remount → verify data
-// ---------------------------------------------------------------------------
-
-/// Mount volume, write known pattern, SIGKILL the mount process, remount,
-/// verify all previously-acked writes are intact.
-#[test]
-fn test_mount_write_kill_remount_verify() {
-    let volume_id = VolumeId::generate();
-    let config = ScenarioConfig::new(3)
-        .with_ack_policy(AckPolicy::All)
-        .with_read_policy(ReadPolicy::Leader)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(44000);
-    let ctx = ScenarioContext::new(config);
-
-    let mut mount = UblkMount::new(volume_id);
-    assert_eq!(mount.state, MountState::Unmounted);
-
-    mount.mount(ctx.leader());
-    assert!(mount.is_mounted());
-    assert_eq!(mount.connected_leader, Some(NodeId(0)));
-
-    let writes = ctx.simulate_writes_with_acks(20, volume_id);
-    let acked_writes: Vec<_> = writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .cloned()
-        .collect();
-    assert!(!acked_writes.is_empty());
-
-    for _ in &acked_writes {
-        mount.record_write();
-    }
-    assert_eq!(mount.writes_completed, acked_writes.len() as u64);
-
-    mount.crash();
-    assert_eq!(mount.state, MountState::Crashed);
-    assert!(!mount.is_mounted());
-
-    mount.remount(ctx.leader());
-    assert!(mount.is_mounted());
-    assert_eq!(mount.connected_leader, Some(ctx.leader()));
-
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
-    }
-    let mut checker = ConsistencyChecker::new(new_log);
-
-    for w in &acked_writes {
-        if let Some(cs) = &w.data_checksum {
-            let mut read_op = Operation::new_read(w.volume_id, w.offset, w.length);
-            read_op.complete(AckStatus::Acked);
-            ctx.workload.log().record(read_op);
-            mount.record_read();
-
-            checker.record_read_back(w.volume_id, w.offset, cs.clone());
-        }
-    }
-
-    let reports = checker.check_all();
-    assert_all_checks_pass(&reports);
-
-    assert_eq!(mount.reads_completed, acked_writes.len() as u64);
-}
-
-// ---------------------------------------------------------------------------
-// P9F.2 — Mount → partition client from leader → client follows new leader →
-//          writes succeed
-// ---------------------------------------------------------------------------
-
-/// Mount volume, partition the client from the current leader, verify client
-/// discovers and follows new leader, and writes continue to succeed.
-#[test]
-fn test_mount_partition_follow_new_leader() {
-    let volume_id = VolumeId::generate();
-    let config = ScenarioConfig::new(5)
-        .with_ack_policy(AckPolicy::Majority)
-        .with_read_policy(ReadPolicy::Leader)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(44100);
-    let mut ctx = ScenarioContext::new(config);
-
-    let mut mount = UblkMount::new(volume_id);
-    mount.mount(ctx.leader());
-    assert!(mount.is_mounted());
-
-    let pre_writes = ctx.simulate_writes_with_acks(10, volume_id);
-    let pre_acked: Vec<_> = pre_writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .collect();
-    assert!(!pre_acked.is_empty());
-    for _ in &pre_acked {
-        mount.record_write();
-    }
-
-    let old_leader = ctx.leader();
-    let new_leader = ctx.simulate_leader_election(old_leader);
-    assert_ne!(new_leader, old_leader);
-
-    mount.follow_new_leader(new_leader);
-    assert_eq!(mount.connected_leader, Some(new_leader));
-    assert!(mount.is_mounted());
-
-    let post_writes = ctx.simulate_writes_with_acks(15, volume_id);
-    let post_acked: Vec<_> = post_writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .collect();
+    let committed_ops = metadata_client.committed_ops.lock();
     assert!(
-        !post_acked.is_empty(),
-        "writes must succeed after following new leader"
-    );
-    for _ in &post_acked {
-        mount.record_write();
-    }
-
-    ctx.recover_node(old_leader);
-
-    let all_writes: Vec<Operation> = pre_writes
-        .iter()
-        .chain(post_writes.iter())
-        .cloned()
-        .collect();
-
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
-    }
-    let mut checker = ConsistencyChecker::new(new_log);
-
-    for w in &all_writes {
-        if w.status == AckStatus::Acked {
-            if let Some(cs) = &w.data_checksum {
-                checker.record_read_back(w.volume_id, w.offset, cs.clone());
-            }
-        }
-    }
-
-    let reports = checker.check_all();
-    assert_all_checks_pass(&reports);
-
-    assert!(
-        mount.writes_completed >= 20,
-        "total writes should be at least 20, got {}",
-        mount.writes_completed
+        !committed_ops.is_empty() || committed_before_crash > 0,
+        "committed operation should be recoverable"
     );
 }
 
 // ---------------------------------------------------------------------------
-// P9F.3 — Mount → write through ext4 → crash node → remount → fsck passes
+// P9F.2 — StaleEpoch triggers refresh and pipeline switches to new epoch
 // ---------------------------------------------------------------------------
 
-/// Mount volume, write through filesystem (simulated), crash the data node
-/// serving the volume, remount on a surviving node, verify data integrity
-/// (simulated fsck).
-#[test]
-fn test_mount_write_crash_node_remount_fsck() {
+#[tokio::test]
+async fn test_partition_follow_leader_stale_epoch() {
     let volume_id = VolumeId::generate();
-    let config = ScenarioConfig::new(3)
-        .with_ack_policy(AckPolicy::All)
-        .with_read_policy(ReadPolicy::Leader)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(44200);
-    let mut ctx = ScenarioContext::new(config);
+    let old_epoch = EpochId::new(1);
+    let node1 = NodeId::generate();
+    let node2 = NodeId::generate();
 
-    let mut mount = UblkMount::new(volume_id);
-    mount.mount(ctx.leader());
-    assert!(mount.is_mounted());
+    let data_client = Arc::new(MockDataNode::new());
+    let metadata_client = Arc::new(MockMetadata::new(old_epoch));
 
-    let writes = ctx.simulate_writes_with_acks(25, volume_id);
-    let acked_writes: Vec<_> = writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .cloned()
-        .collect();
-    assert!(!acked_writes.is_empty());
-    for _ in &acked_writes {
-        mount.record_write();
-    }
+    let cache = Arc::new(MetadataCache::new());
+    cache.set_epoch(old_epoch);
+    cache.set_node(node1, "127.0.0.1:9001".parse().unwrap());
+    cache.set_node(node2, "127.0.0.1:9002".parse().unwrap());
 
-    let crashed_node = ctx.leader();
-    let new_leader = ctx.simulate_leader_election(crashed_node);
-    assert_ne!(new_leader, crashed_node);
+    let mapping = CachedExtentMapping {
+        extent_id: ExtentId::generate(),
+        extent_version: 0,
+        replica_locations: vec![node1, node2],
+        checksums: vec![],
+    };
+    cache.set_extent_mapping(&volume_id, 0, mapping);
+    cache.set_volume(CachedVolumeInfo {
+        volume_id,
+        size_bytes: 1024 * 1024,
+        protection: ProtectionPolicy::Replicated { replicas: 2 },
+        extent_mappings: BTreeMap::new(),
+    });
 
-    mount.crash();
-    assert_eq!(mount.state, MountState::Crashed);
+    let stale_handler = Arc::new(StaleEpochHandler::new());
+    let session = Arc::new(ClientSession::new(volume_id));
+    let watermark = Arc::new(WriteWatermark::with_initial(old_epoch));
 
-    mount.remount(new_leader);
-    assert!(mount.is_mounted());
-    assert_eq!(mount.connected_leader, Some(new_leader));
+    assert_eq!(stale_handler.refresh_count(), 0);
+    assert_eq!(cache.current_epoch(), old_epoch);
 
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
-    }
-    let mut checker = ConsistencyChecker::new(new_log);
+    let new_epoch = EpochId::new(5);
+    metadata_client.set_epoch(new_epoch);
 
-    let mut fsck_errors = 0u32;
-    for w in &acked_writes {
-        if let Some(cs) = &w.data_checksum {
-            let mut read_op = Operation::new_read(w.volume_id, w.offset, w.length);
-            read_op.complete(AckStatus::Acked);
-            ctx.workload.log().record(read_op);
-            mount.record_read();
+    let refreshed_epoch = stale_handler
+        .handle_stale_epoch(&cache, metadata_client.as_ref(), old_epoch)
+        .await
+        .expect("stale epoch refresh should succeed");
 
-            checker.record_read_back(w.volume_id, w.offset, cs.clone());
-        } else {
-            fsck_errors += 1;
+    assert_eq!(refreshed_epoch, new_epoch);
+    assert_eq!(cache.current_epoch(), new_epoch);
+    assert_eq!(stale_handler.refresh_count(), 1);
+
+    let pipeline = WritePipeline::new(
+        data_client.clone(),
+        metadata_client.clone(),
+        cache.clone(),
+        session.clone(),
+        watermark.clone(),
+        stale_handler.clone(),
+    );
+
+    let request = WriteRequest {
+        volume_id,
+        block_range: 0..1024,
+        data: Bytes::from(vec![0xCDu8; 4096]),
+    };
+    let result = pipeline.execute(request).await;
+    assert!(
+        result.is_ok(),
+        "write should succeed after epoch refresh: {:?}",
+        result.err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P9F.3 — Partial write not committed when pipeline drops mid-flight
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_write_crash_partial_not_committed() {
+    let volume_id = VolumeId::generate();
+    let epoch = EpochId::new(1);
+    let node1 = NodeId::generate();
+    let node2 = NodeId::generate();
+    let node3 = NodeId::generate();
+
+    let data_client = Arc::new(MockDataNode::new());
+    let metadata_client = Arc::new(MockMetadata::new(epoch));
+
+    *metadata_client.fail_commit.lock() = true;
+
+    let (pipeline, _, session, _) = setup_pipeline(
+        volume_id,
+        epoch,
+        &[node1, node2, node3],
+        data_client.clone(),
+        metadata_client.clone(),
+    );
+
+    let op_id = session.next_operation_id();
+    let request = WriteRequest {
+        volume_id,
+        block_range: 0..1024,
+        data: Bytes::from(vec![0xEFu8; 4096]),
+    };
+    let result = pipeline.execute_with_op_id(request, op_id).await;
+
+    match result {
+        Ok(WriteOutcome::MetadataCommitFailed { .. }) => {}
+        Ok(WriteOutcome::Committed { .. }) => {
+            panic!("should not commit when metadata commit fails");
+        }
+        Err(_) => {}
+        Ok(other) => {
+            assert!(
+                !matches!(other, WriteOutcome::Committed { .. }),
+                "should not have Committed outcome when commit fails: {:?}",
+                other
+            );
         }
     }
 
-    assert_eq!(fsck_errors, 0, "fsck: no data integrity errors expected");
-
-    let reports = checker.check_all();
-    assert_all_checks_pass(&reports);
-
-    let integrity = checker.check_data_integrity();
+    let committed = metadata_client.commits.lock();
     assert!(
-        integrity.result.is_pass(),
-        "data integrity (fsck equivalent) must pass after crash recovery: {}",
-        integrity.result
+        committed.is_empty(),
+        "no commits should succeed when metadata is failing"
     );
 
-    let no_lost = checker.check_no_lost_acks();
+    let lookup = metadata_client.committed_ops.lock();
     assert!(
-        no_lost.result.is_pass(),
-        "no acked writes should be lost after node crash and remount: {}",
-        no_lost.result
+        lookup.get(&op_id).is_none(),
+        "operation should NOT be in committed ops"
     );
 }

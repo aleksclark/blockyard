@@ -229,17 +229,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "blockyard-integration-tests"
-version = "0.0.0"
-dependencies = [
- "blake3",
- "blockyard-common",
- "blockyard-test-harness",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "blockyard-protocol"
 version = "0.1.0"
 dependencies = [
@@ -295,8 +284,10 @@ dependencies = [
  "blake3",
  "blockyard-common",
  "blockyard-protocol",
+ "blockyard-raft",
  "bytes",
  "nix",
+ "openraft",
  "parking_lot 0.12.5",
  "rand",
  "serde",
@@ -329,8 +320,22 @@ dependencies = [
 name = "blockyard-workspace"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "blockyard-client",
  "blockyard-common",
+ "blockyard-raft",
+ "blockyard-storage",
  "blockyard-test-harness",
+ "blockyard-ublk",
+ "bytes",
+ "openraft",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

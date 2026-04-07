@@ -1,323 +1,392 @@
-//! Phase 9C — Availability integration test scenarios.
+//! Phase 9C — Availability integration tests using real Raft consensus.
 //!
-//! These tests exercise the blockyard-test-harness API to verify
-//! cluster availability under node crashes, partitions, and leader
-//! failover. They run in simulation/process mode against the harness
-//! types — no real blockyard binaries are required.
+//! These tests exercise real MetadataService instances backed by openraft
+//! with in-memory networking. They verify that committed state survives
+//! node failures and that leader election works correctly.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use blockyard_common::VolumeId;
-use blockyard_test_harness::{
-    AckStatus, Cluster, ClusterConfig, ConsistencyChecker, Fault, FaultInjector,
-    NetworkConfig, OperationLog, ProcessCluster, ProcessFaultInjector, WorkloadConfig,
-    WorkloadGenerator, poll_for,
+use blockyard_common::{
+    ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
 };
-use blockyard_test_harness::TestNodeId as NodeId;
+use blockyard_raft::{
+    LogStore, MetadataService, NetworkFactory, Router, StateMachineStore,
+};
+use openraft::BasicNode;
+use parking_lot::RwLock;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers: real multi-node Raft cluster
 // ---------------------------------------------------------------------------
 
-fn cluster_config(node_count: u32, base_port: u16) -> ClusterConfig {
-    ClusterConfig {
-        node_count,
-        binary_path: PathBuf::from("/usr/bin/false"),
-        base_data_dir: PathBuf::from("/tmp/blockyard-avail-test"),
-        network: NetworkConfig {
-            base_listen_port: base_port,
-            base_gossip_port: base_port + 1000,
-            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        },
-    }
+struct RaftCluster {
+    services: Vec<MetadataService>,
+    router: Arc<RwLock<Router>>,
 }
 
-fn workload_for_volumes(volume_ids: &[VolumeId], write_ratio: f64) -> WorkloadGenerator {
-    let config = WorkloadConfig {
-        volume_ids: volume_ids.to_vec(),
-        write_ratio,
-        block_size: 4096,
-        max_offset: 4096 * 64,
-        operations_per_second: 1000,
-        duration: Duration::from_secs(5),
-        concurrent_clients: 4,
+async fn create_cluster(node_count: u64) -> RaftCluster {
+    let router = Arc::new(RwLock::new(Router::new()));
+    let config = Arc::new(openraft::Config {
+        heartbeat_interval: 100,
+        election_timeout_min: 300,
+        election_timeout_max: 600,
         ..Default::default()
-    };
-    WorkloadGenerator::new(config)
+    });
+
+    let mut services = Vec::new();
+    for node_id in 1..=node_count {
+        let log_store = LogStore::new();
+        let sm_store = StateMachineStore::new();
+        let network = NetworkFactory::new(Arc::clone(&router));
+        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
+            node_id,
+            config.clone(),
+            network,
+            log_store,
+            sm_store.clone(),
+        )
+        .await
+        .expect("create raft node");
+        router.write().add_node(node_id, raft.clone());
+        services.push(MetadataService::new(raft, sm_store));
+    }
+
+    let mut nodes = BTreeMap::new();
+    for id in 1..=node_count {
+        nodes.insert(id, BasicNode::default());
+    }
+    services[0]
+        .raft()
+        .initialize(nodes)
+        .await
+        .expect("initialize cluster");
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    RaftCluster { services, router }
 }
 
-fn simulate_workload(
-    workload: &WorkloadGenerator,
-    op_count: usize,
-    ack_all: bool,
-) {
-    for _ in 0..op_count {
-        let mut op = workload.generate_operation();
-        if ack_all {
-            op.complete(AckStatus::Acked);
-        } else {
-            op.complete(AckStatus::Nacked);
+async fn find_leader(cluster: &RaftCluster) -> Option<usize> {
+    for _ in 0..30 {
+        for (i, svc) in cluster.services.iter().enumerate() {
+            let metrics = svc.raft().metrics().borrow().clone();
+            if metrics.current_leader == Some((i + 1) as u64) {
+                return Some(i);
+            }
         }
-        workload.log().record(op);
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    None
 }
 
-fn verify_consistency(
-    log: &OperationLog,
-    min_operations: u64,
-) -> Vec<blockyard_test_harness::CheckReport> {
-    let acked = log.acked_writes();
-    let mut checker = ConsistencyChecker::new(clone_log(log)).with_min_operations(min_operations);
-    for op in &acked {
-        if let Some(checksum) = &op.data_checksum {
-            checker.record_read_back(op.volume_id, op.offset, checksum.clone());
-        }
-    }
-    checker.check_all()
-}
-
-fn clone_log(log: &OperationLog) -> OperationLog {
-    let new_log = OperationLog::new();
-    for op in log.all() {
-        new_log.record(op);
-    }
-    new_log
-}
-
-fn build_node_map_from_cluster(
-    cluster: &ProcessCluster,
-) -> HashMap<NodeId, blockyard_test_harness::Node> {
-    let mut map = HashMap::new();
-    for id in cluster.node_ids() {
-        let node = cluster.node(id).unwrap();
-        let config = node.config().clone();
-        map.insert(id, blockyard_test_harness::Node::new(config));
-    }
-    map
-}
-
-fn simulate_leader_election(remaining_nodes: &[NodeId]) -> (NodeId, Duration) {
-    assert!(
-        !remaining_nodes.is_empty(),
-        "cannot elect leader from empty node set"
-    );
-    let election_time = Duration::from_millis(150 + 50);
-    (remaining_nodes[0], election_time)
+async fn wait_for_leader(cluster: &RaftCluster) -> usize {
+    find_leader(cluster)
+        .await
+        .expect("leader should be elected within timeout")
 }
 
 // ---------------------------------------------------------------------------
-// P9C.1 — 1-of-3 node crash: writes continue within election timeout
+// P9C.1 — 1-of-3 crash: writes continue after leader re-election
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_1_of_3_crash_writes_continue() {
-    let cluster = ProcessCluster::new(cluster_config(3, 40000));
-    assert_eq!(cluster.node_count(), 3);
+    let cluster = create_cluster(3).await;
+    let leader_idx = wait_for_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
 
     let vol = VolumeId::generate();
-    let workload = workload_for_volumes(&[vol], 1.0);
+    leader
+        .create_volume(vol, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .await
+        .expect("create volume");
 
-    simulate_workload(&workload, 50, true);
-    assert_eq!(workload.log().acked_write_count(), 50);
+    let epoch = leader.advance_epoch().await.expect("advance epoch");
 
-    let nodes = build_node_map_from_cluster(&cluster);
-    let injector = ProcessFaultInjector::new(&nodes);
-    let crash_target = NodeId(1);
-    injector
-        .inject(&Fault::NodeCrash { node_id: crash_target })
-        .unwrap();
-    assert_eq!(injector.active_faults().len(), 1);
+    let node_id = NodeId::generate();
+    leader
+        .add_node(node_id, "10.0.0.1:9000".into())
+        .await
+        .expect("add node");
 
-    let surviving: Vec<NodeId> = cluster
-        .node_ids()
-        .into_iter()
-        .filter(|id| *id != crash_target)
-        .collect();
-    assert_eq!(surviving.len(), 2);
+    let crashed_id = (leader_idx + 1) as u64;
+    cluster.router.write().remove_node(crashed_id);
+    cluster.services[leader_idx]
+        .raft()
+        .shutdown()
+        .await
+        .expect("shutdown leader");
 
-    let (new_leader, election_duration) = simulate_leader_election(&surviving);
+    let election_start = Instant::now();
+
+    let mut new_leader_idx = None;
+    for _ in 0..40 {
+        for (i, svc) in cluster.services.iter().enumerate() {
+            if (i + 1) as u64 == crashed_id {
+                continue;
+            }
+            let metrics = svc.raft().metrics().borrow().clone();
+            if metrics.current_leader == Some((i + 1) as u64) {
+                new_leader_idx = Some(i);
+                break;
+            }
+        }
+        if new_leader_idx.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let election_time = election_start.elapsed();
+    let new_leader_idx = new_leader_idx.expect("new leader should be elected");
+    let new_leader = &cluster.services[new_leader_idx];
+
     assert!(
-        election_duration <= Duration::from_millis(300),
-        "election took too long: {election_duration:?}"
+        election_time < Duration::from_secs(2),
+        "election took {:?}, should be < 2s",
+        election_time
     );
 
-    let election_timeout_ok = poll_for(Duration::from_secs(2), Duration::from_millis(10), || {
-        election_duration <= Duration::from_millis(300)
-    })
-    .await;
-    assert!(election_timeout_ok, "writes did not resume within election timeout");
+    let vol_check = new_leader.get_volume(&vol);
+    assert!(vol_check.is_some(), "volume must survive leader crash");
 
-    simulate_workload(&workload, 50, true);
-    assert_eq!(workload.log().acked_write_count(), 100);
-
-    let reports = verify_consistency(workload.log(), 50);
+    let ext = ExtentId::generate();
+    let result = new_leader
+        .commit_extent_mapping(
+            vol,
+            0..512,
+            ext,
+            1,
+            epoch,
+            vec![node_id],
+            vec![vec![1]],
+            Some(OperationId::generate()),
+            None,
+        )
+        .await;
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "consistency check failed after 1-of-3 crash: {:?}",
-        reports
-            .iter()
-            .filter(|r| r.result.is_fail())
-            .collect::<Vec<_>>()
+        result.is_ok(),
+        "writes must continue on new leader: {:?}",
+        result.err()
     );
 
-    let result = workload.result();
-    assert_eq!(result.total_writes, 100);
-    assert_eq!(result.acked_writes, 100);
-    assert_eq!(result.failed_operations, 0);
-
-    assert_eq!(new_leader, surviving[0]);
-
-    injector.revert_all().unwrap();
-    assert!(injector.active_faults().is_empty());
+    let node_check = new_leader.get_node(&node_id);
+    assert!(node_check.is_some(), "committed node must survive crash");
 }
 
 // ---------------------------------------------------------------------------
-// P9C.2 — 1-of-5 node crash: zero downtime for unaffected volumes
+// P9C.2 — 1-of-5 crash: unaffected volumes have zero downtime
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_1_of_5_crash_zero_downtime_unaffected() {
-    let cluster = ProcessCluster::new(cluster_config(5, 41000));
-    assert_eq!(cluster.node_count(), 5);
+    let cluster = create_cluster(5).await;
+    let leader_idx = wait_for_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
 
-    let affected_vol = VolumeId::generate();
-    let unaffected_vol = VolumeId::generate();
+    let vol1 = VolumeId::generate();
+    let vol2 = VolumeId::generate();
+    leader
+        .create_volume(vol1, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .await
+        .expect("create vol1");
+    leader
+        .create_volume(vol2, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .await
+        .expect("create vol2");
 
-    let affected_wl = workload_for_volumes(&[affected_vol], 0.8);
-    let unaffected_wl = workload_for_volumes(&[unaffected_vol], 0.8);
+    let epoch = leader.advance_epoch().await.expect("advance");
+    let nid = NodeId::generate();
+    leader
+        .add_node(nid, "10.0.0.2:9000".into())
+        .await
+        .expect("add node");
 
-    simulate_workload(&affected_wl, 30, true);
-    simulate_workload(&unaffected_wl, 30, true);
+    let non_leader_idx = if leader_idx == 0 { 1 } else { 0 };
+    let crashed_id = (non_leader_idx + 1) as u64;
+    cluster.router.write().remove_node(crashed_id);
+    cluster.services[non_leader_idx]
+        .raft()
+        .shutdown()
+        .await
+        .expect("shutdown non-leader");
 
-    let nodes = build_node_map_from_cluster(&cluster);
-    let injector = ProcessFaultInjector::new(&nodes);
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let crash_target = NodeId(2);
-    let crash_start = Instant::now();
-    injector
-        .inject(&Fault::NodeCrash { node_id: crash_target })
-        .unwrap();
+    for i in 0..5 {
+        let ext = ExtentId::generate();
+        let result = leader
+            .commit_extent_mapping(
+                vol1,
+                (i * 100)..((i + 1) * 100),
+                ext,
+                i + 1,
+                epoch,
+                vec![nid],
+                vec![vec![(i as u8) + 1]],
+                Some(OperationId::generate()),
+                None,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "write {} to vol1 should succeed after non-leader crash: {:?}",
+            i,
+            result.err()
+        );
+    }
 
-    let unaffected_io_start = Instant::now();
-    simulate_workload(&unaffected_wl, 50, true);
-    let unaffected_io_elapsed = unaffected_io_start.elapsed();
+    for i in 0..5 {
+        let ext = ExtentId::generate();
+        let result = leader
+            .commit_extent_mapping(
+                vol2,
+                (i * 100)..((i + 1) * 100),
+                ext,
+                i + 10,
+                epoch,
+                vec![nid],
+                vec![vec![(i as u8) + 10]],
+                Some(OperationId::generate()),
+                None,
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "write {} to vol2 should succeed: {:?}",
+            i,
+            result.err()
+        );
+    }
 
-    let downtime = poll_for(
-        Duration::from_millis(100),
-        Duration::from_millis(5),
-        || true,
-    )
-    .await;
-    assert!(downtime, "polling should succeed immediately for unaffected volume");
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    assert_eq!(
-        unaffected_wl.log().failed_operations().len(),
-        0,
-        "unaffected volume should have zero failed operations"
-    );
-    assert!(
-        unaffected_io_elapsed < Duration::from_secs(1),
-        "unaffected volume IO took too long: {unaffected_io_elapsed:?}"
-    );
-
-    simulate_workload(&affected_wl, 20, true);
-
-    let surviving: Vec<NodeId> = cluster
-        .node_ids()
-        .into_iter()
-        .filter(|id| *id != crash_target)
-        .collect();
-    assert_eq!(surviving.len(), 4);
-
-    let reports = verify_consistency(unaffected_wl.log(), 30);
-    assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "unaffected volume consistency failed: {:?}",
-        reports
-            .iter()
-            .filter(|r| r.result.is_fail())
-            .collect::<Vec<_>>()
-    );
-
-    let reports = verify_consistency(affected_wl.log(), 30);
-    assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "affected volume consistency failed"
-    );
-
-    let crash_elapsed = crash_start.elapsed();
-    assert!(
-        crash_elapsed < Duration::from_secs(5),
-        "test scenario took too long: {crash_elapsed:?}"
-    );
-
-    injector.revert_all().unwrap();
+    for (i, svc) in cluster.services.iter().enumerate() {
+        if (i + 1) as u64 == crashed_id {
+            continue;
+        }
+        assert!(
+            svc.get_volume(&vol1).is_some(),
+            "surviving node {} must see vol1",
+            i + 1
+        );
+        assert!(
+            svc.get_volume(&vol2).is_some(),
+            "surviving node {} must see vol2",
+            i + 1
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
-// P9C.3 — Volume readable during minority partition (from majority side)
+// P9C.3 — Volume readable from surviving nodes during minority partition
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_volume_readable_minority_partition() {
-    let cluster = ProcessCluster::new(cluster_config(5, 42000));
-    assert_eq!(cluster.node_count(), 5);
+    let cluster = create_cluster(5).await;
+    let leader_idx = wait_for_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
 
     let vol = VolumeId::generate();
-    let workload = workload_for_volumes(&[vol], 1.0);
+    leader
+        .create_volume(vol, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .await
+        .expect("create volume");
 
-    simulate_workload(&workload, 40, true);
-    assert_eq!(workload.log().acked_write_count(), 40);
+    let epoch = leader.advance_epoch().await.expect("advance");
+    let nid = NodeId::generate();
+    leader
+        .add_node(nid, "10.0.0.3:9000".into())
+        .await
+        .expect("add node");
 
-    let nodes = build_node_map_from_cluster(&cluster);
-    let injector = ProcessFaultInjector::new(&nodes);
+    let ext = ExtentId::generate();
+    leader
+        .commit_extent_mapping(
+            vol,
+            0..512,
+            ext,
+            1,
+            epoch,
+            vec![nid],
+            vec![vec![1, 2, 3]],
+            Some(OperationId::generate()),
+            None,
+        )
+        .await
+        .expect("pre-partition commit");
 
-    let minority = vec![NodeId(3), NodeId(4)];
-    let majority = vec![NodeId(0), NodeId(1), NodeId(2)];
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let partition = Fault::NetworkPartition {
-        isolated: minority.clone(),
-        rest: majority.clone(),
-    };
-    injector.inject(&partition).unwrap();
-    assert_eq!(injector.active_faults().len(), 1);
+    let minority_ids: Vec<u64> = vec![4, 5];
+    for id in &minority_ids {
+        cluster.router.write().remove_node(*id);
+    }
 
-    let read_workload = workload_for_volumes(&[vol], 0.0);
-    simulate_workload(&read_workload, 30, true);
-    assert_eq!(read_workload.log().read_count(), 30);
-    assert_eq!(
-        read_workload.log().failed_operations().len(),
-        0,
-        "reads from majority side should not fail during partition"
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let vol_check = leader.get_volume(&vol);
+    assert!(
+        vol_check.is_some(),
+        "volume must remain readable from majority side"
     );
 
-    simulate_workload(&workload, 20, true);
-    assert_eq!(workload.log().acked_write_count(), 60);
-
-    let reports = verify_consistency(workload.log(), 40);
+    let mapping = leader.lookup_by_extent_version(1);
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "consistency check failed during minority partition"
+        mapping.is_some(),
+        "committed mapping must be readable during partition"
     );
 
-    injector.revert(&partition).unwrap();
-    assert!(injector.active_faults().is_empty());
-
-    let healed = poll_for(Duration::from_secs(2), Duration::from_millis(50), || {
-        injector.active_faults().is_empty()
-    })
-    .await;
-    assert!(healed, "partition should be healed");
-
-    simulate_workload(&workload, 10, true);
-    assert_eq!(workload.log().acked_write_count(), 70);
-
-    let final_reports = verify_consistency(workload.log(), 50);
+    let ext2 = ExtentId::generate();
+    let result = leader
+        .commit_extent_mapping(
+            vol,
+            512..1024,
+            ext2,
+            2,
+            epoch,
+            vec![nid],
+            vec![vec![4, 5, 6]],
+            Some(OperationId::generate()),
+            None,
+        )
+        .await;
     assert!(
-        final_reports.iter().all(|r| r.result.is_pass()),
-        "post-heal consistency check failed"
+        result.is_ok(),
+        "writes should continue on majority side: {:?}",
+        result.err()
+    );
+
+    for id in &minority_ids {
+        let log_store = LogStore::new();
+        let sm_store = StateMachineStore::new();
+        let network = NetworkFactory::new(Arc::clone(&cluster.router));
+        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
+            *id,
+            Arc::new(openraft::Config {
+                heartbeat_interval: 100,
+                election_timeout_min: 300,
+                election_timeout_max: 600,
+                ..Default::default()
+            }),
+            network,
+            log_store,
+            sm_store.clone(),
+        )
+        .await
+        .expect("recreate node");
+        cluster.router.write().add_node(*id, raft);
+    }
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let m2 = leader.lookup_by_extent_version(2);
+    assert!(
+        m2.is_some(),
+        "post-partition writes should be committed"
     );
 }
 
@@ -327,64 +396,75 @@ async fn test_volume_readable_minority_partition() {
 
 #[tokio::test]
 async fn test_new_leader_elected_within_2s() {
-    let cluster = ProcessCluster::new(cluster_config(5, 43000));
-    assert_eq!(cluster.node_count(), 5);
+    let cluster = create_cluster(5).await;
+    let leader_idx = wait_for_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
 
     let vol = VolumeId::generate();
-    let workload = workload_for_volumes(&[vol], 1.0);
-    simulate_workload(&workload, 20, true);
+    leader
+        .create_volume(vol, 1_000_000, ProtectionPolicy::Replicated { replicas: 3 })
+        .await
+        .expect("create volume");
 
-    let nodes = build_node_map_from_cluster(&cluster);
-    let injector = ProcessFaultInjector::new(&nodes);
+    let old_leader_id = (leader_idx + 1) as u64;
+    cluster.router.write().remove_node(old_leader_id);
 
-    let leader_id = NodeId(0);
     let election_start = Instant::now();
-    injector
-        .inject(&Fault::NodeCrash { node_id: leader_id })
-        .unwrap();
+    cluster.services[leader_idx]
+        .raft()
+        .shutdown()
+        .await
+        .expect("shutdown leader");
 
-    let remaining: Vec<NodeId> = cluster
-        .node_ids()
-        .into_iter()
-        .filter(|id| *id != leader_id)
-        .collect();
-    assert_eq!(remaining.len(), 4);
+    let mut new_leader_id: Option<u64> = None;
+    for _ in 0..40 {
+        for (i, svc) in cluster.services.iter().enumerate() {
+            if (i + 1) as u64 == old_leader_id {
+                continue;
+            }
+            let metrics = svc.raft().metrics().borrow().clone();
+            if let Some(lid) = metrics.current_leader {
+                if lid != old_leader_id {
+                    new_leader_id = Some(lid);
+                    break;
+                }
+            }
+        }
+        if new_leader_id.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
-    let (new_leader, simulated_election_time) = simulate_leader_election(&remaining);
-
-    let elected_within_timeout = poll_for(
-        Duration::from_secs(2),
-        Duration::from_millis(10),
-        || simulated_election_time <= Duration::from_millis(300),
-    )
-    .await;
-    assert!(elected_within_timeout, "leader election did not complete within 2 seconds");
-
-    let actual_elapsed = election_start.elapsed();
-    assert!(
-        actual_elapsed < Duration::from_secs(2),
-        "wall-clock election verification took too long: {actual_elapsed:?}"
-    );
-
-    assert_ne!(new_leader, leader_id, "new leader must differ from crashed leader");
-    assert!(
-        remaining.contains(&new_leader),
-        "new leader must be one of the surviving nodes"
-    );
+    let election_time = election_start.elapsed();
 
     assert!(
-        simulated_election_time < Duration::from_secs(2),
-        "election timeout {simulated_election_time:?} exceeded 2s SLA"
+        new_leader_id.is_some(),
+        "new leader must be elected after leader crash"
     );
-
-    simulate_workload(&workload, 30, true);
-    assert_eq!(workload.log().acked_write_count(), 50);
-
-    let reports = verify_consistency(workload.log(), 20);
+    assert_ne!(
+        new_leader_id.unwrap(),
+        old_leader_id,
+        "new leader must differ from crashed leader"
+    );
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "consistency check failed after leader election"
+        election_time < Duration::from_secs(2),
+        "election took {:?}, must be < 2s",
+        election_time
     );
 
-    injector.revert_all().unwrap();
+    let new_idx = (new_leader_id.unwrap() - 1) as usize;
+    let new_leader = &cluster.services[new_idx];
+    let vol_check = new_leader.get_volume(&vol);
+    assert!(
+        vol_check.is_some(),
+        "new leader must retain committed volume"
+    );
+
+    let epoch = new_leader.advance_epoch().await;
+    assert!(
+        epoch.is_ok(),
+        "new leader must accept writes: {:?}",
+        epoch.err()
+    );
 }

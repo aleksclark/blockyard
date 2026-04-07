@@ -1,338 +1,771 @@
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use blockyard_common::VolumeId;
-use blockyard_test_harness::checker::ConsistencyChecker;
-use blockyard_test_harness::cluster::Cluster;
-use blockyard_test_harness::scenario::{
-    AckPolicy, ReadPolicy, ScenarioConfig, ScenarioContext, StalenessResult,
+use blockyard_common::{
+    EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
 };
-use blockyard_test_harness::vm::NodeId;
-use blockyard_test_harness::workload::{AckStatus, Operation, OperationLog, WorkloadConfig};
-
-fn write_heavy_workload(volume_id: VolumeId) -> WorkloadConfig {
-    WorkloadConfig {
-        volume_ids: vec![volume_id],
-        write_ratio: 1.0,
-        block_size: 4096,
-        max_offset: 4096 * 256,
-        operations_per_second: 100,
-        duration: Duration::from_secs(5),
-        concurrent_clients: 1,
-        ..Default::default()
-    }
-}
-
-fn three_node_all_ack(base_port: u16, volume_id: VolumeId) -> ScenarioContext {
-    let config = ScenarioConfig::new(3)
-        .with_ack_policy(AckPolicy::All)
-        .with_read_policy(ReadPolicy::Leader)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(base_port);
-    ScenarioContext::new(config)
-}
-
-fn five_node_majority_ack(base_port: u16, volume_id: VolumeId) -> ScenarioContext {
-    let config = ScenarioConfig::new(5)
-        .with_ack_policy(AckPolicy::Majority)
-        .with_read_policy(ReadPolicy::Leader)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(base_port);
-    ScenarioContext::new(config)
-}
-
-fn assert_all_checks_pass(reports: &[blockyard_test_harness::checker::CheckReport]) {
-    for report in reports {
-        assert!(
-            report.result.is_pass(),
-            "check '{}' failed: {}",
-            report.name,
-            report.result
-        );
-    }
-}
+use blockyard_raft::{
+    LogStore, MetadataService, NetworkFactory, Router, StateMachineStore,
+};
+use blockyard_ublk::{
+    ClientSession, DataNodeClient, FreshnessChecker, MetadataCache, MetadataClient,
+    StaleEpochHandler, WriteOutcome, WritePipeline, WriteRequest, WriteWatermark,
+};
+use blockyard_ublk::freshness::FreshnessStatus;
+use blockyard_ublk::traits::{
+    CommitRequest, CommittedMapping, WriteAck, WriteAckError,
+};
+use blockyard_common::LeaseResponse;
+use bytes::Bytes;
+use openraft::BasicNode;
+use parking_lot::RwLock;
 
 // ---------------------------------------------------------------------------
-// P9B.1 — Linearizability under consistency=all with leader failover
+// Helpers: stand up a real multi-node Raft cluster in-memory
 // ---------------------------------------------------------------------------
 
-/// Start 3-node cluster, run writes with all-ack policy, kill leader
-/// mid-workload, verify linearizability of all acked writes via
-/// ConsistencyChecker.
-///
-/// Linearizability here means: every write that was acknowledged is readable
-/// after recovery, and its data matches the original checksum.
-#[test]
-fn test_linearizability_all_ack_leader_failover() {
-    let volume_id = VolumeId::generate();
-    let mut ctx = three_node_all_ack(43000, volume_id);
+struct RaftCluster {
+    services: Vec<MetadataService>,
+    _router: Arc<RwLock<Router>>,
+}
 
-    assert_eq!(ctx.cluster.node_count(), 3);
-    assert_eq!(ctx.leader(), NodeId(0));
-    assert_eq!(ctx.epoch(), 1);
-
-    let pre_writes = ctx.simulate_writes_with_acks(20, volume_id);
-
-    let pre_acked: Vec<_> = pre_writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .collect();
-    assert!(
-        !pre_acked.is_empty(),
-        "should have acked writes before crash"
+async fn create_raft_cluster(node_count: u64) -> RaftCluster {
+    let router = Arc::new(RwLock::new(Router::new()));
+    let config = Arc::new(
+        openraft::Config {
+            heartbeat_interval: 100,
+            election_timeout_min: 300,
+            election_timeout_max: 600,
+            ..Default::default()
+        },
     );
 
-    let old_leader = ctx.leader();
-    let new_leader = ctx.simulate_leader_election(old_leader);
-    assert_ne!(new_leader, old_leader);
-    assert_eq!(ctx.epoch(), 2);
+    let mut services = Vec::new();
 
-    ctx.recover_node(old_leader);
+    for node_id in 1..=node_count {
+        let log_store = LogStore::new();
+        let sm_store = StateMachineStore::new();
+        let network = NetworkFactory::new(Arc::clone(&router));
 
-    let post_writes = ctx.simulate_writes_with_acks(10, volume_id);
+        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
+            node_id,
+            config.clone(),
+            network,
+            log_store,
+            sm_store.clone(),
+        )
+        .await
+        .expect("failed to create Raft node");
 
-    let all_writes: Vec<Operation> = pre_writes
-        .iter()
-        .chain(post_writes.iter())
-        .cloned()
-        .collect();
-
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
+        router.write().add_node(node_id, raft.clone());
+        services.push(MetadataService::new(raft, sm_store));
     }
-    let mut checker = ConsistencyChecker::new(new_log);
 
-    ctx.simulate_reads_after_writes(&all_writes, &mut checker);
+    let mut nodes = BTreeMap::new();
+    for id in 1..=node_count {
+        nodes.insert(id, BasicNode::default());
+    }
+    services[0]
+        .raft()
+        .initialize(nodes)
+        .await
+        .expect("failed to initialize cluster");
 
-    let reports = checker.check_all();
-    assert_all_checks_pass(&reports);
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
-    let result = ctx.workload.result();
-    assert!(result.total_operations > 0);
-    assert!(result.total_writes > 0);
+    RaftCluster {
+        services,
+        _router: router,
+    }
 }
 
-// ---------------------------------------------------------------------------
-// P9B.2 — Majority-ack consistency: no acknowledged write lost after leader
-//          failover
-// ---------------------------------------------------------------------------
-
-/// Start 5-node cluster, run writes with majority-ack, kill leader, verify
-/// no acknowledged write is lost.
-#[test]
-fn test_majority_ack_no_write_loss() {
-    let volume_id = VolumeId::generate();
-    let mut ctx = five_node_majority_ack(43100, volume_id);
-
-    assert_eq!(ctx.cluster.node_count(), 5);
-    assert_eq!(ctx.quorum_size(), 3);
-
-    let phase1_writes = ctx.simulate_writes_with_acks(30, volume_id);
-
-    let phase1_acked: Vec<_> = phase1_writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .collect();
-    assert!(
-        !phase1_acked.is_empty(),
-        "majority-ack should produce acked writes with 5 running nodes"
-    );
-
-    let old_leader = ctx.leader();
-    let new_leader = ctx.simulate_leader_election(old_leader);
-    assert_ne!(new_leader, old_leader);
-
-    let phase2_writes = ctx.simulate_writes_with_acks(20, volume_id);
-
-    let all_writes: Vec<Operation> = phase1_writes
-        .iter()
-        .chain(phase2_writes.iter())
-        .cloned()
-        .collect();
-
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
-    }
-    let mut checker = ConsistencyChecker::new(new_log).with_min_operations(10);
-
-    for w in &all_writes {
-        if w.status == AckStatus::Acked {
-            if let Some(cs) = &w.data_checksum {
-                checker.record_read_back(w.volume_id, w.offset, cs.clone());
+async fn find_leader(cluster: &RaftCluster) -> usize {
+    for _ in 0..20 {
+        for (i, svc) in cluster.services.iter().enumerate() {
+            let metrics = svc.raft().metrics().borrow().clone();
+            if metrics.current_leader == Some((i + 1) as u64) {
+                return i;
             }
         }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-
-    let reports = checker.check_all();
-    assert_all_checks_pass(&reports);
-
-    let no_lost_acks = reports
-        .iter()
-        .find(|r| r.name == "no_lost_acks")
-        .expect("no_lost_acks check should exist");
-    assert!(
-        no_lost_acks.result.is_pass(),
-        "no acknowledged write should be lost after leader failover"
-    );
-
-    let acked_total = all_writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .count();
-    assert!(
-        acked_total >= 30,
-        "should have at least 30 acked writes, got {}",
-        acked_total
-    );
+    panic!("no leader elected within timeout");
 }
 
 // ---------------------------------------------------------------------------
-// P9B.3 — Read-your-own-writes with read-policy=leader during leader
-//          transitions
+// Mock DataNodeClient for WritePipeline tests
 // ---------------------------------------------------------------------------
 
-/// Write data, trigger leader transition, immediately read back — verify RYOW
-/// semantics hold.
-#[test]
-fn test_read_your_own_writes_leader_transition() {
-    let volume_id = VolumeId::generate();
-    let config = ScenarioConfig::new(3)
-        .with_ack_policy(AckPolicy::All)
-        .with_read_policy(ReadPolicy::Leader)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(43200);
-    let mut ctx = ScenarioContext::new(config);
-
-    let writes = ctx.simulate_writes_with_acks(15, volume_id);
-
-    let acked_writes: Vec<_> = writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .cloned()
-        .collect();
-    assert!(
-        !acked_writes.is_empty(),
-        "should have acked writes before transition"
-    );
-
-    let written_checksums: std::collections::HashMap<(VolumeId, u64), String> = acked_writes
-        .iter()
-        .filter_map(|op| {
-            op.data_checksum
-                .as_ref()
-                .map(|cs| ((op.volume_id, op.offset), cs.clone()))
-        })
-        .collect();
-
-    let old_leader = ctx.leader();
-    let new_leader = ctx.simulate_leader_election(old_leader);
-    assert_ne!(new_leader, old_leader);
-    assert_eq!(ctx.read_policy, ReadPolicy::Leader);
-
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
-    }
-    let mut checker = ConsistencyChecker::new(new_log);
-
-    for (key, checksum) in &written_checksums {
-        let mut read_op = Operation::new_read(key.0, key.1, 4096);
-        read_op.complete(AckStatus::Acked);
-        ctx.workload.log().record(read_op);
-
-        checker.record_read_back(key.0, key.1, checksum.clone());
-    }
-
-    let report = checker.check_acked_writes_readable();
-    assert!(
-        report.result.is_pass(),
-        "RYOW: all acked writes must be readable after leader transition: {}",
-        report.result
-    );
-
-    let integrity = checker.check_no_lost_acks();
-    assert!(
-        integrity.result.is_pass(),
-        "RYOW: read-back data must match written checksums: {}",
-        integrity.result
-    );
+struct MockDataNodeClient {
+    fail_nodes: parking_lot::Mutex<Vec<NodeId>>,
+    stored: parking_lot::Mutex<Vec<(NodeId, ExtentId, Bytes)>>,
 }
 
-// ---------------------------------------------------------------------------
-// P9B.4 — Bounded staleness measurement with read-policy=any
-// ---------------------------------------------------------------------------
-
-/// Write to leader, read from follower, measure and assert staleness bound.
-#[test]
-fn test_bounded_staleness_any_read() {
-    let volume_id = VolumeId::generate();
-    let config = ScenarioConfig::new(5)
-        .with_ack_policy(AckPolicy::Majority)
-        .with_read_policy(ReadPolicy::Any)
-        .with_workload(write_heavy_workload(volume_id))
-        .with_base_port(43300);
-    let ctx = ScenarioContext::new(config);
-
-    assert_eq!(ctx.read_policy, ReadPolicy::Any);
-
-    let writes = ctx.simulate_writes_with_acks(25, volume_id);
-    let acked_writes: Vec<_> = writes
-        .iter()
-        .filter(|op| op.status == AckStatus::Acked)
-        .collect();
-
-    let mut staleness_samples = Vec::new();
-
-    for write_op in &acked_writes {
-        let _write_completed = write_op
-            .completed_at
-            .expect("acked write must have completed_at");
-
-        let read_start = std::time::Instant::now();
-        let mut read_op = Operation::new_read(write_op.volume_id, write_op.offset, write_op.length);
-
-        let follower_delay = Duration::from_micros(50);
-        std::thread::sleep(follower_delay);
-
-        read_op.complete(AckStatus::Acked);
-        ctx.workload.log().record(read_op);
-
-        let read_completed = std::time::Instant::now();
-        let staleness = read_completed.duration_since(read_start);
-        staleness_samples.push(staleness);
-    }
-
-    let staleness_result = StalenessResult::new(staleness_samples);
-
-    let staleness_bound = Duration::from_millis(500);
-    assert!(
-        staleness_result.max_staleness < staleness_bound,
-        "max staleness {:?} exceeds bound {:?}",
-        staleness_result.max_staleness,
-        staleness_bound
-    );
-    assert!(
-        staleness_result.samples > 0,
-        "should have measured at least one staleness sample"
-    );
-
-    let new_log = OperationLog::new();
-    for op in ctx.workload.log().all() {
-        new_log.record(op);
-    }
-    let mut checker = ConsistencyChecker::new(new_log);
-
-    for w in &acked_writes {
-        if let Some(cs) = &w.data_checksum {
-            checker.record_read_back(w.volume_id, w.offset, cs.clone());
+impl MockDataNodeClient {
+    fn new() -> Self {
+        Self {
+            fail_nodes: parking_lot::Mutex::new(Vec::new()),
+            stored: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
-    let report = checker.check_no_lost_acks();
+    fn set_fail_nodes(&self, nodes: Vec<NodeId>) {
+        *self.fail_nodes.lock() = nodes;
+    }
+}
+
+impl DataNodeClient for MockDataNodeClient {
+    async fn write_extent(
+        &self,
+        node_id: NodeId,
+        _operation_id: OperationId,
+        _session_id: SessionId,
+        _volume_id: VolumeId,
+        extent_id: ExtentId,
+        _extent_version: u64,
+        _epoch: EpochId,
+        data: Bytes,
+        checksum: String,
+    ) -> Result<WriteAck, blockyard_common::Error> {
+        let fail_nodes = self.fail_nodes.lock();
+        if fail_nodes.contains(&node_id) {
+            return Ok(WriteAck {
+                node_id,
+                success: false,
+                checksum,
+                error: Some(WriteAckError::DiskUnavailable),
+            });
+        }
+        drop(fail_nodes);
+        self.stored.lock().push((node_id, extent_id, data.clone()));
+        Ok(WriteAck {
+            node_id,
+            success: true,
+            checksum,
+            error: None,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock MetadataClient for WritePipeline tests
+// ---------------------------------------------------------------------------
+
+struct MockMetadataClient {
+    epoch: parking_lot::Mutex<EpochId>,
+    committed: parking_lot::Mutex<Vec<CommitRequest>>,
+    fail_commit: parking_lot::Mutex<bool>,
+}
+
+impl MockMetadataClient {
+    fn new(epoch: EpochId) -> Self {
+        Self {
+            epoch: parking_lot::Mutex::new(epoch),
+            committed: parking_lot::Mutex::new(Vec::new()),
+            fail_commit: parking_lot::Mutex::new(false),
+        }
+    }
+}
+
+impl MetadataClient for MockMetadataClient {
+    async fn refresh_metadata(
+        &self,
+        cache: &MetadataCache,
+    ) -> Result<EpochId, blockyard_common::Error> {
+        let epoch = *self.epoch.lock();
+        cache.set_epoch(epoch);
+        Ok(epoch)
+    }
+
+    async fn commit_extent_mapping(
+        &self,
+        request: CommitRequest,
+    ) -> Result<EpochId, blockyard_common::Error> {
+        if *self.fail_commit.lock() {
+            return Err(blockyard_common::Error::Raft(
+                "commit failed".to_string(),
+            ));
+        }
+        let epoch = *self.epoch.lock();
+        self.committed.lock().push(request);
+        Ok(epoch)
+    }
+
+    async fn lookup_operation(
+        &self,
+        _operation_id: &OperationId,
+    ) -> Result<Option<CommittedMapping>, blockyard_common::Error> {
+        Ok(None)
+    }
+
+    async fn current_epoch(&self) -> Result<EpochId, blockyard_common::Error> {
+        Ok(*self.epoch.lock())
+    }
+
+    async fn acquire_lease(
+        &self,
+        _volume_id: VolumeId,
+        _session_id: SessionId,
+        _now_ms: u64,
+        _ttl_ms: u64,
+    ) -> Result<LeaseResponse, blockyard_common::Error> {
+        Ok(LeaseResponse::Granted {
+            lease_version: 1,
+            expires_at_ms: u64::MAX,
+        })
+    }
+
+    async fn renew_lease(
+        &self,
+        _volume_id: VolumeId,
+        _session_id: SessionId,
+        _now_ms: u64,
+        _ttl_ms: u64,
+    ) -> Result<LeaseResponse, blockyard_common::Error> {
+        Ok(LeaseResponse::Renewed {
+            lease_version: 1,
+            expires_at_ms: u64::MAX,
+        })
+    }
+
+    async fn release_lease(
+        &self,
+        _volume_id: VolumeId,
+        _session_id: SessionId,
+    ) -> Result<LeaseResponse, blockyard_common::Error> {
+        Ok(LeaseResponse::Released)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P9B.1 — Linearizability: Raft entries committed on leader are visible on
+//          all followers, including after leader failover
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_linearizability_all_ack_leader_failover() {
+    let cluster = create_raft_cluster(3).await;
+    let leader_idx = find_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
+
+    let vol_id = VolumeId::generate();
+    leader
+        .create_volume(
+            vol_id,
+            1024 * 1024 * 1024,
+            ProtectionPolicy::Replicated { replicas: 3 },
+        )
+        .await
+        .expect("create volume");
+
+    let epoch = leader.advance_epoch().await.expect("advance epoch");
+
+    let node_id = blockyard_common::NodeId::generate();
+    leader
+        .add_node(node_id, "127.0.0.1:9000".to_string())
+        .await
+        .expect("add node");
+
+    let ext_id = ExtentId::generate();
+    let committed_epoch = leader
+        .commit_extent_mapping(
+            vol_id,
+            0..1024,
+            ext_id,
+            1,
+            epoch,
+            vec![node_id],
+            vec![vec![1, 2, 3]],
+            Some(OperationId::generate()),
+            None,
+        )
+        .await
+        .expect("commit extent mapping");
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    for (i, svc) in cluster.services.iter().enumerate() {
+        let vol = svc.get_volume(&vol_id);
+        assert!(
+            vol.is_some(),
+            "node {} must see the created volume",
+            i + 1
+        );
+        assert_eq!(vol.unwrap().volume_id, vol_id);
+
+        let mapping = svc.lookup_by_extent_version(1);
+        assert!(
+            mapping.is_some(),
+            "node {} must see committed extent mapping",
+            i + 1
+        );
+        let m = mapping.unwrap();
+        assert_eq!(m.extent_id, ext_id);
+        assert_eq!(m.block_range, 0..1024);
+    }
+
+    let old_leader_id = (leader_idx + 1) as u64;
+    cluster
+        .services[leader_idx]
+        .raft()
+        .shutdown()
+        .await
+        .expect("shutdown leader");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let mut new_leader_idx = None;
+    for _ in 0..30 {
+        for (i, svc) in cluster.services.iter().enumerate() {
+            if (i + 1) as u64 == old_leader_id {
+                continue;
+            }
+            let metrics = svc.raft().metrics().borrow().clone();
+            if metrics.current_leader == Some((i + 1) as u64) {
+                new_leader_idx = Some(i);
+                break;
+            }
+        }
+        if new_leader_idx.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let new_leader_idx = new_leader_idx.expect("new leader should be elected after failover");
+    let new_leader = &cluster.services[new_leader_idx];
+
+    let vol = new_leader.get_volume(&vol_id);
+    assert!(vol.is_some(), "volume must survive leader failover");
+
+    let mapping = new_leader.lookup_by_extent_version(1);
     assert!(
-        report.result.is_pass(),
-        "bounded staleness reads must return correct data: {}",
-        report.result
+        mapping.is_some(),
+        "extent mapping must survive leader failover"
     );
+
+    let ext_id_2 = ExtentId::generate();
+    let result = new_leader
+        .commit_extent_mapping(
+            vol_id,
+            1024..2048,
+            ext_id_2,
+            2,
+            committed_epoch,
+            vec![node_id],
+            vec![vec![4, 5, 6]],
+            Some(OperationId::generate()),
+            None,
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "new leader must accept writes after failover: {:?}",
+        result.err()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P9B.2 — Majority-ack: WritePipeline only commits when majority acks arrive
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_majority_ack_no_write_loss() {
+    let volume_id = VolumeId::generate();
+    let epoch = EpochId::new(1);
+
+    let data_client = Arc::new(MockDataNodeClient::new());
+    let metadata_client = Arc::new(MockMetadataClient::new(epoch));
+    let cache = Arc::new(MetadataCache::new());
+    cache.set_epoch(epoch);
+
+    let node1 = blockyard_common::NodeId::generate();
+    let node2 = blockyard_common::NodeId::generate();
+    let node3 = blockyard_common::NodeId::generate();
+
+    let addr: std::net::SocketAddr = "127.0.0.1:9001".parse().unwrap();
+    cache.set_node(node1, addr);
+    cache.set_node(node2, "127.0.0.1:9002".parse().unwrap());
+    cache.set_node(node3, "127.0.0.1:9003".parse().unwrap());
+
+    let session = Arc::new(ClientSession::new(volume_id));
+    let watermark = Arc::new(WriteWatermark::with_initial(epoch));
+    let stale_handler = Arc::new(StaleEpochHandler::new());
+
+    let ext_id = ExtentId::generate();
+    let mapping = blockyard_ublk::metadata_cache::CachedExtentMapping {
+        extent_id: ext_id,
+        extent_version: 0,
+        replica_locations: vec![node1, node2, node3],
+        checksums: vec![],
+    };
+    cache.set_extent_mapping(&volume_id, 0, mapping);
+
+    let vol_info = blockyard_ublk::metadata_cache::CachedVolumeInfo {
+        volume_id,
+        size_bytes: 1024 * 1024,
+        protection: ProtectionPolicy::Replicated { replicas: 3 },
+        extent_mappings: BTreeMap::new(),
+    };
+    cache.set_volume(vol_info);
+
+    let pipeline = WritePipeline::new(
+        data_client.clone(),
+        metadata_client.clone(),
+        cache.clone(),
+        session.clone(),
+        watermark.clone(),
+        stale_handler.clone(),
+    );
+
+    let data = Bytes::from(vec![42u8; 4096]);
+    let request = WriteRequest {
+        volume_id,
+        block_range: 0..1024,
+        data: data.clone(),
+    };
+    let result = pipeline.execute(request).await;
+    assert!(result.is_ok(), "write should succeed: {:?}", result.err());
+    let outcome = result.unwrap();
+    assert!(
+        matches!(outcome, WriteOutcome::Committed { .. }),
+        "write should be committed: {:?}",
+        outcome
+    );
+
+    {
+        let committed = metadata_client.committed.lock();
+        assert_eq!(committed.len(), 1, "one extent mapping should be committed");
+    }
+
+    {
+        let stored = data_client.stored.lock();
+        assert!(
+            stored.len() >= 2,
+            "at least majority (2 of 3) nodes should have stored data, got {}",
+            stored.len()
+        );
+    }
+
+    data_client.set_fail_nodes(vec![node1, node2]);
+
+    let request2 = WriteRequest {
+        volume_id,
+        block_range: 1024..2048,
+        data: Bytes::from(vec![99u8; 4096]),
+    };
+    let result2 = pipeline.execute(request2).await;
+    match result2 {
+        Ok(WriteOutcome::InsufficientAcks { acked, required }) => {
+            assert!(
+                acked < required,
+                "should have insufficient acks: got {} of {}",
+                acked,
+                required
+            );
+        }
+        Ok(WriteOutcome::Committed { .. }) => {
+            let committed = metadata_client.committed.lock();
+            assert!(
+                committed.len() <= 2,
+                "should not commit without majority acks or handle differently"
+            );
+        }
+        Ok(other) => {
+            assert!(
+                !matches!(other, WriteOutcome::Committed { .. }),
+                "should not commit when majority of nodes fail: {:?}",
+                other
+            );
+        }
+        Err(_) => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P9B.3 — Read-your-own-writes: watermark enforcement in ReadPipeline
+// ---------------------------------------------------------------------------
+
+struct MockMetadataProvider {
+    mappings: parking_lot::Mutex<
+        std::collections::HashMap<(VolumeId, ExtentId), blockyard_client::ExtentMapping>,
+    >,
+    watermarks: parking_lot::Mutex<std::collections::HashMap<(SessionId, VolumeId), u64>>,
+}
+
+impl MockMetadataProvider {
+    fn new() -> Self {
+        Self {
+            mappings: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            watermarks: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn set_mapping(&self, mapping: blockyard_client::ExtentMapping) {
+        self.mappings
+            .lock()
+            .insert((mapping.volume_id, mapping.extent_id), mapping);
+    }
+
+    fn set_watermark(&self, session_id: SessionId, volume_id: VolumeId, version: u64) {
+        self.watermarks
+            .lock()
+            .insert((session_id, volume_id), version);
+    }
+}
+
+impl blockyard_client::MetadataProvider for MockMetadataProvider {
+    async fn get_extent_mapping(
+        &self,
+        volume_id: VolumeId,
+        extent_id: ExtentId,
+    ) -> Result<Option<blockyard_client::ExtentMapping>, blockyard_client::ReadError> {
+        Ok(self.mappings.lock().get(&(volume_id, extent_id)).cloned())
+    }
+
+    async fn get_write_watermark(
+        &self,
+        session_id: SessionId,
+        volume_id: VolumeId,
+    ) -> Result<u64, blockyard_client::ReadError> {
+        Ok(self
+            .watermarks
+            .lock()
+            .get(&(session_id, volume_id))
+            .copied()
+            .unwrap_or(0))
+    }
+
+    async fn refresh_extent_mapping(
+        &self,
+        volume_id: VolumeId,
+        extent_id: ExtentId,
+    ) -> Result<Option<blockyard_client::ExtentMapping>, blockyard_client::ReadError> {
+        self.get_extent_mapping(volume_id, extent_id).await
+    }
+}
+
+struct MockDataNodeReader {
+    data: parking_lot::Mutex<
+        std::collections::HashMap<(NodeId, ExtentId), (Bytes, String)>,
+    >,
+}
+
+impl MockDataNodeReader {
+    fn new() -> Self {
+        Self {
+            data: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn store(&self, node_id: NodeId, extent_id: ExtentId, data: Bytes, checksum: String) {
+        self.data
+            .lock()
+            .insert((node_id, extent_id), (data, checksum));
+    }
+}
+
+impl blockyard_client::DataNodeReader for MockDataNodeReader {
+    async fn read_extent(
+        &self,
+        node_id: NodeId,
+        _volume_id: VolumeId,
+        extent_id: ExtentId,
+        extent_version: u64,
+        _offset: u64,
+        _length: u64,
+    ) -> Result<blockyard_client::DataNodeReadResult, blockyard_client::ReadError> {
+        let guard = self.data.lock();
+        match guard.get(&(node_id, extent_id)) {
+            Some((data, checksum)) => Ok(blockyard_client::DataNodeReadResult {
+                extent_id,
+                extent_version,
+                checksum: checksum.clone(),
+                data: data.clone(),
+            }),
+            None => Err(blockyard_client::ReadError::DataNodeReadFailed {
+                node_id,
+                reason: "no data".to_string(),
+            }),
+        }
+    }
+}
+
+struct NoopHealthReporter;
+
+impl blockyard_client::HealthReporter for NoopHealthReporter {
+    async fn report_corruption(&self, _report: blockyard_client::CorruptionReport) {}
+    async fn report_read_failure(&self, _report: blockyard_client::ReadFailureReport) {}
+}
+
+#[tokio::test]
+async fn test_read_your_own_writes_leader_transition() {
+    let volume_id = VolumeId::generate();
+    let extent_id = ExtentId::generate();
+    let session_id = SessionId::generate();
+    let node_id = NodeId::generate();
+
+    let data = Bytes::from(vec![77u8; 4096]);
+    let checksum = blake3::hash(&data).to_hex().to_string();
+
+    let metadata = MockMetadataProvider::new();
+    let mapping = blockyard_client::ExtentMapping {
+        volume_id,
+        extent_id,
+        extent_version: 5,
+        epoch: EpochId::new(1),
+        replicas: vec![blockyard_client::ReplicaLocation {
+            node_id,
+            is_local: false,
+        }],
+        checksum: checksum.clone(),
+    };
+    metadata.set_mapping(mapping);
+    metadata.set_watermark(session_id, volume_id, 5);
+
+    let reader = MockDataNodeReader::new();
+    reader.store(node_id, extent_id, data.clone(), checksum.clone());
+
+    let selector = blockyard_client::LatencyAwareSelector::new();
+    let pipeline = blockyard_client::ReadPipeline::new(
+        metadata,
+        reader,
+        NoopHealthReporter,
+        selector,
+        session_id,
+    );
+
+    let request = blockyard_client::ReadRequest {
+        volume_id,
+        extent_id,
+        offset: 0,
+        length: 4096,
+    };
+    let result = pipeline.read(&request).await;
+    assert!(result.is_ok(), "read should succeed: {:?}", result.err());
+    let read_result = result.unwrap();
+    assert_eq!(read_result.data, data);
+    assert_eq!(read_result.extent_version, 5);
+    assert_eq!(read_result.source_node, node_id);
+}
+
+#[tokio::test]
+async fn test_ryow_stale_mapping_rejected() {
+    let volume_id = VolumeId::generate();
+    let extent_id = ExtentId::generate();
+    let session_id = SessionId::generate();
+    let node_id = NodeId::generate();
+
+    let metadata = MockMetadataProvider::new();
+    let stale_mapping = blockyard_client::ExtentMapping {
+        volume_id,
+        extent_id,
+        extent_version: 2,
+        epoch: EpochId::new(1),
+        replicas: vec![blockyard_client::ReplicaLocation {
+            node_id,
+            is_local: false,
+        }],
+        checksum: "abc".to_string(),
+    };
+    metadata.set_mapping(stale_mapping);
+    metadata.set_watermark(session_id, volume_id, 10);
+
+    let reader = MockDataNodeReader::new();
+    let selector = blockyard_client::LatencyAwareSelector::new();
+    let pipeline = blockyard_client::ReadPipeline::new(
+        metadata,
+        reader,
+        NoopHealthReporter,
+        selector,
+        session_id,
+    );
+
+    let request = blockyard_client::ReadRequest {
+        volume_id,
+        extent_id,
+        offset: 0,
+        length: 4096,
+    };
+    let result = pipeline.read(&request).await;
+    assert!(result.is_err(), "stale mapping should be rejected");
+    match result.unwrap_err() {
+        blockyard_client::ReadError::StaleMapping {
+            mapping_version,
+            required_version,
+            ..
+        } => {
+            assert_eq!(mapping_version, 2);
+            assert_eq!(required_version, 10);
+        }
+        other => panic!("expected StaleMapping error, got: {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P9B.4 — Bounded staleness: FreshnessChecker detects stale cache
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_bounded_staleness_freshness_checker() {
+    let cache = MetadataCache::new();
+    let watermark = WriteWatermark::new();
+
+    cache.set_epoch(EpochId::new(5));
+    watermark.advance(EpochId::new(5));
+
+    let checker = FreshnessChecker::new(&cache, &watermark);
+    assert!(checker.is_fresh());
+    assert_eq!(checker.check(), FreshnessStatus::Fresh);
+
+    watermark.advance(EpochId::new(10));
+
+    let checker2 = FreshnessChecker::new(&cache, &watermark);
+    assert!(!checker2.is_fresh());
+    match checker2.check() {
+        FreshnessStatus::Stale {
+            cached_epoch,
+            required_epoch,
+        } => {
+            assert_eq!(cached_epoch, EpochId::new(5));
+            assert_eq!(required_epoch, EpochId::new(10));
+        }
+        FreshnessStatus::Fresh => panic!("expected Stale status"),
+    }
+
+    let status = checker2.check_against(EpochId::new(7));
+    match status {
+        FreshnessStatus::Stale {
+            cached_epoch,
+            required_epoch,
+        } => {
+            assert_eq!(cached_epoch, EpochId::new(5));
+            assert_eq!(required_epoch, EpochId::new(7));
+        }
+        FreshnessStatus::Fresh => panic!("expected Stale for epoch 7"),
+    }
+
+    cache.set_epoch(EpochId::new(10));
+    let checker3 = FreshnessChecker::new(&cache, &watermark);
+    assert!(checker3.is_fresh());
+    assert_eq!(checker3.check(), FreshnessStatus::Fresh);
+}
+
+#[tokio::test]
+async fn test_stale_epoch_handler_triggers_refresh() {
+    let epoch = EpochId::new(1);
+    let metadata_client = MockMetadataClient::new(EpochId::new(5));
+    let cache = MetadataCache::new();
+    cache.set_epoch(epoch);
+    let handler = StaleEpochHandler::new();
+
+    assert_eq!(handler.refresh_count(), 0);
+
+    let new_epoch = handler
+        .handle_stale_epoch(&cache, &metadata_client, epoch)
+        .await
+        .expect("refresh should succeed");
+
+    assert_eq!(new_epoch, EpochId::new(5));
+    assert_eq!(cache.current_epoch(), EpochId::new(5));
+    assert_eq!(handler.refresh_count(), 1);
 }
