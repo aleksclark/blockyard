@@ -9,6 +9,7 @@ members = [
     "crates/blockyard-raft",
     "crates/blockyard-storage",
     "crates/blockyard-ublk",
+    "crates/blockyard-test-harness",
 ]
 resolver = "2"
 

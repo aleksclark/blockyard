@@ -176,11 +176,11 @@ VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`
 
 ### 9A — Test Infrastructure
 
-- [ ] **P9A.1** VM provisioning harness (libvirt/QEMU): create, start, stop, kill, snapshot 5+ VMs with kernel 6.0+
-- [ ] **P9A.2** Network setup: TAP/bridge networking (not SLIRP) for real inter-node connectivity
-- [ ] **P9A.3** Fault injection primitives: SIGKILL, SIGSTOP/SIGCONT, iptables partition, asymmetric partition, tc netem delay/loss, dm-delay, dm-flakey, clock skew, full disk
-- [ ] **P9A.4** Workload generator: wire-protocol-level client with operation log (ack/nack tracking)
-- [ ] **P9A.5** Consistency checker: verify all acked writes readable after recovery; linearizability validation
+- [x] **P9A.1** VM provisioning harness (libvirt/QEMU): create, start, stop, kill, snapshot 5+ VMs with kernel 6.0+
+- [x] **P9A.2** Network setup: TAP/bridge networking (not SLIRP) for real inter-node connectivity
+- [x] **P9A.3** Fault injection primitives: SIGKILL, SIGSTOP/SIGCONT, iptables partition, asymmetric partition, tc netem delay/loss, dm-delay, dm-flakey, clock skew, full disk
+- [x] **P9A.4** Workload generator: wire-protocol-level client with operation log (ack/nack tracking)
+- [x] **P9A.5** Consistency checker: verify all acked writes readable after recovery; linearizability validation
 
 ### 9B — Consistency Tests
 
