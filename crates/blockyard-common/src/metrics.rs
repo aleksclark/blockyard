@@ -1,989 +1,655 @@
-//! Observability metrics for Blockyard (§9).
+//! Observability and metrics for Blockyard (Phase 8, §9).
 //!
-//! Defines the [`MetricsRecorder`] trait and an [`InMemoryRecorder`] implementation
-//! that covers every Phase 8 metric:
-//!
-//! - **P8.1** Per-volume IO success/failure rates
-//! - **P8.2** Client watermark and stale-epoch retry counts
-//! - **P8.3** Per-node foreground and background IO load
-//! - **P8.4** Per-disk health state transitions
-//! - **P8.5** Scrub findings
-//! - **P8.6** Repair backlog
-//! - **P8.7** Orphaned extent file counts
-//! - **P8.8** Metadata quorum health and commit latency
+//! Provides a [`MetricsRecorder`] trait for recording counters, gauges, and
+//! histograms, plus an [`InMemoryRecorder`] implementation for testing.
+//! All metric names are defined as constants with stable string identifiers
+//! to ensure consistency across the codebase.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 
-use crate::disk_state::DiskState;
-use crate::id::{DiskId, NodeId, VolumeId};
+// ---------------------------------------------------------------------------
+// Metric name constants
+// ---------------------------------------------------------------------------
 
-/// Outcome of an IO operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IoOutcome {
-    Success,
-    Failure,
-}
+// P8.1: Per-volume IO success/failure rate counters
+/// Counter: total successful IO operations for a volume.
+/// Labels: `volume_id`.
+pub const VOLUME_IO_SUCCESS_TOTAL: &str = "blockyard_volume_io_success_total";
+/// Counter: total failed IO operations for a volume.
+/// Labels: `volume_id`.
+pub const VOLUME_IO_FAILURE_TOTAL: &str = "blockyard_volume_io_failure_total";
 
-/// Category of IO load for P8.3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum IoCategory {
-    Foreground,
-    Background,
-}
+// P8.2: Client watermark version + stale-epoch retry counters
+/// Gauge: current client session watermark version.
+/// Labels: `session_id`.
+pub const CLIENT_WATERMARK_VERSION: &str = "blockyard_client_watermark_version";
+/// Counter: total stale-epoch retries by a client session.
+/// Labels: `session_id`.
+pub const CLIENT_STALE_EPOCH_RETRIES_TOTAL: &str = "blockyard_client_stale_epoch_retries_total";
 
-/// Severity of a scrub finding for P8.5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ScrubFindingKind {
-    ChecksumMismatch,
-    ReadError,
-    MissingExtent,
-    MetadataCorruption,
-}
+// P8.3: Per-node foreground and background IO load gauges
+/// Gauge: current number of in-flight foreground IO operations on a node.
+/// Labels: `node_id`.
+pub const NODE_FOREGROUND_IO_LOAD: &str = "blockyard_node_foreground_io_load";
+/// Gauge: current number of in-flight background IO operations on a node.
+/// Labels: `node_id`.
+pub const NODE_BACKGROUND_IO_LOAD: &str = "blockyard_node_background_io_load";
 
-/// Quorum health status for P8.8.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum QuorumHealth {
-    #[default]
-    Healthy,
-    Degraded,
-    Lost,
-}
+// P8.4: Per-disk health state transition counters (with stable disk IDs)
+/// Counter: total disk health state transitions.
+/// Labels: `disk_id`, `from_state`, `to_state`.
+pub const DISK_STATE_TRANSITION_TOTAL: &str = "blockyard_disk_state_transition_total";
 
-/// Trait defining all observability recording operations.
+// P8.5: Scrub findings counter + last scrub timestamp gauge
+/// Counter: total scrub findings (corruption, errors).
+/// Labels: `node_id`, `disk_id`.
+pub const SCRUB_FINDINGS_TOTAL: &str = "blockyard_scrub_findings_total";
+/// Gauge: unix timestamp of last completed scrub.
+/// Labels: `node_id`, `disk_id`.
+pub const SCRUB_LAST_COMPLETED_TIMESTAMP: &str = "blockyard_scrub_last_completed_timestamp";
+
+// P8.6: Repair backlog size gauge + repair completion rate counter
+/// Gauge: number of extents awaiting repair.
+/// Labels: `node_id`.
+pub const REPAIR_BACKLOG_SIZE: &str = "blockyard_repair_backlog_size";
+/// Counter: total repair completions.
+/// Labels: `node_id`.
+pub const REPAIR_COMPLETIONS_TOTAL: &str = "blockyard_repair_completions_total";
+
+// P8.7: Orphaned extent file count gauge
+/// Gauge: number of orphaned extent files on a node.
+/// Labels: `node_id`.
+pub const ORPHANED_EXTENT_FILES: &str = "blockyard_orphaned_extent_files";
+
+// P8.8: Metadata quorum health gauge + commit latency histogram
+/// Gauge: metadata quorum health (1 = healthy, 0 = unhealthy).
+/// Labels: `raft_group_id`.
+pub const METADATA_QUORUM_HEALTH: &str = "blockyard_metadata_quorum_health";
+/// Histogram: metadata commit latency in seconds.
+/// Labels: `raft_group_id`.
+pub const METADATA_COMMIT_LATENCY_SECONDS: &str = "blockyard_metadata_commit_latency_seconds";
+
+/// All metric name constants, useful for validation and enumeration.
+pub const ALL_METRIC_NAMES: &[&str] = &[
+    VOLUME_IO_SUCCESS_TOTAL,
+    VOLUME_IO_FAILURE_TOTAL,
+    CLIENT_WATERMARK_VERSION,
+    CLIENT_STALE_EPOCH_RETRIES_TOTAL,
+    NODE_FOREGROUND_IO_LOAD,
+    NODE_BACKGROUND_IO_LOAD,
+    DISK_STATE_TRANSITION_TOTAL,
+    SCRUB_FINDINGS_TOTAL,
+    SCRUB_LAST_COMPLETED_TIMESTAMP,
+    REPAIR_BACKLOG_SIZE,
+    REPAIR_COMPLETIONS_TOTAL,
+    ORPHANED_EXTENT_FILES,
+    METADATA_QUORUM_HEALTH,
+    METADATA_COMMIT_LATENCY_SECONDS,
+];
+
+// ---------------------------------------------------------------------------
+// Label type
+// ---------------------------------------------------------------------------
+
+/// A set of key-value label pairs attached to a metric observation.
 ///
-/// Implementations must be `Send + Sync` so they can be shared across async tasks.
-pub trait MetricsRecorder: Send + Sync {
-    // -- P8.1: Per-volume IO success/failure rates --
+/// Labels provide dimensional context (e.g., `volume_id`, `disk_id`).
+/// The pairs are sorted by key before being used as map keys so that
+/// `[("a","1"),("b","2")]` and `[("b","2"),("a","1")]` resolve to the
+/// same time series.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Labels(Vec<(String, String)>);
 
-    fn record_volume_io(&self, volume: VolumeId, outcome: IoOutcome);
+impl Labels {
+    /// Create an empty label set.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
 
-    // -- P8.2: Client watermark and stale-epoch retry counts --
+    /// Create a label set from key-value pairs. Keys are sorted for
+    /// deterministic identity.
+    pub fn from_pairs(pairs: &[(&str, &str)]) -> Self {
+        let mut v: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        Self(v)
+    }
 
-    fn record_watermark_update(&self, volume: VolumeId, watermark: u64);
+    /// Return the inner pairs slice.
+    pub fn pairs(&self) -> &[(String, String)] {
+        &self.0
+    }
 
-    fn record_stale_epoch_retry(&self, volume: VolumeId);
+    /// Return the number of label pairs.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 
-    // -- P8.3: Per-node foreground and background IO load --
-
-    fn record_node_io(&self, node: NodeId, category: IoCategory);
-
-    // -- P8.4: Per-disk health state transitions --
-
-    fn record_disk_state_transition(&self, disk: DiskId, from: DiskState, to: DiskState);
-
-    // -- P8.5: Scrub findings --
-
-    fn record_scrub_finding(&self, disk: DiskId, kind: ScrubFindingKind);
-
-    fn record_scrub_completion(&self, disk: DiskId, extents_checked: u64);
-
-    // -- P8.6: Repair backlog --
-
-    fn set_repair_backlog(&self, count: u64);
-
-    fn record_repair_completion(&self);
-
-    // -- P8.7: Orphaned extent file counts --
-
-    fn set_orphaned_extents(&self, count: u64);
-
-    // -- P8.8: Metadata quorum health and commit latency --
-
-    fn set_quorum_health(&self, health: QuorumHealth);
-
-    fn record_commit_latency(&self, latency: Duration);
+    /// Return whether the label set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
-/// Per-volume IO counters for P8.1.
-#[derive(Debug, Clone, Default)]
-pub struct VolumeIoCounters {
-    pub success: u64,
-    pub failure: u64,
-}
-
-/// Per-volume watermark/retry state for P8.2.
-#[derive(Debug, Clone, Default)]
-pub struct WatermarkState {
-    pub current_watermark: u64,
-    pub stale_epoch_retries: u64,
-}
-
-/// Per-node IO load counters for P8.3.
-#[derive(Debug, Clone, Default)]
-pub struct NodeIoLoad {
-    pub foreground: u64,
-    pub background: u64,
-}
-
-/// A single disk state transition event for P8.4.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiskTransitionEvent {
-    pub disk: DiskId,
-    pub from: DiskState,
-    pub to: DiskState,
-}
-
-/// Per-disk scrub summary for P8.5.
-#[derive(Debug, Clone, Default)]
-pub struct ScrubSummary {
-    pub checksum_mismatches: u64,
-    pub read_errors: u64,
-    pub missing_extents: u64,
-    pub metadata_corruptions: u64,
-    pub extents_checked: u64,
-    pub completions: u64,
-}
-
-/// Commit latency statistics for P8.8.
-#[derive(Debug, Clone)]
-pub struct CommitLatencyStats {
-    pub count: u64,
-    pub total: Duration,
-    pub min: Duration,
-    pub max: Duration,
-}
-
-impl Default for CommitLatencyStats {
+impl Default for Labels {
     fn default() -> Self {
-        Self {
-            count: 0,
-            total: Duration::ZERO,
-            min: Duration::MAX,
-            max: Duration::ZERO,
-        }
+        Self::new()
     }
 }
 
-impl CommitLatencyStats {
-    pub fn mean(&self) -> Duration {
-        if self.count == 0 {
-            return Duration::ZERO;
-        }
-        self.total / self.count as u32
-    }
-}
+// ---------------------------------------------------------------------------
+// MetricsRecorder trait
+// ---------------------------------------------------------------------------
 
-/// In-memory metrics recorder for testing and lightweight deployments.
+/// Trait for recording observability metrics.
 ///
-/// All state is protected by `parking_lot::RwLock` for concurrent access.
-#[derive(Debug, Default)]
+/// Implementations may emit to Prometheus, StatsD, an in-memory store for
+/// tests, or any other backend. All methods take `&self` and are expected
+/// to be internally synchronized (e.g., via `Mutex` or atomics).
+pub trait MetricsRecorder: Send + Sync + std::fmt::Debug {
+    /// Increment a counter by `value`.
+    ///
+    /// Counters are monotonically increasing (within a process lifetime).
+    fn increment_counter(&self, name: &str, labels: &Labels, value: u64);
+
+    /// Set a gauge to `value`.
+    ///
+    /// Gauges represent point-in-time values that can go up or down.
+    fn set_gauge(&self, name: &str, labels: &Labels, value: f64);
+
+    /// Record a histogram observation.
+    ///
+    /// Histograms track the distribution of values (e.g., latencies).
+    fn record_histogram(&self, name: &str, labels: &Labels, value: f64);
+}
+
+// ---------------------------------------------------------------------------
+// NoopRecorder
+// ---------------------------------------------------------------------------
+
+/// A no-op recorder that discards all metrics. Useful as a default when
+/// no observability backend is configured.
+#[derive(Debug, Clone, Copy)]
+pub struct NoopRecorder;
+
+impl MetricsRecorder for NoopRecorder {
+    fn increment_counter(&self, _name: &str, _labels: &Labels, _value: u64) {}
+    fn set_gauge(&self, _name: &str, _labels: &Labels, _value: f64) {}
+    fn record_histogram(&self, _name: &str, _labels: &Labels, _value: f64) {}
+}
+
+// ---------------------------------------------------------------------------
+// InMemoryRecorder
+// ---------------------------------------------------------------------------
+
+/// Composite key for looking up metric values: `(name, labels)`.
+type MetricKey = (String, Labels);
+
+/// In-memory metrics recorder for unit and integration testing.
+///
+/// Stores counters, gauges, and histogram observations so tests can assert
+/// on the exact values emitted by instrumented code paths.
+#[derive(Debug)]
 pub struct InMemoryRecorder {
-    volume_io: RwLock<HashMap<VolumeId, VolumeIoCounters>>,
-    watermarks: RwLock<HashMap<VolumeId, WatermarkState>>,
-    node_io: RwLock<HashMap<NodeId, NodeIoLoad>>,
-    disk_transitions: RwLock<Vec<DiskTransitionEvent>>,
-    scrub_summaries: RwLock<HashMap<DiskId, ScrubSummary>>,
-    repair_backlog: RwLock<u64>,
-    repair_completions: RwLock<u64>,
-    orphaned_extents: RwLock<u64>,
-    quorum_health: RwLock<QuorumHealth>,
-    commit_latency: RwLock<CommitLatencyStats>,
+    counters: Mutex<HashMap<MetricKey, u64>>,
+    gauges: Mutex<HashMap<MetricKey, f64>>,
+    histograms: Mutex<HashMap<MetricKey, Vec<f64>>>,
 }
 
 impl InMemoryRecorder {
+    /// Create a new empty recorder.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            counters: Mutex::new(HashMap::new()),
+            gauges: Mutex::new(HashMap::new()),
+            histograms: Mutex::new(HashMap::new()),
+        }
     }
 
-    pub fn volume_io(&self, volume: &VolumeId) -> Option<VolumeIoCounters> {
-        self.volume_io.read().get(volume).cloned()
+    /// Read the current value of a counter. Returns 0 if never incremented.
+    pub fn counter(&self, name: &str, labels: &Labels) -> u64 {
+        let key = (name.to_owned(), labels.clone());
+        self.counters.lock().get(&key).copied().unwrap_or(0)
     }
 
-    pub fn all_volume_io(&self) -> HashMap<VolumeId, VolumeIoCounters> {
-        self.volume_io.read().clone()
+    /// Read the current value of a gauge. Returns `None` if never set.
+    pub fn gauge(&self, name: &str, labels: &Labels) -> Option<f64> {
+        let key = (name.to_owned(), labels.clone());
+        self.gauges.lock().get(&key).copied()
     }
 
-    pub fn watermark_state(&self, volume: &VolumeId) -> Option<WatermarkState> {
-        self.watermarks.read().get(volume).cloned()
+    /// Read all histogram observations for a metric. Returns an empty vec
+    /// if no observations have been recorded.
+    pub fn histogram(&self, name: &str, labels: &Labels) -> Vec<f64> {
+        let key = (name.to_owned(), labels.clone());
+        self.histograms
+            .lock()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
     }
 
-    pub fn all_watermark_states(&self) -> HashMap<VolumeId, WatermarkState> {
-        self.watermarks.read().clone()
+    /// Return the number of distinct counter series recorded.
+    pub fn counter_count(&self) -> usize {
+        self.counters.lock().len()
     }
 
-    pub fn node_io(&self, node: &NodeId) -> Option<NodeIoLoad> {
-        self.node_io.read().get(node).cloned()
+    /// Return the number of distinct gauge series recorded.
+    pub fn gauge_count(&self) -> usize {
+        self.gauges.lock().len()
     }
 
-    pub fn all_node_io(&self) -> HashMap<NodeId, NodeIoLoad> {
-        self.node_io.read().clone()
+    /// Return the number of distinct histogram series recorded.
+    pub fn histogram_count(&self) -> usize {
+        self.histograms.lock().len()
     }
 
-    pub fn disk_transitions(&self) -> Vec<DiskTransitionEvent> {
-        self.disk_transitions.read().clone()
-    }
-
-    pub fn scrub_summary(&self, disk: &DiskId) -> Option<ScrubSummary> {
-        self.scrub_summaries.read().get(disk).cloned()
-    }
-
-    pub fn all_scrub_summaries(&self) -> HashMap<DiskId, ScrubSummary> {
-        self.scrub_summaries.read().clone()
-    }
-
-    pub fn repair_backlog(&self) -> u64 {
-        *self.repair_backlog.read()
-    }
-
-    pub fn repair_completions(&self) -> u64 {
-        *self.repair_completions.read()
-    }
-
-    pub fn orphaned_extents(&self) -> u64 {
-        *self.orphaned_extents.read()
-    }
-
-    pub fn quorum_health(&self) -> QuorumHealth {
-        *self.quorum_health.read()
-    }
-
-    pub fn commit_latency_stats(&self) -> CommitLatencyStats {
-        self.commit_latency.read().clone()
-    }
-
+    /// Reset all recorded data.
     pub fn reset(&self) {
-        self.volume_io.write().clear();
-        self.watermarks.write().clear();
-        self.node_io.write().clear();
-        self.disk_transitions.write().clear();
-        self.scrub_summaries.write().clear();
-        *self.repair_backlog.write() = 0;
-        *self.repair_completions.write() = 0;
-        *self.orphaned_extents.write() = 0;
-        *self.quorum_health.write() = QuorumHealth::Healthy;
-        *self.commit_latency.write() = CommitLatencyStats::default();
+        self.counters.lock().clear();
+        self.gauges.lock().clear();
+        self.histograms.lock().clear();
+    }
+}
+
+impl Default for InMemoryRecorder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl MetricsRecorder for InMemoryRecorder {
-    fn record_volume_io(&self, volume: VolumeId, outcome: IoOutcome) {
-        let mut map = self.volume_io.write();
-        let counters = map.entry(volume).or_default();
-        match outcome {
-            IoOutcome::Success => counters.success += 1,
-            IoOutcome::Failure => counters.failure += 1,
-        }
+    fn increment_counter(&self, name: &str, labels: &Labels, value: u64) {
+        let key = (name.to_owned(), labels.clone());
+        let mut counters = self.counters.lock();
+        let entry = counters.entry(key).or_insert(0);
+        *entry = entry.saturating_add(value);
     }
 
-    fn record_watermark_update(&self, volume: VolumeId, watermark: u64) {
-        let mut map = self.watermarks.write();
-        let state = map.entry(volume).or_default();
-        state.current_watermark = watermark;
+    fn set_gauge(&self, name: &str, labels: &Labels, value: f64) {
+        let key = (name.to_owned(), labels.clone());
+        self.gauges.lock().insert(key, value);
     }
 
-    fn record_stale_epoch_retry(&self, volume: VolumeId) {
-        let mut map = self.watermarks.write();
-        let state = map.entry(volume).or_default();
-        state.stale_epoch_retries += 1;
-    }
-
-    fn record_node_io(&self, node: NodeId, category: IoCategory) {
-        let mut map = self.node_io.write();
-        let load = map.entry(node).or_default();
-        match category {
-            IoCategory::Foreground => load.foreground += 1,
-            IoCategory::Background => load.background += 1,
-        }
-    }
-
-    fn record_disk_state_transition(&self, disk: DiskId, from: DiskState, to: DiskState) {
-        self.disk_transitions.write().push(DiskTransitionEvent {
-            disk,
-            from,
-            to,
-        });
-    }
-
-    fn record_scrub_finding(&self, disk: DiskId, kind: ScrubFindingKind) {
-        let mut map = self.scrub_summaries.write();
-        let summary = map.entry(disk).or_default();
-        match kind {
-            ScrubFindingKind::ChecksumMismatch => summary.checksum_mismatches += 1,
-            ScrubFindingKind::ReadError => summary.read_errors += 1,
-            ScrubFindingKind::MissingExtent => summary.missing_extents += 1,
-            ScrubFindingKind::MetadataCorruption => summary.metadata_corruptions += 1,
-        }
-    }
-
-    fn record_scrub_completion(&self, disk: DiskId, extents_checked: u64) {
-        let mut map = self.scrub_summaries.write();
-        let summary = map.entry(disk).or_default();
-        summary.extents_checked += extents_checked;
-        summary.completions += 1;
-    }
-
-    fn set_repair_backlog(&self, count: u64) {
-        *self.repair_backlog.write() = count;
-    }
-
-    fn record_repair_completion(&self) {
-        *self.repair_completions.write() += 1;
-    }
-
-    fn set_orphaned_extents(&self, count: u64) {
-        *self.orphaned_extents.write() = count;
-    }
-
-    fn set_quorum_health(&self, health: QuorumHealth) {
-        *self.quorum_health.write() = health;
-    }
-
-    fn record_commit_latency(&self, latency: Duration) {
-        let mut stats = self.commit_latency.write();
-        stats.count += 1;
-        stats.total += latency;
-        if latency < stats.min {
-            stats.min = latency;
-        }
-        if latency > stats.max {
-            stats.max = latency;
-        }
+    fn record_histogram(&self, name: &str, labels: &Labels, value: f64) {
+        let key = (name.to_owned(), labels.clone());
+        self.histograms.lock().entry(key).or_default().push(value);
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helper functions for common recording patterns
+// ---------------------------------------------------------------------------
 
+/// Record a volume IO success.
+pub fn record_volume_io_success(recorder: &dyn MetricsRecorder, volume_id: &str) {
+    let labels = Labels::from_pairs(&[("volume_id", volume_id)]);
+    recorder.increment_counter(VOLUME_IO_SUCCESS_TOTAL, &labels, 1);
+}
+
+/// Record a volume IO failure.
+pub fn record_volume_io_failure(recorder: &dyn MetricsRecorder, volume_id: &str) {
+    let labels = Labels::from_pairs(&[("volume_id", volume_id)]);
+    recorder.increment_counter(VOLUME_IO_FAILURE_TOTAL, &labels, 1);
+}
+
+/// Update the client watermark version gauge.
+pub fn set_client_watermark(recorder: &dyn MetricsRecorder, session_id: &str, version: u64) {
+    let labels = Labels::from_pairs(&[("session_id", session_id)]);
+    recorder.set_gauge(CLIENT_WATERMARK_VERSION, &labels, version as f64);
+}
+
+/// Record a stale-epoch retry.
+pub fn record_stale_epoch_retry(recorder: &dyn MetricsRecorder, session_id: &str) {
+    let labels = Labels::from_pairs(&[("session_id", session_id)]);
+    recorder.increment_counter(CLIENT_STALE_EPOCH_RETRIES_TOTAL, &labels, 1);
+}
+
+/// Set the foreground IO load gauge for a node.
+pub fn set_foreground_io_load(recorder: &dyn MetricsRecorder, node_id: &str, load: u64) {
+    let labels = Labels::from_pairs(&[("node_id", node_id)]);
+    recorder.set_gauge(NODE_FOREGROUND_IO_LOAD, &labels, load as f64);
+}
+
+/// Set the background IO load gauge for a node.
+pub fn set_background_io_load(recorder: &dyn MetricsRecorder, node_id: &str, load: u64) {
+    let labels = Labels::from_pairs(&[("node_id", node_id)]);
+    recorder.set_gauge(NODE_BACKGROUND_IO_LOAD, &labels, load as f64);
+}
+
+/// Record a disk health state transition.
+pub fn record_disk_state_transition(
+    recorder: &dyn MetricsRecorder,
+    disk_id: &str,
+    from_state: &str,
+    to_state: &str,
+) {
+    let labels = Labels::from_pairs(&[
+        ("disk_id", disk_id),
+        ("from_state", from_state),
+        ("to_state", to_state),
+    ]);
+    recorder.increment_counter(DISK_STATE_TRANSITION_TOTAL, &labels, 1);
+}
+
+/// Record a scrub finding.
+pub fn record_scrub_finding(recorder: &dyn MetricsRecorder, node_id: &str, disk_id: &str) {
+    let labels = Labels::from_pairs(&[("node_id", node_id), ("disk_id", disk_id)]);
+    recorder.increment_counter(SCRUB_FINDINGS_TOTAL, &labels, 1);
+}
+
+/// Set the last-completed scrub timestamp gauge.
+pub fn set_scrub_last_completed(
+    recorder: &dyn MetricsRecorder,
+    node_id: &str,
+    disk_id: &str,
+    timestamp: f64,
+) {
+    let labels = Labels::from_pairs(&[("node_id", node_id), ("disk_id", disk_id)]);
+    recorder.set_gauge(SCRUB_LAST_COMPLETED_TIMESTAMP, &labels, timestamp);
+}
+
+/// Set the repair backlog size gauge for a node.
+pub fn set_repair_backlog_size(recorder: &dyn MetricsRecorder, node_id: &str, size: u64) {
+    let labels = Labels::from_pairs(&[("node_id", node_id)]);
+    recorder.set_gauge(REPAIR_BACKLOG_SIZE, &labels, size as f64);
+}
+
+/// Record a repair completion.
+pub fn record_repair_completion(recorder: &dyn MetricsRecorder, node_id: &str) {
+    let labels = Labels::from_pairs(&[("node_id", node_id)]);
+    recorder.increment_counter(REPAIR_COMPLETIONS_TOTAL, &labels, 1);
+}
+
+/// Set the orphaned extent file count gauge.
+pub fn set_orphaned_extent_files(recorder: &dyn MetricsRecorder, node_id: &str, count: u64) {
+    let labels = Labels::from_pairs(&[("node_id", node_id)]);
+    recorder.set_gauge(ORPHANED_EXTENT_FILES, &labels, count as f64);
+}
+
+/// Set the metadata quorum health gauge.
+pub fn set_metadata_quorum_health(
+    recorder: &dyn MetricsRecorder,
+    raft_group_id: &str,
+    healthy: bool,
+) {
+    let labels = Labels::from_pairs(&[("raft_group_id", raft_group_id)]);
+    recorder.set_gauge(
+        METADATA_QUORUM_HEALTH,
+        &labels,
+        if healthy { 1.0 } else { 0.0 },
+    );
+}
+
+/// Record a metadata commit latency observation.
+pub fn record_metadata_commit_latency(
+    recorder: &dyn MetricsRecorder,
+    raft_group_id: &str,
+    latency_seconds: f64,
+) {
+    let labels = Labels::from_pairs(&[("raft_group_id", raft_group_id)]);
+    recorder.record_histogram(METADATA_COMMIT_LATENCY_SECONDS, &labels, latency_seconds);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::{DiskId, NodeId, VolumeId};
 
-    fn recorder() -> InMemoryRecorder {
-        InMemoryRecorder::new()
-    }
-
-    // -- P8.1: Per-volume IO rates --
+    // -- Labels tests -------------------------------------------------------
 
     #[test]
-    fn test_volume_io_success() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_volume_io(v, IoOutcome::Success);
-        let c = r.volume_io(&v).unwrap();
-        assert_eq!(c.success, 1);
-        assert_eq!(c.failure, 0);
+    fn test_labels_new_is_empty() {
+        let labels = Labels::new();
+        assert!(labels.is_empty());
+        assert_eq!(labels.len(), 0);
+        assert!(labels.pairs().is_empty());
     }
 
     #[test]
-    fn test_volume_io_failure() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_volume_io(v, IoOutcome::Failure);
-        let c = r.volume_io(&v).unwrap();
-        assert_eq!(c.success, 0);
-        assert_eq!(c.failure, 1);
+    fn test_labels_default_is_empty() {
+        let labels = Labels::default();
+        assert!(labels.is_empty());
     }
 
     #[test]
-    fn test_volume_io_mixed() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_volume_io(v, IoOutcome::Success);
-        r.record_volume_io(v, IoOutcome::Success);
-        r.record_volume_io(v, IoOutcome::Failure);
-        let c = r.volume_io(&v).unwrap();
-        assert_eq!(c.success, 2);
-        assert_eq!(c.failure, 1);
+    fn test_labels_from_pairs() {
+        let labels = Labels::from_pairs(&[("volume_id", "v1"), ("node_id", "n1")]);
+        assert_eq!(labels.len(), 2);
+        assert!(!labels.is_empty());
     }
 
     #[test]
-    fn test_volume_io_multiple_volumes() {
-        let r = recorder();
-        let v1 = VolumeId::generate();
-        let v2 = VolumeId::generate();
-        r.record_volume_io(v1, IoOutcome::Success);
-        r.record_volume_io(v2, IoOutcome::Failure);
-        assert_eq!(r.volume_io(&v1).unwrap().success, 1);
-        assert_eq!(r.volume_io(&v2).unwrap().failure, 1);
+    fn test_labels_sorted_by_key() {
+        let labels = Labels::from_pairs(&[("z_key", "z"), ("a_key", "a"), ("m_key", "m")]);
+        let pairs = labels.pairs();
+        assert_eq!(pairs[0].0, "a_key");
+        assert_eq!(pairs[1].0, "m_key");
+        assert_eq!(pairs[2].0, "z_key");
     }
 
     #[test]
-    fn test_volume_io_unknown_volume() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        assert!(r.volume_io(&v).is_none());
+    fn test_labels_order_independent_equality() {
+        let a = Labels::from_pairs(&[("x", "1"), ("y", "2")]);
+        let b = Labels::from_pairs(&[("y", "2"), ("x", "1")]);
+        assert_eq!(a, b);
     }
 
     #[test]
-    fn test_all_volume_io() {
-        let r = recorder();
-        let v1 = VolumeId::generate();
-        let v2 = VolumeId::generate();
-        r.record_volume_io(v1, IoOutcome::Success);
-        r.record_volume_io(v2, IoOutcome::Failure);
-        let all = r.all_volume_io();
-        assert_eq!(all.len(), 2);
-    }
-
-    // -- P8.2: Watermark and stale-epoch retries --
-
-    #[test]
-    fn test_watermark_update() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_watermark_update(v, 42);
-        let s = r.watermark_state(&v).unwrap();
-        assert_eq!(s.current_watermark, 42);
-        assert_eq!(s.stale_epoch_retries, 0);
+    fn test_labels_different_values_not_equal() {
+        let a = Labels::from_pairs(&[("k", "v1")]);
+        let b = Labels::from_pairs(&[("k", "v2")]);
+        assert_ne!(a, b);
     }
 
     #[test]
-    fn test_watermark_advances() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_watermark_update(v, 10);
-        r.record_watermark_update(v, 20);
-        assert_eq!(r.watermark_state(&v).unwrap().current_watermark, 20);
+    fn test_labels_clone() {
+        let a = Labels::from_pairs(&[("k", "v")]);
+        let b = a.clone();
+        assert_eq!(a, b);
     }
 
     #[test]
-    fn test_stale_epoch_retry() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_stale_epoch_retry(v);
-        r.record_stale_epoch_retry(v);
-        let s = r.watermark_state(&v).unwrap();
-        assert_eq!(s.stale_epoch_retries, 2);
+    fn test_labels_debug() {
+        let labels = Labels::from_pairs(&[("k", "v")]);
+        let debug = format!("{:?}", labels);
+        assert!(debug.contains("Labels"));
     }
 
     #[test]
-    fn test_watermark_unknown_volume() {
-        let r = recorder();
-        assert!(r.watermark_state(&VolumeId::generate()).is_none());
+    fn test_labels_hash_consistency() {
+        use std::collections::HashSet;
+        let a = Labels::from_pairs(&[("x", "1"), ("y", "2")]);
+        let b = Labels::from_pairs(&[("y", "2"), ("x", "1")]);
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
+    }
+
+    // -- Metric name constants tests ----------------------------------------
+
+    #[test]
+    fn test_all_metric_names_count() {
+        assert_eq!(ALL_METRIC_NAMES.len(), 14);
     }
 
     #[test]
-    fn test_all_watermark_states() {
-        let r = recorder();
-        let v1 = VolumeId::generate();
-        let v2 = VolumeId::generate();
-        r.record_watermark_update(v1, 5);
-        r.record_stale_epoch_retry(v2);
-        let all = r.all_watermark_states();
-        assert_eq!(all.len(), 2);
+    fn test_all_metric_names_unique() {
+        use std::collections::HashSet;
+        let set: HashSet<&str> = ALL_METRIC_NAMES.iter().copied().collect();
+        assert_eq!(set.len(), ALL_METRIC_NAMES.len());
     }
 
     #[test]
-    fn test_watermark_and_retry_same_volume() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        r.record_watermark_update(v, 100);
-        r.record_stale_epoch_retry(v);
-        let s = r.watermark_state(&v).unwrap();
-        assert_eq!(s.current_watermark, 100);
-        assert_eq!(s.stale_epoch_retries, 1);
-    }
-
-    // -- P8.3: Foreground/background IO load --
-
-    #[test]
-    fn test_node_io_foreground() {
-        let r = recorder();
-        let n = NodeId::generate();
-        r.record_node_io(n, IoCategory::Foreground);
-        let l = r.node_io(&n).unwrap();
-        assert_eq!(l.foreground, 1);
-        assert_eq!(l.background, 0);
+    fn test_all_metric_names_prefixed() {
+        for name in ALL_METRIC_NAMES {
+            assert!(
+                name.starts_with("blockyard_"),
+                "metric name must start with blockyard_ prefix: {name}",
+            );
+        }
     }
 
     #[test]
-    fn test_node_io_background() {
-        let r = recorder();
-        let n = NodeId::generate();
-        r.record_node_io(n, IoCategory::Background);
-        let l = r.node_io(&n).unwrap();
-        assert_eq!(l.foreground, 0);
-        assert_eq!(l.background, 1);
+    fn test_metric_name_p8_1_success() {
+        assert_eq!(VOLUME_IO_SUCCESS_TOTAL, "blockyard_volume_io_success_total");
     }
 
     #[test]
-    fn test_node_io_mixed() {
-        let r = recorder();
-        let n = NodeId::generate();
-        r.record_node_io(n, IoCategory::Foreground);
-        r.record_node_io(n, IoCategory::Foreground);
-        r.record_node_io(n, IoCategory::Background);
-        let l = r.node_io(&n).unwrap();
-        assert_eq!(l.foreground, 2);
-        assert_eq!(l.background, 1);
+    fn test_metric_name_p8_1_failure() {
+        assert_eq!(VOLUME_IO_FAILURE_TOTAL, "blockyard_volume_io_failure_total");
     }
 
     #[test]
-    fn test_node_io_multiple_nodes() {
-        let r = recorder();
-        let n1 = NodeId::generate();
-        let n2 = NodeId::generate();
-        r.record_node_io(n1, IoCategory::Foreground);
-        r.record_node_io(n2, IoCategory::Background);
-        assert_eq!(r.node_io(&n1).unwrap().foreground, 1);
-        assert_eq!(r.node_io(&n2).unwrap().background, 1);
+    fn test_metric_name_p8_2_watermark() {
+        assert_eq!(
+            CLIENT_WATERMARK_VERSION,
+            "blockyard_client_watermark_version"
+        );
     }
 
     #[test]
-    fn test_node_io_unknown_node() {
-        let r = recorder();
-        assert!(r.node_io(&NodeId::generate()).is_none());
+    fn test_metric_name_p8_2_stale_epoch() {
+        assert_eq!(
+            CLIENT_STALE_EPOCH_RETRIES_TOTAL,
+            "blockyard_client_stale_epoch_retries_total"
+        );
     }
 
     #[test]
-    fn test_all_node_io() {
-        let r = recorder();
-        let n1 = NodeId::generate();
-        let n2 = NodeId::generate();
-        r.record_node_io(n1, IoCategory::Foreground);
-        r.record_node_io(n2, IoCategory::Background);
-        assert_eq!(r.all_node_io().len(), 2);
-    }
-
-    // -- P8.4: Disk health state transitions --
-
-    #[test]
-    fn test_disk_state_transition() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_disk_state_transition(d, DiskState::Healthy, DiskState::Suspect);
-        let events = r.disk_transitions();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].disk, d);
-        assert_eq!(events[0].from, DiskState::Healthy);
-        assert_eq!(events[0].to, DiskState::Suspect);
+    fn test_metric_name_p8_3_foreground() {
+        assert_eq!(
+            NODE_FOREGROUND_IO_LOAD,
+            "blockyard_node_foreground_io_load"
+        );
     }
 
     #[test]
-    fn test_disk_state_multiple_transitions() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_disk_state_transition(d, DiskState::Healthy, DiskState::Suspect);
-        r.record_disk_state_transition(d, DiskState::Suspect, DiskState::Degraded);
-        r.record_disk_state_transition(d, DiskState::Degraded, DiskState::Failed);
-        let events = r.disk_transitions();
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[2].to, DiskState::Failed);
+    fn test_metric_name_p8_3_background() {
+        assert_eq!(
+            NODE_BACKGROUND_IO_LOAD,
+            "blockyard_node_background_io_load"
+        );
     }
 
     #[test]
-    fn test_disk_state_transitions_multiple_disks() {
-        let r = recorder();
-        let d1 = DiskId::generate();
-        let d2 = DiskId::generate();
-        r.record_disk_state_transition(d1, DiskState::Healthy, DiskState::Failed);
-        r.record_disk_state_transition(d2, DiskState::Healthy, DiskState::Draining);
-        let events = r.disk_transitions();
-        assert_eq!(events.len(), 2);
+    fn test_metric_name_p8_4_disk_transition() {
+        assert_eq!(
+            DISK_STATE_TRANSITION_TOTAL,
+            "blockyard_disk_state_transition_total"
+        );
     }
 
     #[test]
-    fn test_disk_transitions_empty() {
-        let r = recorder();
-        assert!(r.disk_transitions().is_empty());
+    fn test_metric_name_p8_5_scrub_findings() {
+        assert_eq!(SCRUB_FINDINGS_TOTAL, "blockyard_scrub_findings_total");
     }
 
     #[test]
-    fn test_disk_transition_event_eq() {
-        let d = DiskId::generate();
-        let e1 = DiskTransitionEvent {
-            disk: d,
-            from: DiskState::Healthy,
-            to: DiskState::Suspect,
-        };
-        let e2 = DiskTransitionEvent {
-            disk: d,
-            from: DiskState::Healthy,
-            to: DiskState::Suspect,
-        };
-        assert_eq!(e1, e2);
-    }
-
-    // -- P8.5: Scrub findings --
-
-    #[test]
-    fn test_scrub_finding_checksum_mismatch() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_finding(d, ScrubFindingKind::ChecksumMismatch);
-        let s = r.scrub_summary(&d).unwrap();
-        assert_eq!(s.checksum_mismatches, 1);
-        assert_eq!(s.read_errors, 0);
+    fn test_metric_name_p8_5_scrub_timestamp() {
+        assert_eq!(
+            SCRUB_LAST_COMPLETED_TIMESTAMP,
+            "blockyard_scrub_last_completed_timestamp"
+        );
     }
 
     #[test]
-    fn test_scrub_finding_read_error() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_finding(d, ScrubFindingKind::ReadError);
-        assert_eq!(r.scrub_summary(&d).unwrap().read_errors, 1);
+    fn test_metric_name_p8_6_repair_backlog() {
+        assert_eq!(REPAIR_BACKLOG_SIZE, "blockyard_repair_backlog_size");
     }
 
     #[test]
-    fn test_scrub_finding_missing_extent() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_finding(d, ScrubFindingKind::MissingExtent);
-        assert_eq!(r.scrub_summary(&d).unwrap().missing_extents, 1);
+    fn test_metric_name_p8_6_repair_completions() {
+        assert_eq!(
+            REPAIR_COMPLETIONS_TOTAL,
+            "blockyard_repair_completions_total"
+        );
     }
 
     #[test]
-    fn test_scrub_finding_metadata_corruption() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_finding(d, ScrubFindingKind::MetadataCorruption);
-        assert_eq!(r.scrub_summary(&d).unwrap().metadata_corruptions, 1);
+    fn test_metric_name_p8_7_orphaned() {
+        assert_eq!(ORPHANED_EXTENT_FILES, "blockyard_orphaned_extent_files");
     }
 
     #[test]
-    fn test_scrub_completion() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_completion(d, 500);
-        let s = r.scrub_summary(&d).unwrap();
-        assert_eq!(s.extents_checked, 500);
-        assert_eq!(s.completions, 1);
+    fn test_metric_name_p8_8_quorum_health() {
+        assert_eq!(METADATA_QUORUM_HEALTH, "blockyard_metadata_quorum_health");
     }
 
     #[test]
-    fn test_scrub_completion_accumulates() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_completion(d, 100);
-        r.record_scrub_completion(d, 200);
-        let s = r.scrub_summary(&d).unwrap();
-        assert_eq!(s.extents_checked, 300);
-        assert_eq!(s.completions, 2);
+    fn test_metric_name_p8_8_commit_latency() {
+        assert_eq!(
+            METADATA_COMMIT_LATENCY_SECONDS,
+            "blockyard_metadata_commit_latency_seconds"
+        );
+    }
+
+    // -- NoopRecorder tests -------------------------------------------------
+
+    #[test]
+    fn test_noop_recorder_increment_counter() {
+        let r = NoopRecorder;
+        let labels = Labels::new();
+        // Should not panic.
+        r.increment_counter("test", &labels, 1);
     }
 
     #[test]
-    fn test_scrub_findings_mixed() {
-        let r = recorder();
-        let d = DiskId::generate();
-        r.record_scrub_finding(d, ScrubFindingKind::ChecksumMismatch);
-        r.record_scrub_finding(d, ScrubFindingKind::ChecksumMismatch);
-        r.record_scrub_finding(d, ScrubFindingKind::ReadError);
-        r.record_scrub_completion(d, 1000);
-        let s = r.scrub_summary(&d).unwrap();
-        assert_eq!(s.checksum_mismatches, 2);
-        assert_eq!(s.read_errors, 1);
-        assert_eq!(s.extents_checked, 1000);
+    fn test_noop_recorder_set_gauge() {
+        let r = NoopRecorder;
+        let labels = Labels::new();
+        r.set_gauge("test", &labels, 42.0);
     }
 
     #[test]
-    fn test_scrub_unknown_disk() {
-        let r = recorder();
-        assert!(r.scrub_summary(&DiskId::generate()).is_none());
+    fn test_noop_recorder_record_histogram() {
+        let r = NoopRecorder;
+        let labels = Labels::new();
+        r.record_histogram("test", &labels, 0.5);
     }
 
     #[test]
-    fn test_all_scrub_summaries() {
-        let r = recorder();
-        let d1 = DiskId::generate();
-        let d2 = DiskId::generate();
-        r.record_scrub_finding(d1, ScrubFindingKind::ReadError);
-        r.record_scrub_completion(d2, 50);
-        assert_eq!(r.all_scrub_summaries().len(), 2);
-    }
-
-    // -- P8.6: Repair backlog --
-
-    #[test]
-    fn test_repair_backlog_set() {
-        let r = recorder();
-        r.set_repair_backlog(42);
-        assert_eq!(r.repair_backlog(), 42);
+    fn test_noop_recorder_debug() {
+        let r = NoopRecorder;
+        let debug = format!("{:?}", r);
+        assert!(debug.contains("NoopRecorder"));
     }
 
     #[test]
-    fn test_repair_backlog_overwrite() {
-        let r = recorder();
-        r.set_repair_backlog(100);
-        r.set_repair_backlog(50);
-        assert_eq!(r.repair_backlog(), 50);
+    fn test_noop_recorder_clone() {
+        let r = NoopRecorder;
+        let r2 = r;
+        let _ = format!("{:?}", r2);
     }
 
     #[test]
-    fn test_repair_completion() {
-        let r = recorder();
-        r.record_repair_completion();
-        r.record_repair_completion();
-        assert_eq!(r.repair_completions(), 2);
-    }
-
-    #[test]
-    fn test_repair_backlog_default() {
-        let r = recorder();
-        assert_eq!(r.repair_backlog(), 0);
-    }
-
-    #[test]
-    fn test_repair_completions_default() {
-        let r = recorder();
-        assert_eq!(r.repair_completions(), 0);
-    }
-
-    // -- P8.7: Orphaned extent file counts --
-
-    #[test]
-    fn test_orphaned_extents_set() {
-        let r = recorder();
-        r.set_orphaned_extents(10);
-        assert_eq!(r.orphaned_extents(), 10);
-    }
-
-    #[test]
-    fn test_orphaned_extents_overwrite() {
-        let r = recorder();
-        r.set_orphaned_extents(10);
-        r.set_orphaned_extents(5);
-        assert_eq!(r.orphaned_extents(), 5);
-    }
-
-    #[test]
-    fn test_orphaned_extents_zero() {
-        let r = recorder();
-        r.set_orphaned_extents(10);
-        r.set_orphaned_extents(0);
-        assert_eq!(r.orphaned_extents(), 0);
-    }
-
-    #[test]
-    fn test_orphaned_extents_default() {
-        let r = recorder();
-        assert_eq!(r.orphaned_extents(), 0);
-    }
-
-    // -- P8.8: Quorum health and commit latency --
-
-    #[test]
-    fn test_quorum_health_default() {
-        let r = recorder();
-        assert_eq!(r.quorum_health(), QuorumHealth::Healthy);
-    }
-
-    #[test]
-    fn test_quorum_health_degraded() {
-        let r = recorder();
-        r.set_quorum_health(QuorumHealth::Degraded);
-        assert_eq!(r.quorum_health(), QuorumHealth::Degraded);
-    }
-
-    #[test]
-    fn test_quorum_health_lost() {
-        let r = recorder();
-        r.set_quorum_health(QuorumHealth::Lost);
-        assert_eq!(r.quorum_health(), QuorumHealth::Lost);
-    }
-
-    #[test]
-    fn test_quorum_health_recovery() {
-        let r = recorder();
-        r.set_quorum_health(QuorumHealth::Lost);
-        r.set_quorum_health(QuorumHealth::Healthy);
-        assert_eq!(r.quorum_health(), QuorumHealth::Healthy);
-    }
-
-    #[test]
-    fn test_commit_latency_single() {
-        let r = recorder();
-        r.record_commit_latency(Duration::from_millis(10));
-        let stats = r.commit_latency_stats();
-        assert_eq!(stats.count, 1);
-        assert_eq!(stats.total, Duration::from_millis(10));
-        assert_eq!(stats.min, Duration::from_millis(10));
-        assert_eq!(stats.max, Duration::from_millis(10));
-    }
-
-    #[test]
-    fn test_commit_latency_multiple() {
-        let r = recorder();
-        r.record_commit_latency(Duration::from_millis(10));
-        r.record_commit_latency(Duration::from_millis(30));
-        r.record_commit_latency(Duration::from_millis(20));
-        let stats = r.commit_latency_stats();
-        assert_eq!(stats.count, 3);
-        assert_eq!(stats.total, Duration::from_millis(60));
-        assert_eq!(stats.min, Duration::from_millis(10));
-        assert_eq!(stats.max, Duration::from_millis(30));
-    }
-
-    #[test]
-    fn test_commit_latency_mean() {
-        let r = recorder();
-        r.record_commit_latency(Duration::from_millis(10));
-        r.record_commit_latency(Duration::from_millis(30));
-        let stats = r.commit_latency_stats();
-        assert_eq!(stats.mean(), Duration::from_millis(20));
-    }
-
-    #[test]
-    fn test_commit_latency_mean_empty() {
-        let stats = CommitLatencyStats::default();
-        assert_eq!(stats.mean(), Duration::ZERO);
-    }
-
-    #[test]
-    fn test_commit_latency_default() {
-        let r = recorder();
-        let stats = r.commit_latency_stats();
-        assert_eq!(stats.count, 0);
-        assert_eq!(stats.total, Duration::ZERO);
-        assert_eq!(stats.min, Duration::MAX);
-        assert_eq!(stats.max, Duration::ZERO);
-    }
-
-    // -- Reset --
-
-    #[test]
-    fn test_reset_clears_all() {
-        let r = recorder();
-        let v = VolumeId::generate();
-        let n = NodeId::generate();
-        let d = DiskId::generate();
-
-        r.record_volume_io(v, IoOutcome::Success);
-        r.record_watermark_update(v, 10);
-        r.record_stale_epoch_retry(v);
-        r.record_node_io(n, IoCategory::Foreground);
-        r.record_disk_state_transition(d, DiskState::Healthy, DiskState::Failed);
-        r.record_scrub_finding(d, ScrubFindingKind::ReadError);
-        r.set_repair_backlog(5);
-        r.record_repair_completion();
-        r.set_orphaned_extents(3);
-        r.set_quorum_health(QuorumHealth::Lost);
-        r.record_commit_latency(Duration::from_millis(50));
-
-        r.reset();
-
-        assert!(r.volume_io(&v).is_none());
-        assert!(r.watermark_state(&v).is_none());
-        assert!(r.node_io(&n).is_none());
-        assert!(r.disk_transitions().is_empty());
-        assert!(r.scrub_summary(&d).is_none());
-        assert_eq!(r.repair_backlog(), 0);
-        assert_eq!(r.repair_completions(), 0);
-        assert_eq!(r.orphaned_extents(), 0);
-        assert_eq!(r.quorum_health(), QuorumHealth::Healthy);
-        assert_eq!(r.commit_latency_stats().count, 0);
-    }
-
-    // -- Trait object safety --
-
-    #[test]
-    fn test_recorder_is_send_sync() {
+    fn test_noop_recorder_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<InMemoryRecorder>();
+        assert_send_sync::<NoopRecorder>();
+    }
+
+    // -- InMemoryRecorder tests ---------------------------------------------
+
+    #[test]
+    fn test_in_memory_recorder_new() {
+        let r = InMemoryRecorder::new();
+        assert_eq!(r.counter_count(), 0);
+        assert_eq!(r.gauge_count(), 0);
+        assert_eq!(r.histogram_count(), 0);
     }
 
     #[test]
-    fn test_trait_object() {
-        let r: Box<dyn MetricsRecorder> = Box::new(InMemoryRecorder::new());
-        let v = VolumeId::generate();
-        r.record_volume_io(v, IoOutcome::Success);
-    }
-
-    // -- Debug impls --
-
-    #[test]
-    fn test_io_outcome_debug() {
-        assert_eq!(format!("{:?}", IoOutcome::Success), "Success");
-        assert_eq!(format!("{:?}", IoOutcome::Failure), "Failure");
-    }
-
-    #[test]
-    fn test_io_category_debug() {
-        assert_eq!(format!("{:?}", IoCategory::Foreground), "Foreground");
-        assert_eq!(format!("{:?}", IoCategory::Background), "Background");
-    }
-
-    #[test]
-    fn test_scrub_finding_kind_debug() {
-        assert_eq!(
-            format!("{:?}", ScrubFindingKind::ChecksumMismatch),
-            "ChecksumMismatch"
-        );
-        assert_eq!(format!("{:?}", ScrubFindingKind::ReadError), "ReadError");
-        assert_eq!(
-            format!("{:?}", ScrubFindingKind::MissingExtent),
-            "MissingExtent"
-        );
-        assert_eq!(
-            format!("{:?}", ScrubFindingKind::MetadataCorruption),
-            "MetadataCorruption"
-        );
-    }
-
-    #[test]
-    fn test_quorum_health_debug() {
-        assert_eq!(format!("{:?}", QuorumHealth::Healthy), "Healthy");
-        assert_eq!(format!("{:?}", QuorumHealth::Degraded), "Degraded");
-        assert_eq!(format!("{:?}", QuorumHealth::Lost), "Lost");
-    }
-
-    #[test]
-    fn test_volume_io_counters_debug() {
-        let c = VolumeIoCounters {
-            success: 1,
-            failure: 2,
-        };
-        let debug = format!("{:?}", c);
-        assert!(debug.contains("success: 1"));
-        assert!(debug.contains("failure: 2"));
-    }
-
-    #[test]
-    fn test_watermark_state_debug() {
-        let s = WatermarkState {
-            current_watermark: 42,
-            stale_epoch_retries: 3,
-        };
-        let debug = format!("{:?}", s);
-        assert!(debug.contains("42"));
-        assert!(debug.contains("3"));
-    }
-
-    #[test]
-    fn test_node_io_load_debug() {
-        let l = NodeIoLoad {
-            foreground: 10,
-            background: 5,
-        };
-        let debug = format!("{:?}", l);
-        assert!(debug.contains("10"));
-        assert!(debug.contains("5"));
-    }
-
-    #[test]
-    fn test_disk_transition_event_debug() {
-        let d = DiskId::generate();
-        let e = DiskTransitionEvent {
-            disk: d,
-            from: DiskState::Healthy,
-            to: DiskState::Failed,
-        };
-        let debug = format!("{:?}", e);
-        assert!(debug.contains("Healthy"));
-        assert!(debug.contains("Failed"));
-    }
-
-    #[test]
-    fn test_scrub_summary_debug() {
-        let s = ScrubSummary {
-            checksum_mismatches: 1,
-            read_errors: 2,
-            missing_extents: 3,
-            metadata_corruptions: 4,
-            extents_checked: 100,
-            completions: 5,
-        };
-        let debug = format!("{:?}", s);
-        assert!(debug.contains("checksum_mismatches: 1"));
-    }
-
-    #[test]
-    fn test_commit_latency_stats_debug() {
-        let s = CommitLatencyStats::default();
-        let debug = format!("{:?}", s);
-        assert!(debug.contains("count: 0"));
+    fn test_in_memory_recorder_default() {
+        let r = InMemoryRecorder::default();
+        assert_eq!(r.counter_count(), 0);
     }
 
     #[test]
@@ -993,253 +659,577 @@ mod tests {
         assert!(debug.contains("InMemoryRecorder"));
     }
 
-    // -- Clone impls --
-
     #[test]
-    fn test_io_outcome_clone() {
-        let a = IoOutcome::Success;
-        let b = a;
-        assert_eq!(a, b);
+    fn test_in_memory_recorder_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<InMemoryRecorder>();
     }
 
     #[test]
-    fn test_io_category_clone() {
-        let a = IoCategory::Foreground;
-        let b = a;
-        assert_eq!(a, b);
+    fn test_in_memory_counter_initial_zero() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        assert_eq!(r.counter("nonexistent", &labels), 0);
     }
 
     #[test]
-    fn test_scrub_finding_kind_clone() {
-        let a = ScrubFindingKind::ReadError;
-        let b = a;
-        assert_eq!(a, b);
+    fn test_in_memory_counter_increment() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.increment_counter("test_counter", &labels, 5);
+        assert_eq!(r.counter("test_counter", &labels), 5);
     }
 
     #[test]
-    fn test_quorum_health_clone() {
-        let a = QuorumHealth::Degraded;
-        let b = a;
-        assert_eq!(a, b);
+    fn test_in_memory_counter_accumulates() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.increment_counter("c", &labels, 3);
+        r.increment_counter("c", &labels, 7);
+        assert_eq!(r.counter("c", &labels), 10);
     }
 
     #[test]
-    fn test_volume_io_counters_default() {
-        let c = VolumeIoCounters::default();
-        assert_eq!(c.success, 0);
-        assert_eq!(c.failure, 0);
+    fn test_in_memory_counter_saturating_add() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.increment_counter("c", &labels, u64::MAX);
+        r.increment_counter("c", &labels, 1);
+        assert_eq!(r.counter("c", &labels), u64::MAX);
     }
 
     #[test]
-    fn test_watermark_state_default() {
-        let s = WatermarkState::default();
-        assert_eq!(s.current_watermark, 0);
-        assert_eq!(s.stale_epoch_retries, 0);
+    fn test_in_memory_counter_distinct_labels() {
+        let r = InMemoryRecorder::new();
+        let l1 = Labels::from_pairs(&[("id", "a")]);
+        let l2 = Labels::from_pairs(&[("id", "b")]);
+        r.increment_counter("c", &l1, 1);
+        r.increment_counter("c", &l2, 2);
+        assert_eq!(r.counter("c", &l1), 1);
+        assert_eq!(r.counter("c", &l2), 2);
+        assert_eq!(r.counter_count(), 2);
     }
 
     #[test]
-    fn test_node_io_load_default() {
-        let l = NodeIoLoad::default();
-        assert_eq!(l.foreground, 0);
-        assert_eq!(l.background, 0);
+    fn test_in_memory_gauge_initial_none() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        assert_eq!(r.gauge("nonexistent", &labels), None);
     }
 
     #[test]
-    fn test_scrub_summary_default() {
-        let s = ScrubSummary::default();
-        assert_eq!(s.checksum_mismatches, 0);
-        assert_eq!(s.read_errors, 0);
-        assert_eq!(s.missing_extents, 0);
-        assert_eq!(s.metadata_corruptions, 0);
-        assert_eq!(s.extents_checked, 0);
-        assert_eq!(s.completions, 0);
-    }
-
-    // -- Hash impls --
-
-    #[test]
-    fn test_io_outcome_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(IoOutcome::Success);
-        set.insert(IoOutcome::Failure);
-        set.insert(IoOutcome::Success);
-        assert_eq!(set.len(), 2);
+    fn test_in_memory_gauge_set() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.set_gauge("g", &labels, 42.0);
+        assert_eq!(r.gauge("g", &labels), Some(42.0));
     }
 
     #[test]
-    fn test_io_category_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(IoCategory::Foreground);
-        set.insert(IoCategory::Background);
-        set.insert(IoCategory::Foreground);
-        assert_eq!(set.len(), 2);
+    fn test_in_memory_gauge_overwrite() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.set_gauge("g", &labels, 1.0);
+        r.set_gauge("g", &labels, 2.0);
+        assert_eq!(r.gauge("g", &labels), Some(2.0));
+        assert_eq!(r.gauge_count(), 1);
     }
 
     #[test]
-    fn test_scrub_finding_kind_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(ScrubFindingKind::ChecksumMismatch);
-        set.insert(ScrubFindingKind::ReadError);
-        set.insert(ScrubFindingKind::MissingExtent);
-        set.insert(ScrubFindingKind::MetadataCorruption);
-        assert_eq!(set.len(), 4);
+    fn test_in_memory_gauge_distinct_labels() {
+        let r = InMemoryRecorder::new();
+        let l1 = Labels::from_pairs(&[("id", "a")]);
+        let l2 = Labels::from_pairs(&[("id", "b")]);
+        r.set_gauge("g", &l1, 10.0);
+        r.set_gauge("g", &l2, 20.0);
+        assert_eq!(r.gauge("g", &l1), Some(10.0));
+        assert_eq!(r.gauge("g", &l2), Some(20.0));
+        assert_eq!(r.gauge_count(), 2);
     }
 
     #[test]
-    fn test_quorum_health_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(QuorumHealth::Healthy);
-        set.insert(QuorumHealth::Degraded);
-        set.insert(QuorumHealth::Lost);
-        assert_eq!(set.len(), 3);
+    fn test_in_memory_histogram_initial_empty() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        assert!(r.histogram("nonexistent", &labels).is_empty());
     }
 
-    // -- Concurrent access --
+    #[test]
+    fn test_in_memory_histogram_record() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.record_histogram("h", &labels, 0.5);
+        assert_eq!(r.histogram("h", &labels), vec![0.5]);
+    }
 
     #[test]
-    fn test_concurrent_volume_io() {
-        use std::sync::Arc;
-        let r = Arc::new(InMemoryRecorder::new());
-        let v = VolumeId::generate();
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let r = Arc::clone(&r);
-                std::thread::spawn(move || {
-                    for _ in 0..100 {
-                        r.record_volume_io(v, IoOutcome::Success);
-                    }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
+    fn test_in_memory_histogram_multiple_observations() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.record_histogram("h", &labels, 0.1);
+        r.record_histogram("h", &labels, 0.2);
+        r.record_histogram("h", &labels, 0.3);
+        let obs = r.histogram("h", &labels);
+        assert_eq!(obs, vec![0.1, 0.2, 0.3]);
+        assert_eq!(r.histogram_count(), 1);
+    }
+
+    #[test]
+    fn test_in_memory_histogram_distinct_labels() {
+        let r = InMemoryRecorder::new();
+        let l1 = Labels::from_pairs(&[("id", "a")]);
+        let l2 = Labels::from_pairs(&[("id", "b")]);
+        r.record_histogram("h", &l1, 1.0);
+        r.record_histogram("h", &l2, 2.0);
+        assert_eq!(r.histogram("h", &l1), vec![1.0]);
+        assert_eq!(r.histogram("h", &l2), vec![2.0]);
+        assert_eq!(r.histogram_count(), 2);
+    }
+
+    #[test]
+    fn test_in_memory_reset() {
+        let r = InMemoryRecorder::new();
+        let labels = Labels::new();
+        r.increment_counter("c", &labels, 1);
+        r.set_gauge("g", &labels, 1.0);
+        r.record_histogram("h", &labels, 1.0);
+        assert_eq!(r.counter_count(), 1);
+        assert_eq!(r.gauge_count(), 1);
+        assert_eq!(r.histogram_count(), 1);
+
+        r.reset();
+        assert_eq!(r.counter_count(), 0);
+        assert_eq!(r.gauge_count(), 0);
+        assert_eq!(r.histogram_count(), 0);
+        assert_eq!(r.counter("c", &labels), 0);
+        assert_eq!(r.gauge("g", &labels), None);
+        assert!(r.histogram("h", &labels).is_empty());
+    }
+
+    // -- Helper function tests (P8.1) ---------------------------------------
+
+    #[test]
+    fn test_record_volume_io_success() {
+        let r = InMemoryRecorder::new();
+        record_volume_io_success(&r, "vol-1");
+        record_volume_io_success(&r, "vol-1");
+        record_volume_io_success(&r, "vol-2");
+        let l1 = Labels::from_pairs(&[("volume_id", "vol-1")]);
+        let l2 = Labels::from_pairs(&[("volume_id", "vol-2")]);
+        assert_eq!(r.counter(VOLUME_IO_SUCCESS_TOTAL, &l1), 2);
+        assert_eq!(r.counter(VOLUME_IO_SUCCESS_TOTAL, &l2), 1);
+    }
+
+    #[test]
+    fn test_record_volume_io_failure() {
+        let r = InMemoryRecorder::new();
+        record_volume_io_failure(&r, "vol-1");
+        let labels = Labels::from_pairs(&[("volume_id", "vol-1")]);
+        assert_eq!(r.counter(VOLUME_IO_FAILURE_TOTAL, &labels), 1);
+    }
+
+    // -- Helper function tests (P8.2) ---------------------------------------
+
+    #[test]
+    fn test_set_client_watermark() {
+        let r = InMemoryRecorder::new();
+        set_client_watermark(&r, "sess-1", 42);
+        let labels = Labels::from_pairs(&[("session_id", "sess-1")]);
+        assert_eq!(r.gauge(CLIENT_WATERMARK_VERSION, &labels), Some(42.0));
+    }
+
+    #[test]
+    fn test_set_client_watermark_update() {
+        let r = InMemoryRecorder::new();
+        set_client_watermark(&r, "sess-1", 10);
+        set_client_watermark(&r, "sess-1", 20);
+        let labels = Labels::from_pairs(&[("session_id", "sess-1")]);
+        assert_eq!(r.gauge(CLIENT_WATERMARK_VERSION, &labels), Some(20.0));
+    }
+
+    #[test]
+    fn test_record_stale_epoch_retry() {
+        let r = InMemoryRecorder::new();
+        record_stale_epoch_retry(&r, "sess-1");
+        record_stale_epoch_retry(&r, "sess-1");
+        record_stale_epoch_retry(&r, "sess-2");
+        let l1 = Labels::from_pairs(&[("session_id", "sess-1")]);
+        let l2 = Labels::from_pairs(&[("session_id", "sess-2")]);
+        assert_eq!(r.counter(CLIENT_STALE_EPOCH_RETRIES_TOTAL, &l1), 2);
+        assert_eq!(r.counter(CLIENT_STALE_EPOCH_RETRIES_TOTAL, &l2), 1);
+    }
+
+    // -- Helper function tests (P8.3) ---------------------------------------
+
+    #[test]
+    fn test_set_foreground_io_load() {
+        let r = InMemoryRecorder::new();
+        set_foreground_io_load(&r, "node-1", 5);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(NODE_FOREGROUND_IO_LOAD, &labels), Some(5.0));
+    }
+
+    #[test]
+    fn test_set_foreground_io_load_update() {
+        let r = InMemoryRecorder::new();
+        set_foreground_io_load(&r, "node-1", 5);
+        set_foreground_io_load(&r, "node-1", 3);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(NODE_FOREGROUND_IO_LOAD, &labels), Some(3.0));
+    }
+
+    #[test]
+    fn test_set_background_io_load() {
+        let r = InMemoryRecorder::new();
+        set_background_io_load(&r, "node-1", 2);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(NODE_BACKGROUND_IO_LOAD, &labels), Some(2.0));
+    }
+
+    #[test]
+    fn test_set_background_io_load_update() {
+        let r = InMemoryRecorder::new();
+        set_background_io_load(&r, "node-1", 10);
+        set_background_io_load(&r, "node-1", 0);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(NODE_BACKGROUND_IO_LOAD, &labels), Some(0.0));
+    }
+
+    // -- Helper function tests (P8.4) ---------------------------------------
+
+    #[test]
+    fn test_record_disk_state_transition() {
+        let r = InMemoryRecorder::new();
+        record_disk_state_transition(&r, "disk-abc", "healthy", "suspect");
+        let labels = Labels::from_pairs(&[
+            ("disk_id", "disk-abc"),
+            ("from_state", "healthy"),
+            ("to_state", "suspect"),
+        ]);
+        assert_eq!(r.counter(DISK_STATE_TRANSITION_TOTAL, &labels), 1);
+    }
+
+    #[test]
+    fn test_record_disk_state_transition_accumulates() {
+        let r = InMemoryRecorder::new();
+        record_disk_state_transition(&r, "disk-1", "healthy", "suspect");
+        record_disk_state_transition(&r, "disk-1", "healthy", "suspect");
+        let labels = Labels::from_pairs(&[
+            ("disk_id", "disk-1"),
+            ("from_state", "healthy"),
+            ("to_state", "suspect"),
+        ]);
+        assert_eq!(r.counter(DISK_STATE_TRANSITION_TOTAL, &labels), 2);
+    }
+
+    #[test]
+    fn test_record_disk_state_transition_different_transitions() {
+        let r = InMemoryRecorder::new();
+        record_disk_state_transition(&r, "disk-1", "healthy", "suspect");
+        record_disk_state_transition(&r, "disk-1", "suspect", "degraded");
+        let l1 = Labels::from_pairs(&[
+            ("disk_id", "disk-1"),
+            ("from_state", "healthy"),
+            ("to_state", "suspect"),
+        ]);
+        let l2 = Labels::from_pairs(&[
+            ("disk_id", "disk-1"),
+            ("from_state", "suspect"),
+            ("to_state", "degraded"),
+        ]);
+        assert_eq!(r.counter(DISK_STATE_TRANSITION_TOTAL, &l1), 1);
+        assert_eq!(r.counter(DISK_STATE_TRANSITION_TOTAL, &l2), 1);
+    }
+
+    // -- Helper function tests (P8.5) ---------------------------------------
+
+    #[test]
+    fn test_record_scrub_finding() {
+        let r = InMemoryRecorder::new();
+        record_scrub_finding(&r, "node-1", "disk-a");
+        record_scrub_finding(&r, "node-1", "disk-a");
+        let labels = Labels::from_pairs(&[("node_id", "node-1"), ("disk_id", "disk-a")]);
+        assert_eq!(r.counter(SCRUB_FINDINGS_TOTAL, &labels), 2);
+    }
+
+    #[test]
+    fn test_record_scrub_finding_different_disks() {
+        let r = InMemoryRecorder::new();
+        record_scrub_finding(&r, "node-1", "disk-a");
+        record_scrub_finding(&r, "node-1", "disk-b");
+        let la = Labels::from_pairs(&[("node_id", "node-1"), ("disk_id", "disk-a")]);
+        let lb = Labels::from_pairs(&[("node_id", "node-1"), ("disk_id", "disk-b")]);
+        assert_eq!(r.counter(SCRUB_FINDINGS_TOTAL, &la), 1);
+        assert_eq!(r.counter(SCRUB_FINDINGS_TOTAL, &lb), 1);
+    }
+
+    #[test]
+    fn test_set_scrub_last_completed() {
+        let r = InMemoryRecorder::new();
+        set_scrub_last_completed(&r, "node-1", "disk-a", 1700000000.0);
+        let labels = Labels::from_pairs(&[("node_id", "node-1"), ("disk_id", "disk-a")]);
+        assert_eq!(
+            r.gauge(SCRUB_LAST_COMPLETED_TIMESTAMP, &labels),
+            Some(1700000000.0)
+        );
+    }
+
+    #[test]
+    fn test_set_scrub_last_completed_update() {
+        let r = InMemoryRecorder::new();
+        set_scrub_last_completed(&r, "node-1", "disk-a", 100.0);
+        set_scrub_last_completed(&r, "node-1", "disk-a", 200.0);
+        let labels = Labels::from_pairs(&[("node_id", "node-1"), ("disk_id", "disk-a")]);
+        assert_eq!(
+            r.gauge(SCRUB_LAST_COMPLETED_TIMESTAMP, &labels),
+            Some(200.0)
+        );
+    }
+
+    // -- Helper function tests (P8.6) ---------------------------------------
+
+    #[test]
+    fn test_set_repair_backlog_size() {
+        let r = InMemoryRecorder::new();
+        set_repair_backlog_size(&r, "node-1", 42);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(REPAIR_BACKLOG_SIZE, &labels), Some(42.0));
+    }
+
+    #[test]
+    fn test_set_repair_backlog_size_decrease() {
+        let r = InMemoryRecorder::new();
+        set_repair_backlog_size(&r, "node-1", 100);
+        set_repair_backlog_size(&r, "node-1", 50);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(REPAIR_BACKLOG_SIZE, &labels), Some(50.0));
+    }
+
+    #[test]
+    fn test_record_repair_completion() {
+        let r = InMemoryRecorder::new();
+        record_repair_completion(&r, "node-1");
+        record_repair_completion(&r, "node-1");
+        record_repair_completion(&r, "node-2");
+        let l1 = Labels::from_pairs(&[("node_id", "node-1")]);
+        let l2 = Labels::from_pairs(&[("node_id", "node-2")]);
+        assert_eq!(r.counter(REPAIR_COMPLETIONS_TOTAL, &l1), 2);
+        assert_eq!(r.counter(REPAIR_COMPLETIONS_TOTAL, &l2), 1);
+    }
+
+    // -- Helper function tests (P8.7) ---------------------------------------
+
+    #[test]
+    fn test_set_orphaned_extent_files() {
+        let r = InMemoryRecorder::new();
+        set_orphaned_extent_files(&r, "node-1", 7);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(ORPHANED_EXTENT_FILES, &labels), Some(7.0));
+    }
+
+    #[test]
+    fn test_set_orphaned_extent_files_update() {
+        let r = InMemoryRecorder::new();
+        set_orphaned_extent_files(&r, "node-1", 10);
+        set_orphaned_extent_files(&r, "node-1", 3);
+        let labels = Labels::from_pairs(&[("node_id", "node-1")]);
+        assert_eq!(r.gauge(ORPHANED_EXTENT_FILES, &labels), Some(3.0));
+    }
+
+    // -- Helper function tests (P8.8) ---------------------------------------
+
+    #[test]
+    fn test_set_metadata_quorum_health_healthy() {
+        let r = InMemoryRecorder::new();
+        set_metadata_quorum_health(&r, "rg-1", true);
+        let labels = Labels::from_pairs(&[("raft_group_id", "rg-1")]);
+        assert_eq!(r.gauge(METADATA_QUORUM_HEALTH, &labels), Some(1.0));
+    }
+
+    #[test]
+    fn test_set_metadata_quorum_health_unhealthy() {
+        let r = InMemoryRecorder::new();
+        set_metadata_quorum_health(&r, "rg-1", false);
+        let labels = Labels::from_pairs(&[("raft_group_id", "rg-1")]);
+        assert_eq!(r.gauge(METADATA_QUORUM_HEALTH, &labels), Some(0.0));
+    }
+
+    #[test]
+    fn test_set_metadata_quorum_health_toggle() {
+        let r = InMemoryRecorder::new();
+        set_metadata_quorum_health(&r, "rg-1", true);
+        set_metadata_quorum_health(&r, "rg-1", false);
+        let labels = Labels::from_pairs(&[("raft_group_id", "rg-1")]);
+        assert_eq!(r.gauge(METADATA_QUORUM_HEALTH, &labels), Some(0.0));
+    }
+
+    #[test]
+    fn test_record_metadata_commit_latency() {
+        let r = InMemoryRecorder::new();
+        record_metadata_commit_latency(&r, "rg-1", 0.005);
+        record_metadata_commit_latency(&r, "rg-1", 0.010);
+        record_metadata_commit_latency(&r, "rg-1", 0.015);
+        let labels = Labels::from_pairs(&[("raft_group_id", "rg-1")]);
+        let obs = r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &labels);
+        assert_eq!(obs, vec![0.005, 0.010, 0.015]);
+    }
+
+    #[test]
+    fn test_record_metadata_commit_latency_distinct_groups() {
+        let r = InMemoryRecorder::new();
+        record_metadata_commit_latency(&r, "rg-1", 0.001);
+        record_metadata_commit_latency(&r, "rg-2", 0.100);
+        let l1 = Labels::from_pairs(&[("raft_group_id", "rg-1")]);
+        let l2 = Labels::from_pairs(&[("raft_group_id", "rg-2")]);
+        assert_eq!(r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &l1), vec![0.001]);
+        assert_eq!(r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &l2), vec![0.100]);
+    }
+
+    // -- Trait object tests -------------------------------------------------
+
+    #[test]
+    fn test_metrics_recorder_as_trait_object() {
+        let r: Box<dyn MetricsRecorder> = Box::new(InMemoryRecorder::new());
+        let labels = Labels::new();
+        r.increment_counter("c", &labels, 1);
+        r.set_gauge("g", &labels, 1.0);
+        r.record_histogram("h", &labels, 0.5);
+    }
+
+    #[test]
+    fn test_noop_recorder_as_trait_object() {
+        let r: Box<dyn MetricsRecorder> = Box::new(NoopRecorder);
+        let labels = Labels::new();
+        r.increment_counter("c", &labels, 1);
+        r.set_gauge("g", &labels, 1.0);
+        r.record_histogram("h", &labels, 0.5);
+    }
+
+    // -- End-to-end scenario tests ------------------------------------------
+
+    #[test]
+    fn test_scenario_volume_io_mixed() {
+        let r = InMemoryRecorder::new();
+        let vol = "vol-abc";
+        for _ in 0..10 {
+            record_volume_io_success(&r, vol);
         }
-        assert_eq!(r.volume_io(&v).unwrap().success, 1000);
-    }
-
-    #[test]
-    fn test_concurrent_commit_latency() {
-        use std::sync::Arc;
-        let r = Arc::new(InMemoryRecorder::new());
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let r = Arc::clone(&r);
-                std::thread::spawn(move || {
-                    for _ in 0..100 {
-                        r.record_commit_latency(Duration::from_millis(1));
-                    }
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
+        for _ in 0..3 {
+            record_volume_io_failure(&r, vol);
         }
-        assert_eq!(r.commit_latency_stats().count, 1000);
-    }
-
-    // -- Eq impls --
-
-    #[test]
-    fn test_io_outcome_eq() {
-        assert_eq!(IoOutcome::Success, IoOutcome::Success);
-        assert_ne!(IoOutcome::Success, IoOutcome::Failure);
+        let labels = Labels::from_pairs(&[("volume_id", vol)]);
+        assert_eq!(r.counter(VOLUME_IO_SUCCESS_TOTAL, &labels), 10);
+        assert_eq!(r.counter(VOLUME_IO_FAILURE_TOTAL, &labels), 3);
     }
 
     #[test]
-    fn test_io_category_eq() {
-        assert_eq!(IoCategory::Foreground, IoCategory::Foreground);
-        assert_ne!(IoCategory::Foreground, IoCategory::Background);
-    }
+    fn test_scenario_disk_lifecycle() {
+        let r = InMemoryRecorder::new();
+        let disk = "disk-xyz";
+        record_disk_state_transition(&r, disk, "healthy", "suspect");
+        record_disk_state_transition(&r, disk, "suspect", "degraded");
+        record_disk_state_transition(&r, disk, "degraded", "failed");
+        record_disk_state_transition(&r, disk, "failed", "removed");
 
-    #[test]
-    fn test_quorum_health_eq() {
-        assert_eq!(QuorumHealth::Healthy, QuorumHealth::Healthy);
-        assert_ne!(QuorumHealth::Healthy, QuorumHealth::Degraded);
-        assert_ne!(QuorumHealth::Degraded, QuorumHealth::Lost);
-    }
-
-    #[test]
-    fn test_quorum_health_default_impl() {
-        let h = QuorumHealth::default();
-        assert_eq!(h, QuorumHealth::Healthy);
-    }
-
-    // -- Volume IO counters clone --
-
-    #[test]
-    fn test_volume_io_counters_clone() {
-        let c = VolumeIoCounters {
-            success: 5,
-            failure: 3,
+        let check = |from: &str, to: &str, expected: u64| {
+            let labels = Labels::from_pairs(&[
+                ("disk_id", disk),
+                ("from_state", from),
+                ("to_state", to),
+            ]);
+            assert_eq!(r.counter(DISK_STATE_TRANSITION_TOTAL, &labels), expected);
         };
-        let c2 = c.clone();
-        assert_eq!(c2.success, 5);
-        assert_eq!(c2.failure, 3);
+        check("healthy", "suspect", 1);
+        check("suspect", "degraded", 1);
+        check("degraded", "failed", 1);
+        check("failed", "removed", 1);
     }
 
     #[test]
-    fn test_watermark_state_clone() {
-        let s = WatermarkState {
-            current_watermark: 99,
-            stale_epoch_retries: 7,
-        };
-        let s2 = s.clone();
-        assert_eq!(s2.current_watermark, 99);
-        assert_eq!(s2.stale_epoch_retries, 7);
+    fn test_scenario_scrub_and_repair() {
+        let r = InMemoryRecorder::new();
+        let node = "node-1";
+        let disk = "disk-a";
+
+        // Scrub finds 3 issues
+        for _ in 0..3 {
+            record_scrub_finding(&r, node, disk);
+        }
+        set_scrub_last_completed(&r, node, disk, 1700000000.0);
+
+        // Repair processes them
+        set_repair_backlog_size(&r, node, 3);
+        record_repair_completion(&r, node);
+        set_repair_backlog_size(&r, node, 2);
+        record_repair_completion(&r, node);
+        set_repair_backlog_size(&r, node, 1);
+        record_repair_completion(&r, node);
+        set_repair_backlog_size(&r, node, 0);
+
+        let scrub_labels = Labels::from_pairs(&[("node_id", node), ("disk_id", disk)]);
+        assert_eq!(r.counter(SCRUB_FINDINGS_TOTAL, &scrub_labels), 3);
+        assert_eq!(
+            r.gauge(SCRUB_LAST_COMPLETED_TIMESTAMP, &scrub_labels),
+            Some(1700000000.0)
+        );
+
+        let node_labels = Labels::from_pairs(&[("node_id", node)]);
+        assert_eq!(r.gauge(REPAIR_BACKLOG_SIZE, &node_labels), Some(0.0));
+        assert_eq!(r.counter(REPAIR_COMPLETIONS_TOTAL, &node_labels), 3);
     }
 
     #[test]
-    fn test_node_io_load_clone() {
-        let l = NodeIoLoad {
-            foreground: 10,
-            background: 20,
-        };
-        let l2 = l.clone();
-        assert_eq!(l2.foreground, 10);
-        assert_eq!(l2.background, 20);
+    fn test_scenario_metadata_quorum() {
+        let r = InMemoryRecorder::new();
+        let rg = "rg-1";
+
+        // Initial healthy quorum
+        set_metadata_quorum_health(&r, rg, true);
+
+        // Record some commits
+        record_metadata_commit_latency(&r, rg, 0.002);
+        record_metadata_commit_latency(&r, rg, 0.005);
+        record_metadata_commit_latency(&r, rg, 0.003);
+
+        // Quorum lost
+        set_metadata_quorum_health(&r, rg, false);
+
+        let labels = Labels::from_pairs(&[("raft_group_id", rg)]);
+        assert_eq!(r.gauge(METADATA_QUORUM_HEALTH, &labels), Some(0.0));
+        let obs = r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &labels);
+        assert_eq!(obs.len(), 3);
     }
 
     #[test]
-    fn test_scrub_summary_clone() {
-        let s = ScrubSummary {
-            checksum_mismatches: 1,
-            read_errors: 2,
-            missing_extents: 3,
-            metadata_corruptions: 4,
-            extents_checked: 500,
-            completions: 6,
-        };
-        let s2 = s.clone();
-        assert_eq!(s2.checksum_mismatches, 1);
-        assert_eq!(s2.completions, 6);
+    fn test_scenario_node_io_load() {
+        let r = InMemoryRecorder::new();
+        let node = "node-1";
+
+        set_foreground_io_load(&r, node, 0);
+        set_background_io_load(&r, node, 0);
+
+        // Simulate workload increase
+        set_foreground_io_load(&r, node, 10);
+        set_background_io_load(&r, node, 3);
+
+        // Simulate workload decrease
+        set_foreground_io_load(&r, node, 2);
+        set_background_io_load(&r, node, 1);
+
+        let labels = Labels::from_pairs(&[("node_id", node)]);
+        assert_eq!(r.gauge(NODE_FOREGROUND_IO_LOAD, &labels), Some(2.0));
+        assert_eq!(r.gauge(NODE_BACKGROUND_IO_LOAD, &labels), Some(1.0));
     }
 
     #[test]
-    fn test_commit_latency_stats_clone() {
-        let s = CommitLatencyStats {
-            count: 10,
-            total: Duration::from_millis(100),
-            min: Duration::from_millis(5),
-            max: Duration::from_millis(20),
-        };
-        let s2 = s.clone();
-        assert_eq!(s2.count, 10);
-        assert_eq!(s2.min, Duration::from_millis(5));
-    }
+    fn test_scenario_orphaned_extents() {
+        let r = InMemoryRecorder::new();
+        set_orphaned_extent_files(&r, "node-1", 15);
+        set_orphaned_extent_files(&r, "node-2", 0);
 
-    #[test]
-    fn test_disk_transition_event_clone() {
-        let d = DiskId::generate();
-        let e = DiskTransitionEvent {
-            disk: d,
-            from: DiskState::Healthy,
-            to: DiskState::Failed,
-        };
-        let e2 = e.clone();
-        assert_eq!(e, e2);
+        let l1 = Labels::from_pairs(&[("node_id", "node-1")]);
+        let l2 = Labels::from_pairs(&[("node_id", "node-2")]);
+        assert_eq!(r.gauge(ORPHANED_EXTENT_FILES, &l1), Some(15.0));
+        assert_eq!(r.gauge(ORPHANED_EXTENT_FILES, &l2), Some(0.0));
     }
 }
