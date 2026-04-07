@@ -237,10 +237,13 @@ name = "blockyard-ublk"
 version = "0.1.0"
 dependencies = [
  "blockyard-common",
+ "blockyard-protocol",
  "bytes",
+ "parking_lot",
  "serde",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

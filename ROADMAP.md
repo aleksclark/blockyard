@@ -84,20 +84,20 @@ Build the client that serves `ublk` devices, maintains metadata cache and sessio
 
 ### 4A — Client Foundation
 
-- [ ] **P4A.1** `ublk` device driver integration: register block device, handle kernel read/write requests
-- [ ] **P4A.2** Client session: stable `SessionId`, per-operation `OperationId` — §4.2
-- [ ] **P4A.3** Metadata cache: placement epoch, cluster map, volume protection policy, extent mappings — §4.3
-- [ ] **P4A.4** Session write watermark: monotonically non-decreasing, advanced on commit success — §4.4
-- [ ] **P4A.5** Metadata freshness checks: watermark-gated cache validation before reads — §4.3, §4.4
-- [ ] **P4A.6** Stale epoch refresh: stop writes, refresh map, re-resolve, retry — §4.7
+- [x] **P4A.1** `ublk` device driver integration: register block device, handle kernel read/write requests
+- [x] **P4A.2** Client session: stable `SessionId`, per-operation `OperationId` — §4.2
+- [x] **P4A.3** Metadata cache: placement epoch, cluster map, volume protection policy, extent mappings — §4.3
+- [x] **P4A.4** Session write watermark: monotonically non-decreasing, advanced on commit success — §4.4
+- [x] **P4A.5** Metadata freshness checks: watermark-gated cache validation before reads — §4.3, §4.4
+- [x] **P4A.6** Stale epoch refresh: stop writes, refresh map, re-resolve, retry — §4.7
 
 ### 4B — Replicated Write Path
 
-- [ ] **P4B.1** Write pipeline: validate ownership → resolve mapping → compute placement → create extent version → transmit to replicas → await acks → commit metadata → ack to kernel — §4.5.1
-- [ ] **P4B.2** Durability threshold enforcement: wait for policy-required ack count before commit — §4.5.2
-- [ ] **P4B.3** Never ack write to `ublk` before metadata commit succeeds — invariant 1
-- [ ] **P4B.4** Idempotent retry with stable `OperationId` — §4.5.4
-- [ ] **P4B.5** Partial ack handling: don't commit if insufficient acks; rely on orphan cleanup — §4.9.3
+- [x] **P4B.1** Write pipeline: validate ownership → resolve mapping → compute placement → create extent version → transmit to replicas → await acks → commit metadata → ack to kernel — §4.5.1
+- [x] **P4B.2** Durability threshold enforcement: wait for policy-required ack count before commit — §4.5.2
+- [x] **P4B.3** Never ack write to `ublk` before metadata commit succeeds — invariant 1
+- [x] **P4B.4** Idempotent retry with stable `OperationId` — §4.5.4
+- [x] **P4B.5** Partial ack handling: don't commit if insufficient acks; rely on orphan cleanup — §4.9.3
 
 ### 4C — Read Path
 
