@@ -220,11 +220,11 @@ VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`
 
 ## Phase 10 — CLI & Operator Tools
 
-- [ ] **P10.1** `byard` CLI: volume create/delete/list/inspect
-- [ ] **P10.2** `byard` CLI: disk list/inspect/drain/remove
-- [ ] **P10.3** `byard` CLI: node list/inspect/decommission
-- [ ] **P10.4** `byard` CLI: cluster status, placement epoch, quorum health
-- [ ] **P10.5** `byard` CLI: mount/unmount volume (ublk attach/detach)
+- [x] **P10.1** `byard` CLI: volume create/delete/list/inspect
+- [x] **P10.2** `byard` CLI: disk list/inspect/drain/remove
+- [x] **P10.3** `byard` CLI: node list/inspect/decommission
+- [x] **P10.4** `byard` CLI: cluster status, placement epoch, quorum health
+- [x] **P10.5** `byard` CLI: mount/unmount volume (ublk attach/detach)
 
 ---
 

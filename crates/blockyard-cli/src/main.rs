@@ -2,7 +2,10 @@
 //!
 //! Provides volume, disk, node, and cluster management commands.
 
+use clap::Parser;
 use tracing_subscriber::EnvFilter;
+
+use blockyard_cli::cli::Cli;
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -13,6 +16,15 @@ fn init_tracing() {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    tracing::info!("byard cli starting");
-    Ok(())
+    let cli = Cli::parse();
+
+    tracing::debug!(?cli, "parsed CLI arguments");
+
+    eprintln!(
+        "byard: not yet connected to a cluster (endpoint: {})",
+        cli.endpoint
+    );
+    eprintln!("byard: this build only supports --help and argument validation");
+
+    std::process::exit(1);
 }
