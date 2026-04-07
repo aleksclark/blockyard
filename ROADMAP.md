@@ -145,13 +145,13 @@ Implement the failure condition requirements from §6 that aren't covered by the
 
 Data node background workers for scrubbing, repair, rebalance, and drain.
 
-- [ ] **P7.1** Background scrubbing: verify extent file readability, checksum integrity, local metadata recoverability — §5.12
-- [ ] **P7.2** Scrub-detected corruption triggers repair workflow — §5.12
-- [ ] **P7.3** Re-replication: rebuild missing replicas after node/disk failure — §5.13
-- [ ] **P7.4** Erasure-code rebuild: reconstruct missing fragments — §5.13
-- [ ] **P7.5** Disk drain: enumerate live extents, report for relocation, serve reads until empty — §5.11
-- [ ] **P7.6** Capacity rebalance: redistribute extents across nodes for even utilization — §5.13
-- [ ] **P7.7** Rate limiting / scheduling: background work must not starve foreground IO or metadata — §5.13
+- [x] **P7.1** Background scrubbing: verify extent file readability, checksum integrity, local metadata recoverability — §5.12
+- [x] **P7.2** Scrub-detected corruption triggers repair workflow — §5.12
+- [x] **P7.3** Re-replication: rebuild missing replicas after node/disk failure — §5.13
+- [x] **P7.4** Erasure-code rebuild: reconstruct missing fragments — §5.13
+- [x] **P7.5** Disk drain: enumerate live extents, report for relocation, serve reads until empty — §5.11
+- [x] **P7.6** Capacity rebalance: redistribute extents across nodes for even utilization — §5.13
+- [x] **P7.7** Rate limiting / scheduling: background work must not starve foreground IO or metadata — §5.13
 
 ---
 
