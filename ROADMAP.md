@@ -159,14 +159,14 @@ Data node background workers for scrubbing, repair, rebalance, and drain.
 
 Instrument every layer with the metrics and health indicators required by §9.
 
-- [ ] **P8.1** Per-volume IO success/failure rates
-- [ ] **P8.2** Client watermark and stale-epoch retry counts
-- [ ] **P8.3** Per-node foreground and background IO load
-- [ ] **P8.4** Per-disk health state transitions (with stable disk identifiers) — §9
-- [ ] **P8.5** Scrub findings
-- [ ] **P8.6** Repair backlog
-- [ ] **P8.7** Orphaned extent file counts
-- [ ] **P8.8** Metadata quorum health and commit latency
+- [x] **P8.1** Per-volume IO success/failure rates
+- [x] **P8.2** Client watermark and stale-epoch retry counts
+- [x] **P8.3** Per-node foreground and background IO load
+- [x] **P8.4** Per-disk health state transitions (with stable disk identifiers) — §9
+- [x] **P8.5** Scrub findings
+- [x] **P8.6** Repair backlog
+- [x] **P8.7** Orphaned extent file counts
+- [x] **P8.8** Metadata quorum health and commit latency
 
 ---
 
