@@ -12,10 +12,16 @@
 //! - [`traits`] — `DataNodeClient` and `MetadataClient` traits for testability
 //! - [`write_pipeline`] — Replicated write path (P4B.1–P4B.5)
 //! - [`ec_write_pipeline`] — Erasure-coded write path (P4D.2, P4D.5, P4D.6)
+//! - [`crash_recovery`] — Client crash recovery (P5.1, §6.1)
+//! - [`ambiguous_write`] — Ambiguous write resolution (P5.4, §4.9.2)
+//! - [`quorum_health`] — Metadata quorum unavailable handling (P5.5, §4.9.1)
 
+pub mod ambiguous_write;
+pub mod crash_recovery;
 pub mod ec_write_pipeline;
 pub mod freshness;
 pub mod metadata_cache;
+pub mod quorum_health;
 pub mod session;
 pub mod stale_epoch;
 pub mod traits;
@@ -23,12 +29,15 @@ pub mod ublk;
 pub mod watermark;
 pub mod write_pipeline;
 
+pub use ambiguous_write::{AmbiguousWriteOutcome, AmbiguousWriteResolver};
+pub use crash_recovery::{CrashRecoveryResolver, RecoveryResult};
 pub use ec_write_pipeline::{
     CoalescingBuffer, CoalescingConfig, EcFragmentPlacement, EcWritePipeline, EncodedStripe,
     PendingWrite,
 };
 pub use freshness::FreshnessChecker;
 pub use metadata_cache::MetadataCache;
+pub use quorum_health::{QuorumHealthMonitor, QuorumLossReadPolicy, QuorumStatus};
 pub use session::ClientSession;
 pub use stale_epoch::StaleEpochHandler;
 pub use traits::{DataNodeClient, MetadataClient};

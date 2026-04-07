@@ -121,13 +121,13 @@ Build the client that serves `ublk` devices, maintains metadata cache and sessio
 
 Implement the failure condition requirements from §6 that aren't covered by the happy-path phases above.
 
-- [ ] **P5.1** Client crash recovery: uncommitted extents invisible to reads; committed state resolved via metadata — §6.1, invariant 3
-- [ ] **P5.2** Data node crash after local ack: preserve dedup state or allow metadata interrogation — §6.2
-- [ ] **P5.3** Data node crash before local durability: never claim success for incomplete writes — §6.3
-- [ ] **P5.4** Ambiguous write resolution: client queries metadata for operation/extent status before retry — §4.9.2
-- [ ] **P5.5** Metadata quorum unavailable: block new write acks, allow reads only when policy & watermark permit — §4.9.1
-- [ ] **P5.6** Disk failure: transition to `failed`, stop IO, report extent set for repair, exclude from placement — §6.6
-- [ ] **P5.7** Node startup ordering: local recovery → serve committed extents → hide staged files → rejoin metadata — §6.10
+- [x] **P5.1** Client crash recovery: uncommitted extents invisible to reads; committed state resolved via metadata — §6.1, invariant 3
+- [x] **P5.2** Data node crash after local ack: preserve dedup state or allow metadata interrogation — §6.2
+- [x] **P5.3** Data node crash before local durability: never claim success for incomplete writes — §6.3
+- [x] **P5.4** Ambiguous write resolution: client queries metadata for operation/extent status before retry — §4.9.2
+- [x] **P5.5** Metadata quorum unavailable: block new write acks, allow reads only when policy & watermark permit — §4.9.1
+- [x] **P5.6** Disk failure: transition to `failed`, stop IO, report extent set for repair, exclude from placement — §6.6
+- [x] **P5.7** Node startup ordering: local recovery → serve committed extents → hide staged files → rejoin metadata — §6.10
 
 ---
 
