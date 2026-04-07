@@ -191,17 +191,17 @@ VM-based, Jepsen-style integration tests per `AGENTS.md` and `TEST_CHECKLIST.md`
 
 ### 9C — Availability Tests
 
-- [ ] **P9C.1** 1-of-3 node crash: writes continue within election timeout
-- [ ] **P9C.2** 1-of-5 node crash: zero downtime for unaffected volumes
-- [ ] **P9C.3** Volume readable during minority partition (from majority side)
-- [ ] **P9C.4** New leader elected within 2 seconds after leader crash
+- [x] **P9C.1** 1-of-3 node crash: writes continue within election timeout
+- [x] **P9C.2** 1-of-5 node crash: zero downtime for unaffected volumes
+- [x] **P9C.3** Volume readable during minority partition (from majority side)
+- [x] **P9C.4** New leader elected within 2 seconds after leader crash
 
 ### 9D — Rebalancing Tests
 
-- [ ] **P9D.1** Add node → rebalance → data integrity verified
-- [ ] **P9D.2** Remove node (drain) → all volumes migrated → no data loss
-- [ ] **P9D.3** Kill node during rebalance → rebalance resumes after recovery
-- [ ] **P9D.4** Concurrent client IO during rebalance: no errors
+- [x] **P9D.1** Add node → rebalance → data integrity verified
+- [x] **P9D.2** Remove node (drain) → all volumes migrated → no data loss
+- [x] **P9D.3** Kill node during rebalance → rebalance resumes after recovery
+- [x] **P9D.4** Concurrent client IO during rebalance: no errors
 
 ### 9E — Data Integrity Tests
 
