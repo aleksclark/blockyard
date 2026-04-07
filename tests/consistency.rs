@@ -23,6 +23,7 @@ fn running_cluster(node_count: usize) -> TestCluster {
 // ── Test 1: Single file survives leader crash ─────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn write_file_survives_leader_crash() {
     if !require_vm_env() {
@@ -59,6 +60,7 @@ async fn write_file_survives_leader_crash() {
 // ── Test 2: Multiple files survive crash ──────────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn multiple_files_survive_crash() {
     if !require_vm_env() {
@@ -99,6 +101,7 @@ async fn multiple_files_survive_crash() {
 // ── Test 3: Large file integrity after crash ──────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn large_file_integrity_after_crash() {
     if !require_vm_env() {

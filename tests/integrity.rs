@@ -23,6 +23,7 @@ fn running_cluster(node_count: usize) -> TestCluster {
 // ── Test 1: Write/read data matches exactly ───────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn write_read_data_matches() {
     if !require_vm_env() {
@@ -61,6 +62,7 @@ async fn write_read_data_matches() {
 // ── Test 2: Crash all, restart, data survives ─────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn crash_all_restart_data_survives() {
     if !require_vm_env() {
@@ -133,6 +135,7 @@ use harness::UBLK_DEV;
 // ── Test 3: Filesystem sync survives crash ────────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn filesystem_sync_survives_crash() {
     if !require_vm_env() {
@@ -172,6 +175,7 @@ async fn filesystem_sync_survives_crash() {
 // ── Test 4: Many small files integrity ────────────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn many_small_files_integrity() {
     if !require_vm_env() {

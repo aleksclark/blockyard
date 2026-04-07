@@ -27,6 +27,7 @@ fn running_cluster(node_count: usize) -> TestCluster {
 // ── Test 1: EC volume basic file operations ───────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn ec_volume_basic_file_ops() {
     if !require_vm_env() {
@@ -71,6 +72,7 @@ async fn ec_volume_basic_file_ops() {
 // ── Test 2: EC volume survives one node crash ─────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn ec_survive_one_node_crash() {
     if !require_vm_env() {
@@ -118,6 +120,7 @@ async fn ec_survive_one_node_crash() {
 // still be readable.
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn ec_survive_two_node_crash_data_intact() {
     if !require_vm_env() {
@@ -167,6 +170,7 @@ async fn ec_survive_two_node_crash_data_intact() {
 // ── Test 4: EC concurrent writes during failure ───────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn ec_concurrent_writes_during_failure() {
     if !require_vm_env() {

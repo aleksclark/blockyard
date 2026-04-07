@@ -23,6 +23,7 @@ fn running_cluster(node_count: usize) -> TestCluster {
 // ── Test 1: Filesystem available after one node crash ─────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn filesystem_available_after_one_node_crash() {
     if !require_vm_env() {
@@ -67,6 +68,7 @@ async fn filesystem_available_after_one_node_crash() {
 // ── Test 2: Leader failover with no data loss ─────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn leader_failover_no_data_loss() {
     if !require_vm_env() {
@@ -111,6 +113,7 @@ async fn leader_failover_no_data_loss() {
 // ── Test 3: Node pause and resume — files intact ──────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn node_pause_resume_files_intact() {
     if !require_vm_env() {
@@ -154,6 +157,7 @@ async fn node_pause_resume_files_intact() {
 // ── Test 4: Network partition heal — files intact ─────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn partition_heal_files_intact() {
     if !require_vm_env() {

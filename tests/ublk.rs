@@ -23,6 +23,7 @@ fn running_cluster(node_count: usize) -> TestCluster {
 // ── Test 1: Basic mount, format, write, read, unmount cycle ───────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn mount_format_write_read() {
     if !require_vm_env() {
@@ -60,6 +61,7 @@ async fn mount_format_write_read() {
 // ── Test 2: Remount data persists ─────────────────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn remount_data_persists() {
     if !require_vm_env() {
@@ -129,6 +131,7 @@ async fn remount_data_persists() {
 // ── Test 3: Mount survives storage node crash ─────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn mount_survives_storage_node_crash() {
     if !require_vm_env() {

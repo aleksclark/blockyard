@@ -23,6 +23,7 @@ fn running_cluster(node_count: usize) -> TestCluster {
 // ── Test 1: Files intact during node crash ────────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn files_intact_during_node_crash() {
     if !require_vm_env() {
@@ -63,6 +64,7 @@ async fn files_intact_during_node_crash() {
 // ── Test 2: Files intact after recovery ───────────────────────────────────
 
 #[tokio::test]
+// Requires BLOCKYARD_INTEGRATION=1 and running QEMU VM cluster
 #[ignore]
 async fn files_intact_after_recovery() {
     if !require_vm_env() {
