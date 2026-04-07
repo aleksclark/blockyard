@@ -15,7 +15,10 @@ use openraft::Raft;
 use openraft::error::{ClientWriteError, RaftError};
 
 use blockyard_common::error::Error;
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+use blockyard_common::{
+    EpochId, ExtentId, LeaseRequest, LeaseResponse, LeaseVersion, NodeId, OperationId,
+    ProtectionPolicy, SessionId, VolumeId, VolumeLease,
+};
 
 use crate::request::MetadataRequest;
 use crate::response::MetadataResponse;
@@ -94,12 +97,11 @@ impl MetadataService {
         match resp {
             MetadataResponse::Epoch(e) => Ok(e),
             MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
-            MetadataResponse::Ok => Err(Error::Raft(
-                "unexpected Ok response from advance_epoch".into(),
-            )),
+            MetadataResponse::Ok | MetadataResponse::Lease(_) => {
+                Err(Error::Raft("unexpected response from advance_epoch".into()))
+            }
         }
     }
-
     /// Commit an extent mapping (P3.4, P3.5).
     ///
     /// Validates the epoch matches the current epoch. Supports optional
@@ -133,10 +135,94 @@ impl MetadataService {
         match resp {
             MetadataResponse::Epoch(e) => Ok(e),
             MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
-            MetadataResponse::Ok => Err(Error::Raft(
-                "unexpected Ok response from commit_extent_mapping".into(),
+            MetadataResponse::Ok | MetadataResponse::Lease(_) => Err(Error::Raft(
+                "unexpected response from commit_extent_mapping".into(),
             )),
         }
+    }
+
+    /// Acquire a volume write lease (P6.1).
+    pub async fn acquire_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<LeaseResponse, Error> {
+        let resp = self
+            .commit(MetadataRequest::Lease(LeaseRequest::Acquire {
+                volume_id,
+                session_id,
+                now_ms,
+                ttl_ms,
+            }))
+            .await?;
+        match resp {
+            MetadataResponse::Lease(lr) => Ok(lr),
+            MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
+            _ => Err(Error::Raft("unexpected response from acquire_lease".into())),
+        }
+    }
+
+    /// Renew a volume write lease (P6.1).
+    pub async fn renew_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Result<LeaseResponse, Error> {
+        let resp = self
+            .commit(MetadataRequest::Lease(LeaseRequest::Renew {
+                volume_id,
+                session_id,
+                now_ms,
+                ttl_ms,
+            }))
+            .await?;
+        match resp {
+            MetadataResponse::Lease(lr) => Ok(lr),
+            MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
+            _ => Err(Error::Raft("unexpected response from renew_lease".into())),
+        }
+    }
+
+    /// Release a volume write lease (P6.1).
+    pub async fn release_lease(
+        &self,
+        volume_id: VolumeId,
+        session_id: SessionId,
+    ) -> Result<LeaseResponse, Error> {
+        let resp = self
+            .commit(MetadataRequest::Lease(LeaseRequest::Release {
+                volume_id,
+                session_id,
+            }))
+            .await?;
+        match resp {
+            MetadataResponse::Lease(lr) => Ok(lr),
+            MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
+            _ => Err(Error::Raft("unexpected response from release_lease".into())),
+        }
+    }
+
+    /// Get the current lease for a volume (local read, no Raft round-trip).
+    pub fn get_lease(&self, volume_id: &VolumeId) -> Option<VolumeLease> {
+        self.sm.data().get_lease(volume_id).cloned()
+    }
+
+    /// Validate a write lease for fencing (P6.2, local read).
+    pub fn validate_lease(
+        &self,
+        volume_id: &VolumeId,
+        session_id: SessionId,
+        lease_version: LeaseVersion,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.sm
+            .data()
+            .validate_lease(volume_id, session_id, lease_version, now_ms)
+            .map_err(Error::Auth)
     }
 
     /// Query committed state by operation ID (P3.6).
@@ -182,7 +268,7 @@ impl MetadataService {
 
 fn check_response(resp: MetadataResponse) -> Result<(), Error> {
     match resp {
-        MetadataResponse::Ok | MetadataResponse::Epoch(_) => Ok(()),
+        MetadataResponse::Ok | MetadataResponse::Epoch(_) | MetadataResponse::Lease(_) => Ok(()),
         MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
     }
 }

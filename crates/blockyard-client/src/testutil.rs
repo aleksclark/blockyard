@@ -9,9 +9,7 @@ use parking_lot::Mutex;
 
 use crate::error::ReadError;
 use crate::traits::{DataNodeReader, HealthReporter, MetadataProvider};
-use crate::types::{
-    CorruptionReport, DataNodeReadResult, ExtentMapping, ReadFailureReport,
-};
+use crate::types::{CorruptionReport, DataNodeReadResult, ExtentMapping, ReadFailureReport};
 
 /// Defines how a mock data node responds to reads.
 #[derive(Debug, Clone)]

@@ -13,9 +13,7 @@ use tracing::{debug, warn};
 use crate::ec::{EcError, ErasureCodec, Fragment};
 use crate::error::ReadError;
 use crate::traits::{DataNodeReader, HealthReporter, MetadataProvider, ReplicaSelector};
-use crate::types::{
-    ExtentMapping, ReadFailureReport, ReadRequest, ReadResult, ReplicaLocation,
-};
+use crate::types::{ExtentMapping, ReadFailureReport, ReadRequest, ReadResult, ReplicaLocation};
 /// Describes the EC fragment placement for an extent.
 #[derive(Debug, Clone)]
 pub struct FragmentPlacement {
@@ -55,13 +53,7 @@ where
     H: HealthReporter,
     S: ReplicaSelector,
 {
-    pub fn new(
-        metadata: M,
-        data_reader: D,
-        health: H,
-        selector: S,
-        session_id: SessionId,
-    ) -> Self {
+    pub fn new(metadata: M, data_reader: D, health: H, selector: S, session_id: SessionId) -> Self {
         Self {
             metadata,
             data_reader,
@@ -126,24 +118,18 @@ where
         let codec = ErasureCodec::new(ec_mapping.data_count, ec_mapping.parity_count)
             .map_err(|e| ReadError::InvalidRequest(format!("invalid EC parameters: {}", e)))?;
 
-        let fragments = self
-            .read_fragments(request, ec_mapping, &codec)
-            .await?;
+        let fragments = self.read_fragments(request, ec_mapping, &codec).await?;
 
         let original_len = ec_mapping.original_data_len;
-        let decoded = tokio::task::spawn_blocking(move || {
-            codec.decode(fragments, original_len)
-        })
-        .await
-        .map_err(|e| ReadError::InvalidRequest(format!("decode task failed: {}", e)))?
-        .map_err(|e| match e {
-            EcError::InsufficientFragments { .. } => {
-                ReadError::AllReplicasFailed {
+        let decoded = tokio::task::spawn_blocking(move || codec.decode(fragments, original_len))
+            .await
+            .map_err(|e| ReadError::InvalidRequest(format!("decode task failed: {}", e)))?
+            .map_err(|e| match e {
+                EcError::InsufficientFragments { .. } => ReadError::AllReplicasFailed {
                     extent_id: request.extent_id,
-                }
-            }
-            other => ReadError::InvalidRequest(format!("EC decode failed: {}", other)),
-        })?;
+                },
+                other => ReadError::InvalidRequest(format!("EC decode failed: {}", other)),
+            })?;
 
         if compute_checksum(&decoded) != ec_mapping.base.checksum {
             return Err(ReadError::AllReplicasCorrupt {
@@ -227,7 +213,10 @@ where
                         .report_read_failure(ReadFailureReport {
                             node_id: placement.node_id,
                             extent_id: request.extent_id,
-                            reason: format!("EC fragment {} read failed: {}", placement.fragment_index, e),
+                            reason: format!(
+                                "EC fragment {} read failed: {}",
+                                placement.fragment_index, e
+                            ),
                         })
                         .await;
 
@@ -282,7 +271,8 @@ where
         sort_by_order(&mut data_placements);
         sort_by_order(&mut parity_placements);
 
-        let mut result: Vec<FragmentPlacement> = Vec::with_capacity(data_placements.len() + parity_placements.len());
+        let mut result: Vec<FragmentPlacement> =
+            Vec::with_capacity(data_placements.len() + parity_placements.len());
         for p in data_placements {
             result.push(p.clone());
         }

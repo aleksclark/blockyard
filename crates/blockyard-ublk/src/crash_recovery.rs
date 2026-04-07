@@ -149,10 +149,7 @@ impl<M: MetadataClient> CrashRecoveryResolver<M> {
     /// Called after individual operation resolution to bring the cache
     /// up to date with the full cluster state.
     pub async fn refresh_full_state(&self) -> Result<EpochId, Error> {
-        let new_epoch = self
-            .metadata_client
-            .refresh_metadata(&self.cache)
-            .await?;
+        let new_epoch = self.metadata_client.refresh_metadata(&self.cache).await?;
         self.watermark.advance(new_epoch);
         Ok(new_epoch)
     }
@@ -182,9 +179,7 @@ mod tests {
         }
 
         fn add_committed(&self, op_id: OperationId, mapping: CommittedMapping) {
-            self.committed
-                .lock()
-                .insert(op_id.to_string(), mapping);
+            self.committed.lock().insert(op_id.to_string(), mapping);
         }
     }
 
@@ -211,6 +206,38 @@ mod tests {
 
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.epoch)
+        }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
         }
     }
 
@@ -359,7 +386,13 @@ mod tests {
         );
 
         let resolver = CrashRecoveryResolver::new(meta, cache, wm);
-        assert!(resolver.verify_operation_committed(&op).await.unwrap().is_some());
+        assert!(
+            resolver
+                .verify_operation_committed(&op)
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -371,7 +404,13 @@ mod tests {
 
         let resolver = CrashRecoveryResolver::new(meta, cache, wm);
         let op = OperationId::generate();
-        assert!(resolver.verify_operation_committed(&op).await.unwrap().is_none());
+        assert!(
+            resolver
+                .verify_operation_committed(&op)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

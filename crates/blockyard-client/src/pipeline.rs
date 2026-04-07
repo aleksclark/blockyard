@@ -19,9 +19,7 @@ use tracing::{debug, warn};
 
 use crate::error::ReadError;
 use crate::traits::{DataNodeReader, HealthReporter, MetadataProvider, ReplicaSelector};
-use crate::types::{
-    CorruptionReport, ExtentMapping, ReadFailureReport, ReadRequest, ReadResult,
-};
+use crate::types::{CorruptionReport, ExtentMapping, ReadFailureReport, ReadRequest, ReadResult};
 
 /// The client read pipeline, generic over its dependencies.
 ///
@@ -261,10 +259,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{
-        MockDataReader, MockHealthReporter, MockMetadata, NodeBehavior,
-    };
     use crate::selector::LatencyAwareSelector;
+    use crate::testutil::{MockDataReader, MockHealthReporter, MockMetadata, NodeBehavior};
     use crate::types::ReplicaLocation;
     use blockyard_common::{EpochId, ExtentId, SessionId, VolumeId};
     use bytes::Bytes;
@@ -326,11 +322,13 @@ mod tests {
             .with_mapping(vol, ext, m.clone())
             .with_watermark(0);
 
-        let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
+        let reader = MockDataReader::new().with_node_behavior(
+            node_id(1),
+            NodeBehavior::Success {
                 checksum: "abc123".into(),
                 data: Bytes::from_static(b"hello"),
-            });
+            },
+        );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline
@@ -404,11 +402,13 @@ mod tests {
             .with_refreshed_mapping(vol, ext, fresh)
             .with_watermark(5);
 
-        let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
+        let reader = MockDataReader::new().with_node_behavior(
+            node_id(1),
+            NodeBehavior::Success {
                 checksum: "abc123".into(),
                 data: Bytes::from_static(b"data"),
-            });
+            },
+        );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline
@@ -436,11 +436,13 @@ mod tests {
             .with_refreshed_mapping(vol, ext, still_stale)
             .with_watermark(5);
 
-        let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
+        let reader = MockDataReader::new().with_node_behavior(
+            node_id(1),
+            NodeBehavior::Success {
                 checksum: "abc123".into(),
                 data: Bytes::from_static(b"data"),
-            });
+            },
+        );
 
         let pipeline = make_pipeline(meta, reader);
         let err = pipeline
@@ -468,10 +470,13 @@ mod tests {
 
         let reader = MockDataReader::new()
             .with_node_behavior(node_id(1), NodeBehavior::Fail("node down".into()))
-            .with_node_behavior(node_id(2), NodeBehavior::Success {
-                checksum: "abc123".into(),
-                data: Bytes::from_static(b"fallback"),
-            });
+            .with_node_behavior(
+                node_id(2),
+                NodeBehavior::Success {
+                    checksum: "abc123".into(),
+                    data: Bytes::from_static(b"fallback"),
+                },
+            );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline
@@ -527,14 +532,20 @@ mod tests {
             .with_watermark(0);
 
         let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
-                checksum: "CORRUPT".into(),
-                data: Bytes::from_static(b"bad"),
-            })
-            .with_node_behavior(node_id(2), NodeBehavior::Success {
-                checksum: "abc123".into(),
-                data: Bytes::from_static(b"good"),
-            });
+            .with_node_behavior(
+                node_id(1),
+                NodeBehavior::Success {
+                    checksum: "CORRUPT".into(),
+                    data: Bytes::from_static(b"bad"),
+                },
+            )
+            .with_node_behavior(
+                node_id(2),
+                NodeBehavior::Success {
+                    checksum: "abc123".into(),
+                    data: Bytes::from_static(b"good"),
+                },
+            );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline
@@ -562,14 +573,20 @@ mod tests {
             .with_watermark(0);
 
         let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
-                checksum: "BAD1".into(),
-                data: Bytes::from_static(b"corrupt"),
-            })
-            .with_node_behavior(node_id(2), NodeBehavior::Success {
-                checksum: "BAD2".into(),
-                data: Bytes::from_static(b"also_corrupt"),
-            });
+            .with_node_behavior(
+                node_id(1),
+                NodeBehavior::Success {
+                    checksum: "BAD1".into(),
+                    data: Bytes::from_static(b"corrupt"),
+                },
+            )
+            .with_node_behavior(
+                node_id(2),
+                NodeBehavior::Success {
+                    checksum: "BAD2".into(),
+                    data: Bytes::from_static(b"also_corrupt"),
+                },
+            );
 
         let pipeline = make_pipeline(meta, reader);
         let err = pipeline
@@ -596,14 +613,20 @@ mod tests {
             .with_watermark(0);
 
         let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
-                checksum: "BAD".into(),
-                data: Bytes::from_static(b"corrupt"),
-            })
-            .with_node_behavior(node_id(2), NodeBehavior::Success {
-                checksum: "abc123".into(),
-                data: Bytes::from_static(b"good"),
-            });
+            .with_node_behavior(
+                node_id(1),
+                NodeBehavior::Success {
+                    checksum: "BAD".into(),
+                    data: Bytes::from_static(b"corrupt"),
+                },
+            )
+            .with_node_behavior(
+                node_id(2),
+                NodeBehavior::Success {
+                    checksum: "abc123".into(),
+                    data: Bytes::from_static(b"good"),
+                },
+            );
 
         let health = MockHealthReporter::new();
         let pipeline = ReadPipeline::new(
@@ -643,10 +666,13 @@ mod tests {
 
         let reader = MockDataReader::new()
             .with_node_behavior(node_id(1), NodeBehavior::Fail("timeout".into()))
-            .with_node_behavior(node_id(2), NodeBehavior::Success {
-                checksum: "abc123".into(),
-                data: Bytes::from_static(b"ok"),
-            });
+            .with_node_behavior(
+                node_id(2),
+                NodeBehavior::Success {
+                    checksum: "abc123".into(),
+                    data: Bytes::from_static(b"ok"),
+                },
+            );
 
         let health = MockHealthReporter::new();
         let pipeline = ReadPipeline::new(
@@ -714,11 +740,13 @@ mod tests {
             .with_mapping(vol, ext, m)
             .with_watermark(0);
 
-        let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
+        let reader = MockDataReader::new().with_node_behavior(
+            node_id(1),
+            NodeBehavior::Success {
                 checksum: "abc123".into(),
                 data: Bytes::from_static(b"data"),
-            });
+            },
+        );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline
@@ -745,15 +773,21 @@ mod tests {
             .with_watermark(0);
 
         let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
-                checksum: "BAD".into(),
-                data: Bytes::from_static(b"corrupt"),
-            })
+            .with_node_behavior(
+                node_id(1),
+                NodeBehavior::Success {
+                    checksum: "BAD".into(),
+                    data: Bytes::from_static(b"corrupt"),
+                },
+            )
             .with_node_behavior(node_id(2), NodeBehavior::Fail("timeout".into()))
-            .with_node_behavior(node_id(3), NodeBehavior::Success {
-                checksum: "abc123".into(),
-                data: Bytes::from_static(b"good"),
-            });
+            .with_node_behavior(
+                node_id(3),
+                NodeBehavior::Success {
+                    checksum: "abc123".into(),
+                    data: Bytes::from_static(b"good"),
+                },
+            );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline
@@ -805,11 +839,13 @@ mod tests {
             .with_mapping(vol, ext, m)
             .with_watermark(5);
 
-        let reader = MockDataReader::new()
-            .with_node_behavior(node_id(1), NodeBehavior::Success {
+        let reader = MockDataReader::new().with_node_behavior(
+            node_id(1),
+            NodeBehavior::Success {
                 checksum: "abc123".into(),
                 data: Bytes::from_static(b"exact"),
-            });
+            },
+        );
 
         let pipeline = make_pipeline(meta, reader);
         let result = pipeline

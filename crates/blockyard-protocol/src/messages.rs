@@ -4,7 +4,9 @@
 //! data plane operations. Uses JSON serialization initially; a binary format
 //! (protobuf/flatbuffers) is a future optimization.
 
-use blockyard_common::{DiskId, EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
+use blockyard_common::{
+    DiskId, EpochId, ExtentId, LeaseVersion, NodeId, OperationId, SessionId, VolumeId,
+};
 use serde::{Deserialize, Serialize};
 
 /// Protocol version identifier.
@@ -47,6 +49,7 @@ pub struct WriteExtentRequest {
     pub target_disk_id: Option<DiskId>,
     pub checksum: String,
     pub payload_size: u64,
+    pub lease_version: Option<LeaseVersion>,
 }
 
 /// Write extent response from data node.
@@ -173,6 +176,7 @@ mod tests {
             target_disk_id: None,
             checksum: "abc123".into(),
             payload_size: 4096,
+            lease_version: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: WriteExtentRequest = serde_json::from_str(&json).unwrap();
@@ -283,6 +287,7 @@ mod tests {
             target_disk_id: None,
             checksum: "x".into(),
             payload_size: 100,
+            lease_version: None,
         };
         let msg = ProtocolMessage::WriteReq(req);
         let json = serde_json::to_string(&msg).unwrap();

@@ -12,7 +12,10 @@ use tracing::debug;
 #[derive(Debug, Error)]
 pub enum EcError {
     #[error("invalid parameters: K={data_count}, M={parity_count}")]
-    InvalidParameters { data_count: usize, parity_count: usize },
+    InvalidParameters {
+        data_count: usize,
+        parity_count: usize,
+    },
 
     #[error("encoding failed: {0}")]
     EncodeFailed(String),
@@ -54,12 +57,11 @@ impl ErasureCodec {
             });
         }
 
-        let rs = ReedSolomon::new(data_count, parity_count).map_err(|_| {
-            EcError::InvalidParameters {
+        let rs =
+            ReedSolomon::new(data_count, parity_count).map_err(|_| EcError::InvalidParameters {
                 data_count,
                 parity_count,
-            }
-        })?;
+            })?;
 
         Ok(Self {
             data_count,
@@ -392,7 +394,13 @@ mod tests {
         opt_frags[2] = None;
 
         let err = codec.decode(opt_frags, data.len()).unwrap_err();
-        assert!(matches!(err, EcError::InsufficientFragments { available: 3, required: 4 }));
+        assert!(matches!(
+            err,
+            EcError::InsufficientFragments {
+                available: 3,
+                required: 4
+            }
+        ));
     }
 
     #[test]

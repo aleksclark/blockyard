@@ -145,6 +145,38 @@ mod tests {
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.new_epoch)
         }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
+        }
     }
 
     #[test]

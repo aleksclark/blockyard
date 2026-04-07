@@ -72,9 +72,7 @@ impl QuorumHealthMonitor {
         let status = *self.status.read();
         match status {
             QuorumStatus::Healthy | QuorumStatus::Degraded => true,
-            QuorumStatus::Unavailable => {
-                self.read_policy == QuorumLossReadPolicy::AllowCachedReads
-            }
+            QuorumStatus::Unavailable => self.read_policy == QuorumLossReadPolicy::AllowCachedReads,
         }
     }
 
@@ -183,17 +181,14 @@ impl QuorumHealthMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blockyard_common::error::Error;
-    use blockyard_common::EpochId;
     use crate::metadata_cache::MetadataCache;
     use crate::watermark::WriteWatermark;
+    use blockyard_common::EpochId;
+    use blockyard_common::error::Error;
 
     struct HealthyMetadata;
     impl crate::traits::MetadataClient for HealthyMetadata {
-        async fn refresh_metadata(
-            &self,
-            _cache: &MetadataCache,
-        ) -> Result<EpochId, Error> {
+        async fn refresh_metadata(&self, _cache: &MetadataCache) -> Result<EpochId, Error> {
             Ok(EpochId::new(1))
         }
         async fn commit_extent_mapping(
@@ -211,14 +206,43 @@ mod tests {
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(EpochId::new(1))
         }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
+        }
     }
 
     struct UnhealthyMetadata;
     impl crate::traits::MetadataClient for UnhealthyMetadata {
-        async fn refresh_metadata(
-            &self,
-            _cache: &MetadataCache,
-        ) -> Result<EpochId, Error> {
+        async fn refresh_metadata(&self, _cache: &MetadataCache) -> Result<EpochId, Error> {
             Err(Error::Raft("no quorum".into()))
         }
         async fn commit_extent_mapping(
@@ -235,6 +259,38 @@ mod tests {
         }
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Err(Error::Raft("no quorum".into()))
+        }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
         }
     }
 
@@ -285,8 +341,8 @@ mod tests {
 
     #[test]
     fn test_reads_blocked_when_policy_blocks() {
-        let m = QuorumHealthMonitor::new(QuorumLossReadPolicy::BlockAllReads)
-            .with_failure_threshold(1);
+        let m =
+            QuorumHealthMonitor::new(QuorumLossReadPolicy::BlockAllReads).with_failure_threshold(1);
         m.record_failure();
         assert!(!m.reads_allowed());
     }
@@ -329,8 +385,8 @@ mod tests {
 
     #[test]
     fn test_check_read_allowed_block_policy_unavailable() {
-        let m = QuorumHealthMonitor::new(QuorumLossReadPolicy::BlockAllReads)
-            .with_failure_threshold(1);
+        let m =
+            QuorumHealthMonitor::new(QuorumLossReadPolicy::BlockAllReads).with_failure_threshold(1);
         m.record_failure();
 
         let wm = WriteWatermark::new();

@@ -7,7 +7,10 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+use blockyard_common::{
+    EpochId, ExtentId, LeaseRequest, LeaseResponse, LeaseVersion, NodeId, OperationId,
+    ProtectionPolicy, SessionId, VolumeId, VolumeLease,
+};
 
 use crate::request::MetadataRequest;
 use crate::response::MetadataResponse;
@@ -76,6 +79,12 @@ pub struct MetadataStateMachineData {
 
     /// Placement map: arbitrary string key → ordered list of nodes.
     pub placement_map: BTreeMap<String, Vec<NodeId>>,
+
+    /// Volume write leases keyed by VolumeId string (P6.1).
+    pub leases: BTreeMap<String, VolumeLease>,
+
+    /// Global monotonically increasing lease version counter (P6.1).
+    pub lease_version_counter: LeaseVersion,
 }
 
 impl Default for MetadataStateMachineData {
@@ -90,6 +99,8 @@ impl Default for MetadataStateMachineData {
             operation_index: BTreeMap::new(),
             extent_version_index: BTreeMap::new(),
             placement_map: BTreeMap::new(),
+            leases: BTreeMap::new(),
+            lease_version_counter: 0,
         }
     }
 }
@@ -163,6 +174,7 @@ impl MetadataStateMachineData {
                         self.extent_version_index.remove(&mapping.extent_version);
                     }
                 }
+                self.leases.remove(&key);
                 MetadataResponse::ok()
             }
 
@@ -251,6 +263,10 @@ impl MetadataStateMachineData {
                 }
                 MetadataResponse::ok()
             }
+
+            MetadataRequest::Lease(lease_req) => {
+                MetadataResponse::Lease(self.apply_lease_request(lease_req))
+            }
         }
     }
 
@@ -298,6 +314,162 @@ impl MetadataStateMachineData {
     /// Get the current placement epoch (P3.3).
     pub fn current_epoch(&self) -> EpochId {
         self.epoch
+    }
+
+    /// Apply a lease request to the state machine (P6.1).
+    fn apply_lease_request(&mut self, req: &LeaseRequest) -> LeaseResponse {
+        match req {
+            LeaseRequest::Acquire {
+                volume_id,
+                session_id,
+                now_ms,
+                ttl_ms,
+            } => {
+                let key = volume_id.to_string();
+
+                if !self.volumes.contains_key(&key) {
+                    return LeaseResponse::Denied {
+                        reason: format!("volume {volume_id} not found"),
+                    };
+                }
+
+                if let Some(existing) = self.leases.get(&key) {
+                    if !existing.is_expired(*now_ms) && !existing.is_held_by(*session_id) {
+                        return LeaseResponse::Denied {
+                            reason: format!(
+                                "volume {volume_id} lease held by session {}",
+                                existing.holder
+                            ),
+                        };
+                    }
+                }
+
+                self.lease_version_counter += 1;
+                let lease = VolumeLease {
+                    volume_id: *volume_id,
+                    holder: *session_id,
+                    granted_at_ms: *now_ms,
+                    expires_at_ms: now_ms + ttl_ms,
+                    lease_version: self.lease_version_counter,
+                };
+                let version = lease.lease_version;
+                let expires = lease.expires_at_ms;
+                self.leases.insert(key, lease);
+
+                LeaseResponse::Granted {
+                    lease_version: version,
+                    expires_at_ms: expires,
+                }
+            }
+
+            LeaseRequest::Renew {
+                volume_id,
+                session_id,
+                now_ms,
+                ttl_ms,
+            } => {
+                let key = volume_id.to_string();
+
+                let existing = match self.leases.get(&key) {
+                    Some(l) => l,
+                    None => {
+                        return LeaseResponse::Denied {
+                            reason: format!("no lease exists for volume {volume_id}"),
+                        };
+                    }
+                };
+
+                if !existing.is_held_by(*session_id) {
+                    return LeaseResponse::Denied {
+                        reason: format!(
+                            "lease for volume {volume_id} held by different session {}",
+                            existing.holder
+                        ),
+                    };
+                }
+
+                if existing.is_expired(*now_ms) {
+                    return LeaseResponse::Denied {
+                        reason: format!(
+                            "lease for volume {volume_id} has expired, must re-acquire"
+                        ),
+                    };
+                }
+
+                self.lease_version_counter += 1;
+                let lease = self.leases.get_mut(&key).expect("lease must exist");
+                lease.expires_at_ms = now_ms + ttl_ms;
+                lease.lease_version = self.lease_version_counter;
+
+                LeaseResponse::Renewed {
+                    lease_version: lease.lease_version,
+                    expires_at_ms: lease.expires_at_ms,
+                }
+            }
+
+            LeaseRequest::Release {
+                volume_id,
+                session_id,
+            } => {
+                let key = volume_id.to_string();
+
+                match self.leases.get(&key) {
+                    Some(existing) if existing.is_held_by(*session_id) => {
+                        self.leases.remove(&key);
+                        LeaseResponse::Released
+                    }
+                    Some(_) => LeaseResponse::Denied {
+                        reason: format!(
+                            "cannot release lease for volume {volume_id}: held by different session"
+                        ),
+                    },
+                    None => LeaseResponse::Released,
+                }
+            }
+        }
+    }
+
+    /// Get the active lease for a volume, if any.
+    pub fn get_lease(&self, volume_id: &VolumeId) -> Option<&VolumeLease> {
+        self.leases.get(&volume_id.to_string())
+    }
+
+    /// Validate a lease version for write fencing (P6.2).
+    ///
+    /// Returns `true` if the given session holds a valid, non-expired lease
+    /// with matching version for the given volume.
+    pub fn validate_lease(
+        &self,
+        volume_id: &VolumeId,
+        session_id: SessionId,
+        lease_version: LeaseVersion,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let key = volume_id.to_string();
+        let lease = self
+            .leases
+            .get(&key)
+            .ok_or_else(|| format!("no lease for volume {volume_id}"))?;
+
+        if !lease.is_held_by(session_id) {
+            return Err(format!(
+                "lease for volume {volume_id} held by session {}, not {session_id}",
+                lease.holder
+            ));
+        }
+
+        if lease.is_expired(now_ms) {
+            return Err(format!("lease for volume {volume_id} has expired"));
+        }
+
+        if lease.lease_version != lease_version {
+            return Err(format!(
+                "stale lease version: request has {lease_version}, current is {}",
+                lease.lease_version
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -1020,5 +1192,510 @@ mod tests {
         assert_eq!(mappings.len(), 2);
         assert_eq!(mappings.get(&0).unwrap().extent_id, eid1);
         assert_eq!(mappings.get(&64).unwrap().extent_id, eid2);
+    }
+
+    fn make_session_id() -> SessionId {
+        SessionId::generate()
+    }
+
+    fn create_volume(sm: &mut MetadataStateMachineData, vid: VolumeId) {
+        sm.apply_request(&MetadataRequest::CreateVolume {
+            volume_id: vid,
+            size_bytes: 1024,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+        });
+    }
+
+    #[test]
+    fn test_acquire_lease_success() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Granted {
+                lease_version,
+                expires_at_ms,
+            }) => {
+                assert_eq!(lease_version, 1);
+                assert_eq!(expires_at_ms, 31_000);
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+
+        let lease = sm.get_lease(&vid).unwrap();
+        assert!(lease.is_held_by(sid));
+        assert!(!lease.is_expired(1000));
+    }
+
+    #[test]
+    fn test_acquire_lease_volume_not_found() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Denied { reason }) => {
+                assert!(reason.contains("not found"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_acquire_lease_already_held() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid2,
+            now_ms: 2000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Denied { reason }) => {
+                assert!(reason.contains("held by session"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_acquire_lease_after_expiry() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid2,
+            now_ms: 31_000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Granted { lease_version, .. }) => {
+                assert_eq!(lease_version, 2);
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+
+        let lease = sm.get_lease(&vid).unwrap();
+        assert!(lease.is_held_by(sid2));
+    }
+
+    #[test]
+    fn test_acquire_lease_same_session_reacquire() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 5000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Granted { lease_version, .. }) => {
+                assert_eq!(lease_version, 2);
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_renew_lease_success() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Renew {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 15_000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Renewed {
+                lease_version,
+                expires_at_ms,
+            }) => {
+                assert_eq!(lease_version, 2);
+                assert_eq!(expires_at_ms, 45_000);
+            }
+            other => panic!("expected Renewed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_renew_lease_no_lease_exists() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Renew {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Denied { reason }) => {
+                assert!(reason.contains("no lease exists"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_renew_lease_wrong_session() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Renew {
+            volume_id: vid,
+            session_id: sid2,
+            now_ms: 5000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Denied { reason }) => {
+                assert!(reason.contains("different session"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_renew_lease_expired() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Renew {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 50_000,
+            ttl_ms: 30_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Denied { reason }) => {
+                assert!(reason.contains("expired"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_release_lease_success() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Release {
+            volume_id: vid,
+            session_id: sid,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Released) => {}
+            other => panic!("expected Released, got {other:?}"),
+        }
+
+        assert!(sm.get_lease(&vid).is_none());
+    }
+
+    #[test]
+    fn test_release_lease_wrong_session() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Release {
+            volume_id: vid,
+            session_id: sid2,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Denied { reason }) => {
+                assert!(reason.contains("different session"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+
+        assert!(sm.get_lease(&vid).is_some());
+    }
+
+    #[test]
+    fn test_release_lease_no_lease() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Release {
+            volume_id: vid,
+            session_id: sid,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Released) => {}
+            other => panic!("expected Released, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_lease_success() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        assert!(sm.validate_lease(&vid, sid, 1, 5000).is_ok());
+    }
+
+    #[test]
+    fn test_validate_lease_no_lease() {
+        let sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        let result = sm.validate_lease(&vid, sid, 1, 1000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no lease"));
+    }
+
+    #[test]
+    fn test_validate_lease_wrong_session() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let result = sm.validate_lease(&vid, sid2, 1, 5000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("held by session"));
+    }
+
+    #[test]
+    fn test_validate_lease_expired() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let result = sm.validate_lease(&vid, sid, 1, 50_000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expired"));
+    }
+
+    #[test]
+    fn test_validate_lease_stale_version() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Renew {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 10_000,
+            ttl_ms: 30_000,
+        }));
+
+        let result = sm.validate_lease(&vid, sid, 1, 15_000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("stale lease version"));
+    }
+
+    #[test]
+    fn test_lease_version_monotonic() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        let mut versions = Vec::new();
+        for i in 0..5 {
+            let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+                volume_id: vid,
+                session_id: sid,
+                now_ms: i * 50_000,
+                ttl_ms: 30_000,
+            }));
+            match resp {
+                MetadataResponse::Lease(LeaseResponse::Granted { lease_version, .. }) => {
+                    versions.push(lease_version);
+                }
+                other => panic!("expected Granted, got {other:?}"),
+            }
+        }
+
+        for window in versions.windows(2) {
+            assert!(
+                window[1] > window[0],
+                "versions must be strictly increasing"
+            );
+        }
+    }
+
+    #[test]
+    fn test_delete_volume_cleans_up_lease() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        assert!(sm.get_lease(&vid).is_some());
+        sm.apply_request(&MetadataRequest::DeleteVolume { volume_id: vid });
+        assert!(sm.get_lease(&vid).is_none());
+    }
+
+    #[test]
+    fn test_lease_serde_roundtrip_in_state_machine() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let json = serde_json::to_string(&sm).unwrap();
+        let restored: MetadataStateMachineData = serde_json::from_str(&json).unwrap();
+        let lease = restored.get_lease(&vid).unwrap();
+        assert!(lease.is_held_by(sid));
+        assert_eq!(lease.lease_version, 1);
     }
 }

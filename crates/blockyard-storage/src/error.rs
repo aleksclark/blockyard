@@ -46,6 +46,9 @@ pub enum StorageError {
 
     #[error("duplicate operation: {0}")]
     DuplicateOperation(String),
+
+    #[error("invalid lease: {0}")]
+    InvalidLease(String),
 }
 
 impl From<StorageError> for blockyard_common::Error {
@@ -161,5 +164,18 @@ mod tests {
         let err = StorageError::AllocationDenied("test".into());
         let debug = format!("{:?}", err);
         assert!(debug.contains("AllocationDenied"));
+    }
+
+    #[test]
+    fn test_invalid_lease_display() {
+        let err = StorageError::InvalidLease("stale version".into());
+        assert_eq!(err.to_string(), "invalid lease: stale version");
+    }
+
+    #[test]
+    fn test_invalid_lease_into_common_error() {
+        let err = StorageError::InvalidLease("expired".into());
+        let common: blockyard_common::Error = err.into();
+        assert!(common.to_string().contains("invalid lease"));
     }
 }

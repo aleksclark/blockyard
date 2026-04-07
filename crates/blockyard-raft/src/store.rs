@@ -212,7 +212,8 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             (data.last_applied, data.last_membership.clone(), json)
         };
 
-        self.snapshot_idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.snapshot_idx
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let idx = self.snapshot_idx.load(std::sync::atomic::Ordering::Relaxed);
         let snapshot_id = if let Some(last) = last_applied {
             format!("{}-{}-{}", last.leader_id, last.index, idx)

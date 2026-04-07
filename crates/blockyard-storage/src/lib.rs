@@ -22,9 +22,7 @@ pub use extent::{
     ExtentIndex, ExtentMeta, ExtentStore, ExtentVersion, LocalExtentEntry, RecoveryReport,
     StorageClass,
 };
-pub use failure::{
-    DedupCheckResult, DiskFailureReport, DiskRecoveryDetail, NodeRecoveryReport,
-};
+pub use failure::{DedupCheckResult, DiskFailureReport, DiskRecoveryDetail, NodeRecoveryReport};
 pub use health::{DiskHealthTracker, DiskTelemetry, HealthPolicy};
 pub use region::{BadRegion, BadRegionMap};
-pub use service::{DataNodeService, OperationRecord};
+pub use service::{CachedLease, DataNodeService, OperationRecord};

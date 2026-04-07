@@ -9,6 +9,7 @@ pub mod config;
 pub mod disk_state;
 pub mod error;
 pub mod id;
+pub mod lease;
 pub mod protection;
 
 pub use config::{
@@ -18,4 +19,5 @@ pub use config::{
 pub use disk_state::DiskState;
 pub use error::Error;
 pub use id::{DiskId, EpochId, ExtentId, NodeId, OperationId, RaftGroupId, SessionId, VolumeId};
+pub use lease::{DEFAULT_LEASE_TTL, LeaseRequest, LeaseResponse, LeaseVersion, VolumeLease};
 pub use protection::ProtectionPolicy;

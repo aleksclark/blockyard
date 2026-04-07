@@ -23,10 +23,7 @@ use crate::watermark::WriteWatermark;
 /// Result of resolving an ambiguous write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AmbiguousWriteOutcome {
-    Committed {
-        epoch: EpochId,
-        extent_version: u64,
-    },
+    Committed { epoch: EpochId, extent_version: u64 },
     NotCommitted,
 }
 
@@ -71,11 +68,7 @@ impl<M: MetadataClient> AmbiguousWriteResolver<M> {
             "resolving ambiguous write"
         );
 
-        match self
-            .metadata_client
-            .lookup_operation(&operation_id)
-            .await?
-        {
+        match self.metadata_client.lookup_operation(&operation_id).await? {
             Some(mapping) => {
                 info!(
                     operation_id = %operation_id,
@@ -168,9 +161,7 @@ mod tests {
         }
 
         fn add_committed(&self, op_id: OperationId, mapping: CommittedMapping) {
-            self.committed
-                .lock()
-                .insert(op_id.to_string(), mapping);
+            self.committed.lock().insert(op_id.to_string(), mapping);
         }
     }
 
@@ -198,9 +189,48 @@ mod tests {
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.epoch)
         }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
+        }
     }
 
-    fn setup(vid: VolumeId, epoch: u64) -> (Arc<MockAmbiguousMetadata>, Arc<MetadataCache>, Arc<WriteWatermark>) {
+    fn setup(
+        vid: VolumeId,
+        epoch: u64,
+    ) -> (
+        Arc<MockAmbiguousMetadata>,
+        Arc<MetadataCache>,
+        Arc<WriteWatermark>,
+    ) {
         let cache = MetadataCache::new();
         cache.set_volume(CachedVolumeInfo {
             volume_id: vid,
@@ -292,15 +322,18 @@ mod tests {
         );
 
         let resolver = AmbiguousWriteResolver::new(meta, cache, wm);
-        let results = resolver
-            .resolve_batch(vid, &[op1, op2, op3])
-            .await
-            .unwrap();
+        let results = resolver.resolve_batch(vid, &[op1, op2, op3]).await.unwrap();
 
         assert_eq!(results.len(), 3);
-        assert!(matches!(results[0].1, AmbiguousWriteOutcome::Committed { .. }));
+        assert!(matches!(
+            results[0].1,
+            AmbiguousWriteOutcome::Committed { .. }
+        ));
         assert_eq!(results[1].1, AmbiguousWriteOutcome::NotCommitted);
-        assert!(matches!(results[2].1, AmbiguousWriteOutcome::Committed { .. }));
+        assert!(matches!(
+            results[2].1,
+            AmbiguousWriteOutcome::Committed { .. }
+        ));
     }
 
     #[tokio::test]

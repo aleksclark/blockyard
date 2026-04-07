@@ -250,14 +250,9 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
         match protection {
             ProtectionPolicy::Replicated { replicas } => {
                 let total = *replicas as usize;
-                let available: Vec<NodeId> =
-                    nodes.iter().take(total).map(|n| n.node_id).collect();
+                let available: Vec<NodeId> = nodes.iter().take(total).map(|n| n.node_id).collect();
                 // Allow majority acks: ceil((replicas+1)/2) when replicas > 1.
-                let required = if total > 1 {
-                    (total / 2) + 1
-                } else {
-                    total
-                };
+                let required = if total > 1 { (total / 2) + 1 } else { total };
                 Ok((required, available))
             }
             ProtectionPolicy::ErasureCoded {
@@ -464,6 +459,38 @@ mod tests {
 
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.commit_epoch)
+        }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
         }
     }
 
@@ -943,10 +970,7 @@ mod tests {
         };
         let result = pipeline.execute(req).await.unwrap();
         // With majority acks (2/3 required), 2 successful acks is now sufficient
-        assert!(matches!(
-            result,
-            WriteOutcome::Committed { .. }
-        ));
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
     }
 
     #[tokio::test]

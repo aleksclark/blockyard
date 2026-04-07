@@ -133,8 +133,8 @@ Implement the failure condition requirements from §6 that aren't covered by the
 
 ## Phase 6 — Ownership, Fencing & Security
 
-- [ ] **P6.1** Volume ownership / exclusive write lease acquisition and renewal — §4.8
-- [ ] **P6.2** Fencing: reject writes from clients with expired/revoked leases — §4.8, §8
+- [x] **P6.1** Volume ownership / exclusive write lease acquisition and renewal — §4.8
+- [x] **P6.2** Fencing: reject writes from clients with expired/revoked leases — §4.8, §8
 - [ ] **P6.3** Client authentication to cluster — §8
 - [ ] **P6.4** Node-to-node authentication for metadata peers and data replication — §8
 - [ ] **P6.5** Per-volume authorization: validate client is authorized before serving IO — §8
