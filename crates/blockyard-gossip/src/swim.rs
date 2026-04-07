@@ -397,6 +397,7 @@ mod tests {
             capacity_bytes: 1024 * 1024 * 1024,
             used_bytes: 0,
             incarnation: 1,
+            pools: Vec::new(),
         }
     }
 

@@ -51,6 +51,12 @@ impl MemberList {
 
     pub fn mark_state(&self, id: NodeId, state: NodeState) {
         if let Some(node) = self.inner.write().get_mut(&id) {
+            // Don't transition a maintenance node to Suspect or Failed.
+            if node.state == NodeState::Maintenance
+                && (state == NodeState::Suspect || state == NodeState::Failed)
+            {
+                return;
+            }
             let old_state = node.state;
             node.state = state;
             if old_state != state {
@@ -89,6 +95,10 @@ impl MemberList {
             GossipUpdate::NodeSuspect { node, incarnation } => {
                 let mut map = self.inner.write();
                 if let Some(n) = map.get_mut(node) {
+                    // Don't mark maintenance nodes as suspect.
+                    if n.state == NodeState::Maintenance {
+                        return;
+                    }
                     if *incarnation >= n.incarnation && n.state == NodeState::Healthy {
                         n.state = NodeState::Suspect;
                     }
@@ -97,6 +107,10 @@ impl MemberList {
             GossipUpdate::NodeDead { node, incarnation } => {
                 let mut map = self.inner.write();
                 if let Some(n) = map.get_mut(node) {
+                    // Don't mark maintenance nodes as failed.
+                    if n.state == NodeState::Maintenance {
+                        return;
+                    }
                     if *incarnation >= n.incarnation {
                         n.state = NodeState::Failed;
                     }
@@ -143,6 +157,14 @@ impl MemberList {
             .cloned()
             .collect()
     }
+
+    /// Returns `true` if the node with the given ID is in maintenance state.
+    pub fn is_in_maintenance(&self, id: NodeId) -> bool {
+        self.inner
+            .read()
+            .get(&id)
+            .is_some_and(|n| n.state == NodeState::Maintenance)
+    }
 }
 
 impl Default for MemberList {
@@ -168,6 +190,7 @@ mod tests {
             capacity_bytes: 1024 * 1024 * 1024,
             used_bytes: 0,
             incarnation,
+            pools: Vec::new(),
         }
     }
 
@@ -419,5 +442,88 @@ mod tests {
         let updates = ml.drain_pending_updates(100);
         assert_eq!(updates.len(), 1);
         assert!(matches!(updates[0], GossipUpdate::NodeLeft { .. }));
+    }
+
+    // ── Maintenance mode tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_maintenance_node_not_marked_suspect() {
+        let ml = MemberList::new();
+        ml.upsert(make_node(1, 1));
+        ml.mark_state(1, NodeState::Maintenance);
+        assert_eq!(ml.get(1).unwrap().state, NodeState::Maintenance);
+        ml.drain_pending_updates(100);
+
+        // Attempting to mark as suspect should be ignored.
+        ml.mark_state(1, NodeState::Suspect);
+        assert_eq!(ml.get(1).unwrap().state, NodeState::Maintenance);
+        let updates = ml.drain_pending_updates(100);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_maintenance_node_not_marked_failed() {
+        let ml = MemberList::new();
+        ml.upsert(make_node(1, 1));
+        ml.mark_state(1, NodeState::Maintenance);
+        ml.drain_pending_updates(100);
+
+        // Attempting to mark as failed should be ignored.
+        ml.mark_state(1, NodeState::Failed);
+        assert_eq!(ml.get(1).unwrap().state, NodeState::Maintenance);
+        let updates = ml.drain_pending_updates(100);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn test_maintenance_node_gossip_suspect_ignored() {
+        let ml = MemberList::new();
+        ml.upsert(make_node(1, 1));
+        ml.mark_state(1, NodeState::Maintenance);
+
+        // Apply a gossip NodeSuspect update — should be ignored.
+        ml.apply_update(&GossipUpdate::NodeSuspect {
+            node: 1,
+            incarnation: 1,
+        });
+        assert_eq!(ml.get(1).unwrap().state, NodeState::Maintenance);
+    }
+
+    #[test]
+    fn test_maintenance_node_gossip_dead_ignored() {
+        let ml = MemberList::new();
+        ml.upsert(make_node(1, 1));
+        ml.mark_state(1, NodeState::Maintenance);
+
+        // Apply a gossip NodeDead update — should be ignored.
+        ml.apply_update(&GossipUpdate::NodeDead {
+            node: 1,
+            incarnation: 1,
+        });
+        assert_eq!(ml.get(1).unwrap().state, NodeState::Maintenance);
+    }
+
+    #[test]
+    fn test_is_in_maintenance() {
+        let ml = MemberList::new();
+        ml.upsert(make_node(1, 1));
+        assert!(!ml.is_in_maintenance(1));
+
+        ml.mark_state(1, NodeState::Maintenance);
+        assert!(ml.is_in_maintenance(1));
+
+        // Non-existent node.
+        assert!(!ml.is_in_maintenance(999));
+    }
+
+    #[test]
+    fn test_maintenance_node_can_leave() {
+        let ml = MemberList::new();
+        ml.upsert(make_node(1, 1));
+        ml.mark_state(1, NodeState::Maintenance);
+
+        // A maintenance node can still be explicitly marked as Left.
+        ml.mark_state(1, NodeState::Left);
+        assert_eq!(ml.get(1).unwrap().state, NodeState::Left);
     }
 }

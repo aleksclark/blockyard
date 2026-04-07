@@ -9,10 +9,10 @@
 //! compile and fall back to NBD.
 
 use std::io;
-#[cfg(feature = "libublk")]
-use tracing::{debug, info, warn};
 #[cfg(not(feature = "libublk"))]
 use tracing::info;
+#[cfg(feature = "libublk")]
+use tracing::{debug, info, warn};
 
 use crate::uring::UblkDevConfig;
 
@@ -77,8 +77,8 @@ impl UblkControl {
                 config.nr_hw_queues as u32,
                 config.queue_depth as u32,
                 config.max_io_buf_bytes,
-                0,  // flags (kernel ublk flags)
-                0,  // tgt_flags
+                0, // flags (kernel ublk flags)
+                0, // tgt_flags
                 UblkFlags::UBLK_DEV_F_ADD_DEV,
             )
             .map_err(|e| io::Error::other(format!("libublk ADD_DEV: {e}")))?;
@@ -113,7 +113,9 @@ impl UblkControl {
         {
             let _ = (dev_id, _pid);
             // Starting is handled through UblkDeviceHandle::start()
-            warn!("start_device called on UblkControl directly — use UblkDeviceHandle::start() instead");
+            warn!(
+                "start_device called on UblkControl directly — use UblkDeviceHandle::start() instead"
+            );
             Ok(())
         }
 

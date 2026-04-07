@@ -83,6 +83,12 @@ pub enum RaftRequest {
         chunk_index: u32,
         node_id: u64,
     },
+    NodeMaintenance {
+        node_id: u64,
+    },
+    NodeMaintenanceEnd {
+        node_id: u64,
+    },
 }
 
 impl std::fmt::Display for RaftRequest {
@@ -157,6 +163,12 @@ impl std::fmt::Display for RaftRequest {
                     f,
                     "EcChunkWrite({volume_name}, ext={extent_id}, chunk={chunk_index}, node={node_id})"
                 )
+            }
+            Self::NodeMaintenance { node_id } => {
+                write!(f, "NodeMaintenance({node_id})")
+            }
+            Self::NodeMaintenanceEnd { node_id } => {
+                write!(f, "NodeMaintenanceEnd({node_id})")
             }
         }
     }
@@ -340,6 +352,14 @@ mod tests {
                 },
                 "EcChunkWrite(v, ext=10, chunk=3, node=7)",
             ),
+            (
+                RaftRequest::NodeMaintenance { node_id: 42 },
+                "NodeMaintenance(42)",
+            ),
+            (
+                RaftRequest::NodeMaintenanceEnd { node_id: 42 },
+                "NodeMaintenanceEnd(42)",
+            ),
         ];
         for (req, expected) in cases {
             assert_eq!(req.to_string(), expected);
@@ -420,6 +440,8 @@ mod tests {
                 chunk_index: 3,
                 node_id: 7,
             },
+            RaftRequest::NodeMaintenance { node_id: 42 },
+            RaftRequest::NodeMaintenanceEnd { node_id: 42 },
         ];
         for v in &variants {
             let json = serde_json::to_string(v).unwrap();

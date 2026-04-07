@@ -113,7 +113,9 @@ impl UblkIoServer {
             let handle = std::thread::Builder::new()
                 .name(format!("ublk-q{qid}"))
                 .spawn(move || {
-                    if let Err(e) = run_queue_libublk(dev_id, qid, queue_depth, io_buf_size, store, stop) {
+                    if let Err(e) =
+                        run_queue_libublk(dev_id, qid, queue_depth, io_buf_size, store, stop)
+                    {
                         error!(dev_id, queue_id = qid, error = %e, "UBLK queue error");
                     }
                 })?;
@@ -174,9 +176,9 @@ fn run_queue_libublk(
     store: MemBlockStore,
     _stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
-    use libublk::io::{UblkDev, UblkQueue as LibublkQueue, BufDesc, BufDescList};
-    use libublk::ctrl::UblkCtrl;
     use libublk::UblkIORes;
+    use libublk::ctrl::UblkCtrl;
+    use libublk::io::{BufDesc, BufDescList, UblkDev, UblkQueue as LibublkQueue};
 
     // Open a simple control handle to reference the existing device.
     let ctrl = UblkCtrl::new_simple(dev_id as i32)
@@ -184,12 +186,8 @@ fn run_queue_libublk(
 
     // Create the device abstraction (target init is a no-op since the device
     // is already configured).
-    let dev = UblkDev::new(
-        "blockyard".to_string(),
-        |_dev| Ok(()),
-        &ctrl,
-    )
-    .map_err(|e| io::Error::other(format!("libublk dev: {e}")))?;
+    let dev = UblkDev::new("blockyard".to_string(), |_dev| Ok(()), &ctrl)
+        .map_err(|e| io::Error::other(format!("libublk dev: {e}")))?;
 
     // Allocate per-tag I/O buffers.
     let bufs = dev.alloc_queue_io_bufs();

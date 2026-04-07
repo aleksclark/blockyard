@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct UblkServerConfig {
@@ -36,6 +36,7 @@ pub enum UblkServerState {
     Recovering,
 }
 
+#[allow(dead_code)]
 pub struct UblkServer {
     config: UblkServerConfig,
     volume_size: u64,
@@ -145,9 +146,9 @@ impl UblkServer {
 
     #[cfg(feature = "libublk")]
     fn start_libublk(&self, dev_id: u32) -> blockyard_common::Result<PathBuf> {
+        use libublk::UblkFlags;
         use libublk::ctrl::UblkCtrlBuilder;
         use libublk::io::{UblkDev, UblkQueue};
-        use libublk::UblkFlags;
 
         let nr_queues = self.config.num_queues;
         let depth = self.config.queue_depth;
@@ -205,11 +206,7 @@ impl UblkServer {
                             // during the I/O operation. libublk guarantees single-
                             // writer access per tag.
                             unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    data.as_ptr(),
-                                    buf_ptr,
-                                    copy_len,
-                                );
+                                std::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, copy_len);
                             }
                         } else if op == 1 {
                             let buf = bufs[tag as usize].as_slice();
@@ -272,9 +269,8 @@ impl UblkServer {
                 if let Some(id_str) = path.file_name().and_then(|f| f.to_str()) {
                     if let Some(id_num) = id_str.strip_prefix("ublkb") {
                         if let Ok(dev_id) = id_num.parse::<i32>() {
-                            if let Ok(ctrl) = libublk::ctrl::UblkCtrlBuilder::default()
-                                .id(dev_id)
-                                .build()
+                            if let Ok(ctrl) =
+                                libublk::ctrl::UblkCtrlBuilder::default().id(dev_id).build()
                             {
                                 let _ = ctrl.kill_dev();
                             }
@@ -292,9 +288,9 @@ impl UblkServer {
     pub async fn recover(&self) -> blockyard_common::Result<PathBuf> {
         self.set_state(UblkServerState::Recovering);
         info!("recovering UBLK device");
-        let dev_path = self.device_path().ok_or_else(|| {
-            blockyard_common::Error::Storage("no device to recover".into())
-        })?;
+        let dev_path = self
+            .device_path()
+            .ok_or_else(|| blockyard_common::Error::Storage("no device to recover".into()))?;
         self.set_state(UblkServerState::Running);
         Ok(dev_path)
     }

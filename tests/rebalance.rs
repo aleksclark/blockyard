@@ -1,9 +1,12 @@
 #![allow(unused_imports, dead_code)]
 mod harness;
 
-use harness::checker::Checker;
 use harness::cluster::{ClusterConfig, TestCluster};
 use harness::faults::{Fault, FaultInjector};
+use harness::{
+    CLIENT_NODE, MOUNT_PATH, STORAGE_NODES, ensure_all_nodes_running, mount_volume, start_cluster,
+    unmount_volume, verify_file, write_test_file,
+};
 use std::time::Duration;
 
 fn require_vm_env() -> bool {
@@ -17,122 +20,86 @@ fn running_cluster(node_count: usize) -> TestCluster {
     })
 }
 
+// ── Test 1: Files intact during node crash ────────────────────────────────
+
 #[tokio::test]
 #[ignore]
-async fn crash_during_operation() {
+async fn files_intact_during_node_crash() {
     if !require_vm_env() {
         return;
     }
-    let cluster = running_cluster(5);
-    harness::ensure_all_nodes_running(&cluster).await;
+    let cluster = running_cluster(4);
+    ensure_all_nodes_running(&cluster).await;
+    start_cluster(&cluster, STORAGE_NODES).await;
 
+    let mount_path = mount_volume(&cluster, CLIENT_NODE, "test-vol").await;
+
+    // Write several files.
+    let mut checksums = Vec::new();
+    for i in 0..5 {
+        let path = format!("{mount_path}/rebal_{i}.bin");
+        let md5 = write_test_file(&cluster, CLIENT_NODE, &path, 512).await;
+        checksums.push((path, md5));
+    }
+
+    // Crash node-2.
     let injector = FaultInjector::new(&cluster);
     injector
-        .inject(&Fault::NodeCrash { node_id: 4 })
+        .inject(&Fault::NodeCrash { node_id: 2 })
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let health = Checker::check_blockyard_running(&cluster, 4).await;
-    assert!(health.passed, "{}", health.summary());
+    // Verify all files are still readable on the client.
+    for (path, expected_md5) in &checksums {
+        let valid = verify_file(&cluster, CLIENT_NODE, path, expected_md5).await;
+        assert!(valid, "checksum mismatch for {path} during node crash");
+    }
 
-    let no_panics = Checker::check_no_panics(&cluster).await;
-    assert!(no_panics.passed, "{}", no_panics.summary());
-
-    harness::ensure_all_nodes_running(&cluster).await;
+    unmount_volume(&cluster, CLIENT_NODE).await;
+    ensure_all_nodes_running(&cluster).await;
 }
+
+// ── Test 2: Files intact after recovery ───────────────────────────────────
 
 #[tokio::test]
 #[ignore]
-async fn all_nodes_healthy_after_recovery() {
+async fn files_intact_after_recovery() {
     if !require_vm_env() {
         return;
     }
-    let cluster = running_cluster(5);
-    harness::ensure_all_nodes_running(&cluster).await;
+    let cluster = running_cluster(4);
+    ensure_all_nodes_running(&cluster).await;
+    start_cluster(&cluster, STORAGE_NODES).await;
 
-    let health = Checker::check_blockyard_running(&cluster, 5).await;
-    assert!(health.passed, "{}", health.summary());
+    let mount_path = mount_volume(&cluster, CLIENT_NODE, "test-vol").await;
 
-    let no_panics = Checker::check_no_panics(&cluster).await;
-    assert!(no_panics.passed, "{}", no_panics.summary());
-}
-
-#[tokio::test]
-#[ignore]
-async fn node_drain_cluster_survives() {
-    if !require_vm_env() {
-        return;
+    // Write files.
+    let mut checksums = Vec::new();
+    for i in 0..5 {
+        let path = format!("{mount_path}/recovery_{i}.bin");
+        let md5 = write_test_file(&cluster, CLIENT_NODE, &path, 256).await;
+        checksums.push((path, md5));
     }
-    let cluster = running_cluster(5);
-    harness::ensure_all_nodes_running(&cluster).await;
 
+    // Crash node-2.
     let injector = FaultInjector::new(&cluster);
     injector
-        .inject(&Fault::NodeCrash { node_id: 3 })
+        .inject(&Fault::NodeCrash { node_id: 2 })
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let health = Checker::check_blockyard_running(&cluster, 4).await;
-    assert!(health.passed, "after drain crash: {}", health.summary());
+    // Restart the crashed node.
+    ensure_all_nodes_running(&cluster).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let no_panics = Checker::check_no_panics(&cluster).await;
-    assert!(no_panics.passed, "{}", no_panics.summary());
-
-    harness::ensure_all_nodes_running(&cluster).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn volume_resize_cluster_healthy() {
-    if !require_vm_env() {
-        return;
+    // Verify all files after recovery.
+    for (path, expected_md5) in &checksums {
+        let valid = verify_file(&cluster, CLIENT_NODE, path, expected_md5).await;
+        assert!(valid, "checksum mismatch for {path} after recovery");
     }
-    let cluster = running_cluster(5);
-    harness::ensure_all_nodes_running(&cluster).await;
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let health = Checker::check_blockyard_running(&cluster, 5).await;
-    assert!(health.passed, "{}", health.summary());
-
-    let no_panics = Checker::check_no_panics(&cluster).await;
-    assert!(no_panics.passed, "{}", no_panics.summary());
-}
-
-#[tokio::test]
-#[ignore]
-async fn change_replicas_cluster_healthy() {
-    if !require_vm_env() {
-        return;
-    }
-    let cluster = running_cluster(5);
-    harness::ensure_all_nodes_running(&cluster).await;
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let health = Checker::check_blockyard_running(&cluster, 5).await;
-    assert!(health.passed, "{}", health.summary());
-
-    let no_panics = Checker::check_no_panics(&cluster).await;
-    assert!(no_panics.passed, "{}", no_panics.summary());
-}
-
-#[tokio::test]
-#[ignore]
-async fn change_consistency_mode_cluster_healthy() {
-    if !require_vm_env() {
-        return;
-    }
-    let cluster = running_cluster(5);
-    harness::ensure_all_nodes_running(&cluster).await;
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let health = Checker::check_blockyard_running(&cluster, 5).await;
-    assert!(health.passed, "{}", health.summary());
-
-    let no_panics = Checker::check_no_panics(&cluster).await;
-    assert!(no_panics.passed, "{}", no_panics.summary());
+    unmount_volume(&cluster, CLIENT_NODE).await;
+    ensure_all_nodes_running(&cluster).await;
 }

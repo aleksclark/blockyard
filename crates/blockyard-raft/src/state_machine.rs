@@ -101,6 +101,8 @@ pub struct NodeRecord {
     pub addr: String,
     #[serde(default)]
     pub drain_state: NodeDrainState,
+    #[serde(default)]
+    pub maintenance: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,7 @@ impl StateMachine {
                         node_id: *node_id,
                         addr: addr.clone(),
                         drain_state: NodeDrainState::Active,
+                        maintenance: false,
                     },
                 );
                 RaftResponse::Ok
@@ -337,6 +340,23 @@ impl StateMachine {
                     RaftResponse::Ok
                 } else {
                     RaftResponse::Error(format!("volume not found: {volume_name}"))
+                }
+            }
+            RaftRequest::NodeMaintenance { node_id } => {
+                if let Some(node) = state.nodes.get_mut(node_id) {
+                    node.maintenance = true;
+                    node.drain_state = NodeDrainState::Active;
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("node not found: {node_id}"))
+                }
+            }
+            RaftRequest::NodeMaintenanceEnd { node_id } => {
+                if let Some(node) = state.nodes.get_mut(node_id) {
+                    node.maintenance = false;
+                    RaftResponse::Ok
+                } else {
+                    RaftResponse::Error(format!("node not found: {node_id}"))
                 }
             }
         }
@@ -1210,5 +1230,107 @@ mod tests {
         );
         let vol = &sm.state().volumes["v"];
         assert!(vol.snapshots.is_empty());
+    }
+
+    // ── Maintenance mode tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_node_maintenance() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
+        let resp = sm.apply(2, &RaftRequest::NodeMaintenance { node_id: 1 });
+        assert_eq!(resp, RaftResponse::Ok);
+        let node = &sm.state().nodes[&1];
+        assert!(node.maintenance);
+        assert_eq!(node.drain_state, NodeDrainState::Active);
+    }
+
+    #[test]
+    fn test_apply_node_maintenance_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(1, &RaftRequest::NodeMaintenance { node_id: 99 });
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_apply_node_maintenance_end() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
+        sm.apply(2, &RaftRequest::NodeMaintenance { node_id: 1 });
+        assert!(sm.state().nodes[&1].maintenance);
+
+        let resp = sm.apply(3, &RaftRequest::NodeMaintenanceEnd { node_id: 1 });
+        assert_eq!(resp, RaftResponse::Ok);
+        assert!(!sm.state().nodes[&1].maintenance);
+    }
+
+    #[test]
+    fn test_apply_node_maintenance_end_not_found() {
+        let sm = StateMachine::new();
+        let resp = sm.apply(1, &RaftRequest::NodeMaintenanceEnd { node_id: 99 });
+        assert!(matches!(resp, RaftResponse::Error(_)));
+    }
+
+    #[test]
+    fn test_maintenance_resets_drain_state() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
+        // Start draining, then enter maintenance — drain_state should reset to Active.
+        sm.apply(2, &RaftRequest::NodeDrain { node_id: 1 });
+        assert_eq!(sm.state().nodes[&1].drain_state, NodeDrainState::Draining);
+
+        sm.apply(3, &RaftRequest::NodeMaintenance { node_id: 1 });
+        assert!(sm.state().nodes[&1].maintenance);
+        assert_eq!(sm.state().nodes[&1].drain_state, NodeDrainState::Active);
+    }
+
+    #[test]
+    fn test_maintenance_survives_snapshot_restore() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
+        sm.apply(2, &RaftRequest::NodeMaintenance { node_id: 1 });
+        assert!(sm.state().nodes[&1].maintenance);
+
+        let snap = sm.snapshot();
+        let sm2 = StateMachine::new();
+        sm2.restore(&snap).unwrap();
+        assert!(sm2.state().nodes[&1].maintenance);
+    }
+
+    #[test]
+    fn test_maintenance_default_false() {
+        let sm = StateMachine::new();
+        sm.apply(
+            1,
+            &RaftRequest::NodeRegister {
+                node_id: 1,
+                addr: "a".into(),
+            },
+        );
+        assert!(!sm.state().nodes[&1].maintenance);
     }
 }

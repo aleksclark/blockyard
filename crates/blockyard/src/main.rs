@@ -109,6 +109,8 @@ enum NodeCommand {
     List,
     Status { name: String },
     Drain { name: String },
+    Maintenance { name: String },
+    MaintenanceEnd { name: String },
 }
 
 #[derive(Subcommand)]
@@ -383,9 +385,10 @@ async fn main() -> anyhow::Result<()> {
                         .find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
                     match node {
                         Some(n) => {
-                            println!("Node:   {}", n.node_id);
-                            println!("Addr:   {}", n.addr);
-                            println!("State:  {}", n.drain_state);
+                            println!("Node:        {}", n.node_id);
+                            println!("Addr:        {}", n.addr);
+                            println!("State:       {}", n.drain_state);
+                            println!("Maintenance: {}", n.maintenance);
                         }
                         None => println!("Node '{name}' not found"),
                     }
@@ -401,6 +404,39 @@ async fn main() -> anyhow::Result<()> {
                             let req = RaftRequest::NodeDrain { node_id: n.node_id };
                             propose(&network, &cli.endpoint, &req).await?;
                             println!("Draining node '{}' (id={})", name, n.node_id);
+                        }
+                        None => println!("Node '{name}' not found"),
+                    }
+                }
+                NodeCommand::Maintenance { name } => {
+                    let state = get_state(&network, &cli.endpoint).await?;
+                    let node = state
+                        .nodes
+                        .values()
+                        .find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
+                    match node {
+                        Some(n) => {
+                            let req = RaftRequest::NodeMaintenance { node_id: n.node_id };
+                            propose(&network, &cli.endpoint, &req).await?;
+                            println!(
+                                "Node '{}' (id={}) entered maintenance mode",
+                                name, n.node_id
+                            );
+                        }
+                        None => println!("Node '{name}' not found"),
+                    }
+                }
+                NodeCommand::MaintenanceEnd { name } => {
+                    let state = get_state(&network, &cli.endpoint).await?;
+                    let node = state
+                        .nodes
+                        .values()
+                        .find(|n| n.addr.contains(&name) || n.node_id.to_string() == name);
+                    match node {
+                        Some(n) => {
+                            let req = RaftRequest::NodeMaintenanceEnd { node_id: n.node_id };
+                            propose(&network, &cli.endpoint, &req).await?;
+                            println!("Node '{}' (id={}) exited maintenance mode", name, n.node_id);
                         }
                         None => println!("Node '{name}' not found"),
                     }
@@ -481,9 +517,7 @@ async fn main() -> anyhow::Result<()> {
 fn parse_ec_spec(spec: &str) -> anyhow::Result<(u32, u32)> {
     let parts: Vec<&str> = spec.split('+').collect();
     if parts.len() != 2 {
-        anyhow::bail!(
-            "invalid erasure-coding spec '{spec}': expected format 'k+m' (e.g., '4+2')"
-        );
+        anyhow::bail!("invalid erasure-coding spec '{spec}': expected format 'k+m' (e.g., '4+2')");
     }
     let k: u32 = parts[0]
         .trim()

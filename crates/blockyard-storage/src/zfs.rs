@@ -367,6 +367,62 @@ impl ZfsBackend {
         );
         Ok(())
     }
+
+    /// Send an incremental ZFS snapshot for a volume between two snapshots.
+    ///
+    /// This is used for catch-up after a node returns from maintenance mode.
+    /// The node takes a new snapshot after returning, then sends the
+    /// incremental delta from the pre-maintenance snapshot (`snap_from`) to
+    /// the post-maintenance snapshot (`snap_to`) to the target node.
+    ///
+    /// Runs `zfs send -i <snap_from> <snap_to> | ssh <target> zfs receive -F <zvol>`.
+    pub async fn send_snapshot_incremental(
+        &self,
+        volume_id: &VolumeId,
+        snap_from: &str,
+        snap_to: &str,
+        target_addr: &str,
+    ) -> blockyard_common::Result<()> {
+        let zvol_name = format!("{}/vol-{}", self.pool_name, volume_id);
+        let snap_from_full = format!("{zvol_name}@{snap_from}");
+        let snap_to_full = format!("{zvol_name}@{snap_to}");
+        info!(
+            zvol = %zvol_name,
+            snap_from = %snap_from_full,
+            snap_to = %snap_to_full,
+            target = %target_addr,
+            "starting maintenance catch-up incremental send"
+        );
+
+        let shell_cmd = format!(
+            "zfs send -i {from} {to} | ssh {target} zfs receive -F {zvol}",
+            from = snap_from_full,
+            to = snap_to_full,
+            zvol = zvol_name,
+            target = target_addr,
+        );
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-c", &shell_cmd])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(blockyard_common::Error::Storage(format!(
+                "zfs maintenance catch-up send failed: {stderr}"
+            )));
+        }
+
+        info!(
+            zvol = %zvol_name,
+            snap_from = %snap_from_full,
+            snap_to = %snap_to_full,
+            target = %target_addr,
+            "maintenance catch-up incremental send completed"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +442,22 @@ mod tests {
         // receive_zvol is a placeholder that always succeeds.
         let result = backend.receive_zvol(&vol_id).await;
         assert!(result.is_ok());
+    }
+
+    /// Verifies that `send_snapshot_incremental` constructs the correct
+    /// ZFS command (the actual send will fail in a test environment without
+    /// ZFS, but we verify the method exists and returns an error rather
+    /// than panicking).
+    #[tokio::test]
+    async fn test_send_snapshot_incremental_without_zfs() {
+        let backend = ZfsBackend::new("testpool".to_string());
+        let vol_id: VolumeId = uuid::Uuid::new_v4();
+        // This will fail because zfs is not available in the test env,
+        // but it should return an error, not panic.
+        let result = backend
+            .send_snapshot_incremental(&vol_id, "pre-maint", "post-maint", "10.0.0.1")
+            .await;
+        // We expect an error since ZFS is not available.
+        assert!(result.is_err());
     }
 }

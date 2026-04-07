@@ -25,10 +25,7 @@ pub struct ReconstructionPlan {
 /// A chunk is considered "missing" if its assigned node appears in
 /// `failed_nodes`.  Reconstruction is possible when the number of available
 /// (non-missing) chunks is >= the number of data shards (k).
-pub fn plan_reconstruction(
-    placement: &EcPlacement,
-    failed_nodes: &[NodeId],
-) -> ReconstructionPlan {
+pub fn plan_reconstruction(placement: &EcPlacement, failed_nodes: &[NodeId]) -> ReconstructionPlan {
     let failed_set: std::collections::HashSet<NodeId> = failed_nodes.iter().copied().collect();
 
     let mut available = Vec::new();

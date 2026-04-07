@@ -12,7 +12,11 @@ metrics_listen = "0.0.0.0:7402"          # Prometheus /metrics endpoint
 seeds = ["10.0.1.1:7400", "10.0.1.2:7400"]
 
 [storage]
-zfs_pool = "blockyard"                   # ZFS pool name to use
+# Single pool (backward compatible):
+# zfs_pool = "blockyard"
+
+# Multiple pools:
+zfs_pools = ["blockyard-ssd", "blockyard-hdd"]
 extent_size = "4MB"                      # Extent size (unit of replication)
 
 [raft]

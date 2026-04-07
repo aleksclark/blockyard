@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-use blockyard_common::types::{NodeId, NodeInfo, NodeState, ZfsHealthState};
+use blockyard_common::types::{NodeId, NodeInfo, NodeState, PoolInfo, ZfsHealthState};
 
 // ---------------------------------------------------------------------------
 // BlockHandler — bridges the protocol server to raft + storage backend
@@ -121,9 +121,10 @@ impl BlockyardNode {
     }
 
     pub async fn start(&mut self) -> blockyard_common::Result<()> {
+        let all_pools = self.config.storage.all_pools();
         info!(
             listen = %self.config.node.listen,
-            pool = %self.config.storage.zfs_pool,
+            pools = ?all_pools,
             node_id = self.node_id,
             "starting blockyard node"
         );
@@ -144,7 +145,34 @@ impl BlockyardNode {
         self.raft.propose(meta_group_id, &register_req)?;
         info!(node_id = self.node_id, "registered local node in raft");
 
-        // 4. Start SWIM gossip
+        // 4. Probe all configured pools and build PoolInfo list
+        let mut pool_infos: Vec<PoolInfo> = Vec::new();
+        let mut total_capacity: u64 = 0;
+        let mut total_used: u64 = 0;
+        let mut any_zfs_available = false;
+
+        for pool_name in &all_pools {
+            let zfs_test = ZfsBackend::new(pool_name.clone());
+            match zfs_test.pool_capacity().await {
+                Ok((cap, used)) if cap > 0 => {
+                    info!(pool = %pool_name, capacity = cap, used = used, "probed ZFS pool");
+                    pool_infos.push(PoolInfo {
+                        name: pool_name.clone(),
+                        capacity_bytes: cap,
+                        used_bytes: used,
+                        health: ZfsHealthState::Online,
+                    });
+                    total_capacity += cap;
+                    total_used += used;
+                    any_zfs_available = true;
+                }
+                _ => {
+                    info!(pool = %pool_name, "ZFS pool not available");
+                }
+            }
+        }
+
+        // 5. Start SWIM gossip
         let transport = UdpTransport::bind(self.config.node.listen).await?;
         let local_info = NodeInfo {
             id: self.node_id,
@@ -154,9 +182,10 @@ impl BlockyardNode {
             tags: self.config.tags.clone(),
             state: NodeState::Healthy,
             zfs_health: ZfsHealthState::Online,
-            capacity_bytes: 0,
-            used_bytes: 0,
+            capacity_bytes: total_capacity,
+            used_bytes: total_used,
             incarnation: 1,
+            pools: pool_infos,
         };
 
         let gossip = SwimGossip::new(
@@ -167,26 +196,22 @@ impl BlockyardNode {
         );
         gossip.start().await?;
 
-        // 5. Create storage backend — use ZFS if pool exists, else MemoryBackend
-        let pool_name = self.config.storage.zfs_pool.clone();
-        let zfs_available = {
-            let zfs_test = ZfsBackend::new(pool_name.clone());
-            matches!(zfs_test.pool_capacity().await, Ok((total, _)) if total > 0)
-        };
-        if zfs_available {
-            info!(pool = %pool_name, "using ZFS storage backend");
+        // 6. Create storage backend — use ZFS if any pool exists, else MemoryBackend
+        let primary_pool = all_pools.first().cloned().unwrap_or_default();
+        if any_zfs_available {
+            info!(pools = ?all_pools, "using ZFS storage backend");
         } else {
-            info!(pool = %pool_name, "ZFS pool not available, using in-memory backend");
+            info!(pools = ?all_pools, "no ZFS pools available, using in-memory backend");
         }
 
-        // 6. Create BlockHandler with in-memory block store (10GB)
+        // 7. Create BlockHandler with in-memory block store (10GB)
         let block_store = Arc::new(MemBlockStore::new(10 * 1024 * 1024 * 1024, 4096));
         let handler = BlockHandler {
             raft: Arc::clone(&self.raft),
             store: block_store,
         };
 
-        // 7. Spawn ProtocolServer on config.node.listen
+        // 8. Spawn ProtocolServer on config.node.listen
         let protocol_listen = self.config.node.listen;
         let protocol_server = ProtocolServer::new(protocol_listen, handler);
         tokio::spawn(async move {
@@ -196,7 +221,7 @@ impl BlockyardNode {
         });
         info!(addr = %protocol_listen, "spawned protocol server");
 
-        // 8. Spawn BlockyardGrpcServer on config.node.data_listen
+        // 9. Spawn BlockyardGrpcServer on config.node.data_listen
         let grpc_server = BlockyardGrpcServer::new(Arc::clone(&self.raft));
         let grpc_listen = self.config.node.data_listen;
         tokio::spawn(async move {
@@ -206,7 +231,7 @@ impl BlockyardNode {
         });
         info!(addr = %grpc_listen, "spawned gRPC server");
 
-        // 9. Create RaftNetwork and spawn peer-sync loop from gossip
+        // 10. Create RaftNetwork and spawn peer-sync loop from gossip
         let raft_network = RaftNetwork::new();
         let members = gossip.members().clone();
         let local_id = self.node_id;
@@ -223,20 +248,24 @@ impl BlockyardNode {
         });
         info!("spawned raft network peer-sync loop");
 
-        // 10. Start health monitor
+        // 11. Start health monitor — check all configured pools
         let hm = self.health_monitor.clone();
-        let pool_for_health = pool_name.clone();
+        let pool_for_health = primary_pool.clone();
+        let zfs_available = any_zfs_available;
         tokio::spawn(async move {
             if zfs_available {
                 let backend = Arc::new(ZfsBackend::new(pool_for_health));
                 hm.run(backend).await;
             } else {
-                let backend = Arc::new(MemoryBackend::new(pool_for_health, 1024 * 1024 * 1024 * 100));
+                let backend = Arc::new(MemoryBackend::new(
+                    pool_for_health,
+                    1024 * 1024 * 1024 * 100,
+                ));
                 hm.run(backend).await;
             }
         });
 
-        // 11. Wait for ctrl-c, then shutdown
+        // 12. Wait for ctrl-c, then shutdown
         info!("blockyard node started, waiting for shutdown signal");
         tokio::signal::ctrl_c()
             .await

@@ -40,9 +40,27 @@ pub struct ClusterSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageSection {
+    #[serde(default)]
     pub zfs_pool: String,
+    #[serde(default)]
+    pub zfs_pools: Vec<String>,
     #[serde(default = "default_extent_size")]
     pub extent_size: String,
+}
+
+impl StorageSection {
+    /// Returns all configured pools.  Prefers `zfs_pools` if non-empty,
+    /// otherwise falls back to the single `zfs_pool` for backward
+    /// compatibility.
+    pub fn all_pools(&self) -> Vec<String> {
+        if !self.zfs_pools.is_empty() {
+            self.zfs_pools.clone()
+        } else if !self.zfs_pool.is_empty() {
+            vec![self.zfs_pool.clone()]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,5 +443,96 @@ key = "/etc/blockyard/node-key.pem"
         let cfg2 = NodeConfig::from_toml(&toml_str).unwrap();
         assert_eq!(cfg2.storage.zfs_pool, cfg.storage.zfs_pool);
         assert_eq!(cfg2.raft.heartbeat_interval, cfg.raft.heartbeat_interval);
+    }
+
+    // ── Multi-zpool config tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_config_single_pool_backward_compat() {
+        let cfg = NodeConfig::from_toml(MINIMAL_CONFIG).unwrap();
+        assert_eq!(cfg.storage.zfs_pool, "blockyard");
+        assert!(cfg.storage.zfs_pools.is_empty());
+        assert_eq!(cfg.storage.all_pools(), vec!["blockyard"]);
+    }
+
+    #[test]
+    fn test_config_multiple_pools() {
+        let cfg_str = r#"
+[node]
+listen = "0.0.0.0:7400"
+
+[cluster]
+seeds = ["10.0.1.1:7400"]
+
+[storage]
+zfs_pools = ["blockyard-ssd", "blockyard-hdd"]
+"#;
+        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
+        assert_eq!(
+            cfg.storage.zfs_pools,
+            vec!["blockyard-ssd", "blockyard-hdd"]
+        );
+        assert_eq!(
+            cfg.storage.all_pools(),
+            vec!["blockyard-ssd", "blockyard-hdd"]
+        );
+    }
+
+    #[test]
+    fn test_config_multiple_pools_preferred_over_single() {
+        let cfg_str = r#"
+[node]
+listen = "0.0.0.0:7400"
+
+[cluster]
+seeds = ["10.0.1.1:7400"]
+
+[storage]
+zfs_pool = "old-pool"
+zfs_pools = ["new-ssd", "new-hdd"]
+"#;
+        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
+        // zfs_pools takes precedence.
+        assert_eq!(cfg.storage.all_pools(), vec!["new-ssd", "new-hdd"]);
+    }
+
+    #[test]
+    fn test_config_no_pools() {
+        let cfg_str = r#"
+[node]
+listen = "0.0.0.0:7400"
+
+[cluster]
+seeds = ["10.0.1.1:7400"]
+
+[storage]
+"#;
+        let cfg = NodeConfig::from_toml(cfg_str).unwrap();
+        assert!(cfg.storage.all_pools().is_empty());
+    }
+
+    #[test]
+    fn test_all_pools_method() {
+        // Direct struct construction tests.
+        let s = StorageSection {
+            zfs_pool: String::new(),
+            zfs_pools: vec!["a".into(), "b".into()],
+            extent_size: "4MB".into(),
+        };
+        assert_eq!(s.all_pools(), vec!["a", "b"]);
+
+        let s2 = StorageSection {
+            zfs_pool: "single".into(),
+            zfs_pools: Vec::new(),
+            extent_size: "4MB".into(),
+        };
+        assert_eq!(s2.all_pools(), vec!["single"]);
+
+        let s3 = StorageSection {
+            zfs_pool: String::new(),
+            zfs_pools: Vec::new(),
+            extent_size: "4MB".into(),
+        };
+        assert!(s3.all_pools().is_empty());
     }
 }

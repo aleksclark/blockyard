@@ -114,12 +114,26 @@ impl PlacementEngine {
 
     fn balance_by_capacity(&self, mut candidates: Vec<&NodeInfo>, count: usize) -> Vec<NodeId> {
         candidates.sort_by(|a, b| {
-            let a_free = a.capacity_bytes.saturating_sub(a.used_bytes);
-            let b_free = b.capacity_bytes.saturating_sub(b.used_bytes);
+            let a_free = Self::total_free_capacity(a);
+            let b_free = Self::total_free_capacity(b);
             b_free.cmp(&a_free)
         });
 
         candidates.iter().take(count).map(|n| n.id).collect()
+    }
+
+    /// Compute total free capacity for a node.  If the node reports
+    /// per-pool information, the total is the sum across all pools.
+    /// Otherwise we fall back to the top-level capacity fields.
+    fn total_free_capacity(node: &NodeInfo) -> u64 {
+        if node.pools.is_empty() {
+            node.capacity_bytes.saturating_sub(node.used_bytes)
+        } else {
+            node.pools
+                .iter()
+                .map(|p| p.capacity_bytes.saturating_sub(p.used_bytes))
+                .sum()
+        }
     }
 
     pub fn should_exclude_node(&self, node: &NodeInfo) -> bool {
@@ -159,6 +173,7 @@ mod tests {
             capacity_bytes: capacity,
             used_bytes: used,
             incarnation: 1,
+            pools: Vec::new(),
         }
     }
 
@@ -547,5 +562,75 @@ mod tests {
             racks.len(),
             result,
         );
+    }
+
+    // ── Multi-pool placement tests ────────────────────────────────────────
+
+    #[test]
+    fn test_placement_prefers_multi_pool_node() {
+        use blockyard_common::types::PoolInfo;
+
+        let engine = PlacementEngine::new();
+
+        // Node 1 has 2 pools (100GB each), node 2 has 1 pool (100GB).
+        let mut node1 = make_node(1, &[], 0, 0);
+        node1.pools = vec![
+            PoolInfo {
+                name: "ssd".into(),
+                capacity_bytes: gb(100),
+                used_bytes: 0,
+                health: ZfsHealthState::Online,
+            },
+            PoolInfo {
+                name: "hdd".into(),
+                capacity_bytes: gb(100),
+                used_bytes: 0,
+                health: ZfsHealthState::Online,
+            },
+        ];
+
+        let node2 = make_node(2, &[], gb(100), 0);
+        let node3 = make_node(3, &[], gb(50), 0);
+
+        let candidates = vec![node1, node2, node3];
+        let spec = make_spec(2);
+        let result = engine.place_volume(&spec, &candidates).unwrap();
+        assert_eq!(result.len(), 2);
+
+        // Node 1 (200GB free via 2 pools) should be selected first.
+        assert_eq!(result[0], 1);
+    }
+
+    #[test]
+    fn test_total_free_capacity_with_pools() {
+        use blockyard_common::types::PoolInfo;
+
+        let mut node = make_node(1, &[], gb(50), gb(10));
+        node.pools = vec![
+            PoolInfo {
+                name: "ssd".into(),
+                capacity_bytes: gb(100),
+                used_bytes: gb(30),
+                health: ZfsHealthState::Online,
+            },
+            PoolInfo {
+                name: "hdd".into(),
+                capacity_bytes: gb(200),
+                used_bytes: gb(50),
+                health: ZfsHealthState::Online,
+            },
+        ];
+
+        // With pools, total free = (100-30) + (200-50) = 70 + 150 = 220GB.
+        let free = PlacementEngine::total_free_capacity(&node);
+        assert_eq!(free, gb(220));
+    }
+
+    #[test]
+    fn test_total_free_capacity_without_pools() {
+        let node = make_node(1, &[], gb(100), gb(30));
+        // Without pools, falls back to top-level fields: 100 - 30 = 70GB.
+        let free = PlacementEngine::total_free_capacity(&node);
+        assert_eq!(free, gb(70));
     }
 }

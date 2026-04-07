@@ -22,6 +22,8 @@ pub struct NodeInfo {
     pub capacity_bytes: u64,
     pub used_bytes: u64,
     pub incarnation: u64,
+    #[serde(default)]
+    pub pools: Vec<PoolInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +33,7 @@ pub enum NodeState {
     Failed,
     Draining,
     Left,
+    Maintenance,
 }
 
 impl std::fmt::Display for NodeState {
@@ -41,6 +44,22 @@ impl std::fmt::Display for NodeState {
             Self::Failed => write!(f, "failed"),
             Self::Draining => write!(f, "draining"),
             Self::Left => write!(f, "left"),
+            Self::Maintenance => write!(f, "maintenance"),
+        }
+    }
+}
+
+impl std::str::FromStr for NodeState {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "healthy" => Ok(Self::Healthy),
+            "suspect" => Ok(Self::Suspect),
+            "failed" => Ok(Self::Failed),
+            "draining" => Ok(Self::Draining),
+            "left" => Ok(Self::Left),
+            "maintenance" => Ok(Self::Maintenance),
+            _ => Err(format!("unknown node state: {s}")),
         }
     }
 }
@@ -63,6 +82,15 @@ impl std::fmt::Display for ZfsHealthState {
             Self::Unknown => write!(f, "unknown"),
         }
     }
+}
+
+/// Per-pool information reported by a node.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PoolInfo {
+    pub name: String,
+    pub capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub health: ZfsHealthState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +331,92 @@ mod tests {
         assert_eq!(NodeState::Failed.to_string(), "failed");
         assert_eq!(NodeState::Draining.to_string(), "draining");
         assert_eq!(NodeState::Left.to_string(), "left");
+        assert_eq!(NodeState::Maintenance.to_string(), "maintenance");
+    }
+
+    #[test]
+    fn test_node_state_from_str() {
+        assert_eq!("healthy".parse::<NodeState>().unwrap(), NodeState::Healthy);
+        assert_eq!("suspect".parse::<NodeState>().unwrap(), NodeState::Suspect);
+        assert_eq!("failed".parse::<NodeState>().unwrap(), NodeState::Failed);
+        assert_eq!(
+            "draining".parse::<NodeState>().unwrap(),
+            NodeState::Draining
+        );
+        assert_eq!("left".parse::<NodeState>().unwrap(), NodeState::Left);
+        assert_eq!(
+            "maintenance".parse::<NodeState>().unwrap(),
+            NodeState::Maintenance
+        );
+        assert_eq!(
+            "MAINTENANCE".parse::<NodeState>().unwrap(),
+            NodeState::Maintenance
+        );
+        assert!("bad".parse::<NodeState>().is_err());
+    }
+
+    #[test]
+    fn test_node_state_maintenance_serialization() {
+        let state = NodeState::Maintenance;
+        let json = serde_json::to_string(&state).unwrap();
+        let deser: NodeState = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, NodeState::Maintenance);
+    }
+
+    #[test]
+    fn test_pool_info_serialization() {
+        let info = PoolInfo {
+            name: "blockyard-ssd".to_string(),
+            capacity_bytes: 1024 * 1024 * 1024 * 100,
+            used_bytes: 1024 * 1024 * 1024 * 30,
+            health: ZfsHealthState::Online,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deser: PoolInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser, info);
+    }
+
+    #[test]
+    fn test_node_info_with_pools_serialization() {
+        let info = NodeInfo {
+            id: 1,
+            name: "test-node".to_string(),
+            addr: "127.0.0.1:7400".parse().unwrap(),
+            data_addr: "127.0.0.1:7401".parse().unwrap(),
+            tags: HashMap::new(),
+            state: NodeState::Healthy,
+            zfs_health: ZfsHealthState::Online,
+            capacity_bytes: 1024,
+            used_bytes: 512,
+            incarnation: 1,
+            pools: vec![
+                PoolInfo {
+                    name: "ssd".into(),
+                    capacity_bytes: 500,
+                    used_bytes: 200,
+                    health: ZfsHealthState::Online,
+                },
+                PoolInfo {
+                    name: "hdd".into(),
+                    capacity_bytes: 524,
+                    used_bytes: 312,
+                    health: ZfsHealthState::Degraded,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let deser: NodeInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.pools.len(), 2);
+        assert_eq!(deser.pools[0].name, "ssd");
+        assert_eq!(deser.pools[1].name, "hdd");
+    }
+
+    #[test]
+    fn test_node_info_pools_default_empty() {
+        // Deserializing NodeInfo without the pools field should default to empty vec.
+        let json = r#"{"id":1,"name":"n","addr":"127.0.0.1:7400","data_addr":"127.0.0.1:7401","tags":{},"state":"Healthy","zfs_health":"Online","capacity_bytes":0,"used_bytes":0,"incarnation":1}"#;
+        let deser: NodeInfo = serde_json::from_str(json).unwrap();
+        assert!(deser.pools.is_empty());
     }
 
     #[test]
@@ -393,6 +507,7 @@ mod tests {
             capacity_bytes: 1024,
             used_bytes: 512,
             incarnation: 1,
+            pools: Vec::new(),
         };
         let json = serde_json::to_string(&info).unwrap();
         let deser: NodeInfo = serde_json::from_str(&json).unwrap();

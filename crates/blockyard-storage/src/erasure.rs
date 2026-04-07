@@ -19,10 +19,7 @@ pub enum ErasureError {
     /// Supplied data is empty.
     EmptyData,
     /// Not enough shards available for reconstruction.
-    InsufficientShards {
-        available: usize,
-        required: usize,
-    },
+    InsufficientShards { available: usize, required: usize },
     /// Internal Reed-Solomon error.
     Internal(String),
 }
@@ -177,21 +174,15 @@ impl ErasureCodec {
         }
 
         // Determine chunk size from any available shard.
-        let chunk_sz = chunks
-            .iter()
-            .flatten()
-            .next()
-            .map(|c| c.len())
-            .ok_or_else(|| ErasureError::InsufficientShards {
+        let chunk_sz = chunks.iter().flatten().next().map(|c| c.len()).ok_or(
+            ErasureError::InsufficientShards {
                 available: 0,
                 required: self.data_shards,
-            })?;
+            },
+        )?;
 
         // Build the shard array for reconstruction.
-        let mut shards: Vec<Option<Vec<u8>>> = chunks
-            .iter()
-            .map(|c| c.as_ref().map(|v| v.clone()))
-            .collect();
+        let mut shards: Vec<Option<Vec<u8>>> = chunks.to_vec();
 
         // Reconstruct missing shards.
         self.rs
@@ -205,7 +196,7 @@ impl ErasureCodec {
                 result.extend_from_slice(s);
             } else {
                 // Should not happen after successful reconstruct.
-                result.extend(std::iter::repeat(0u8).take(chunk_sz));
+                result.extend(std::iter::repeat_n(0u8, chunk_sz));
             }
         }
 
@@ -285,7 +276,11 @@ mod tests {
 
     #[test]
     fn test_encode_decode_all_chunks_rs_8_4() {
-        roundtrip(8, 4, b"testing RS(8,4) with a somewhat longer payload here.");
+        roundtrip(
+            8,
+            4,
+            b"testing RS(8,4) with a somewhat longer payload here.",
+        );
     }
 
     // ── Drop 1 parity chunk ─────────────────────────────────────────────
@@ -562,10 +557,7 @@ mod tests {
 
     #[test]
     fn test_erasure_error_display() {
-        assert_eq!(
-            ErasureError::EmptyData.to_string(),
-            "empty data"
-        );
+        assert_eq!(ErasureError::EmptyData.to_string(), "empty data");
         assert_eq!(
             ErasureError::InvalidParams("bad".into()).to_string(),
             "invalid erasure params: bad"
@@ -638,7 +630,9 @@ mod tests {
 
     #[test]
     fn test_alternating_pattern() {
-        let data: Vec<u8> = (0..1024).map(|i| if i % 2 == 0 { 0xAA } else { 0x55 }).collect();
+        let data: Vec<u8> = (0..1024)
+            .map(|i| if i % 2 == 0 { 0xAA } else { 0x55 })
+            .collect();
         roundtrip(4, 2, &data);
     }
 }

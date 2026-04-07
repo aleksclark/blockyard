@@ -186,6 +186,7 @@ mod tests {
             capacity_bytes: 0,
             used_bytes: 0,
             incarnation: 1,
+            pools: Vec::new(),
         };
         let update = GossipUpdate::NodeAlive(info);
         let data = update.encode();

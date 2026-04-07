@@ -170,6 +170,7 @@ mod tests {
             capacity_bytes: capacity,
             used_bytes: used,
             incarnation: 1,
+            pools: Vec::new(),
         }
     }
 
@@ -178,9 +179,7 @@ mod tests {
     #[test]
     fn test_place_rs_4_2_across_6_nodes() {
         let engine = PlacementEngine::new();
-        let candidates: Vec<NodeInfo> = (1..=6)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let candidates: Vec<NodeInfo> = (1..=6).map(|id| make_node(id, &[], gb(100), 0)).collect();
 
         let placement = place_extent_chunks(42, 4, 2, &candidates, &engine).unwrap();
         assert_eq!(placement.extent_id, 42);
@@ -193,9 +192,17 @@ mod tests {
         // Check data vs parity flags.
         for chunk in &placement.chunks {
             if chunk.chunk_index < 4 {
-                assert!(!chunk.is_parity, "chunk {} should be data", chunk.chunk_index);
+                assert!(
+                    !chunk.is_parity,
+                    "chunk {} should be data",
+                    chunk.chunk_index
+                );
             } else {
-                assert!(chunk.is_parity, "chunk {} should be parity", chunk.chunk_index);
+                assert!(
+                    chunk.is_parity,
+                    "chunk {} should be parity",
+                    chunk.chunk_index
+                );
             }
         }
     }
@@ -203,9 +210,7 @@ mod tests {
     #[test]
     fn test_place_rs_2_1_across_3_nodes() {
         let engine = PlacementEngine::new();
-        let candidates: Vec<NodeInfo> = (1..=3)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let candidates: Vec<NodeInfo> = (1..=3).map(|id| make_node(id, &[], gb(100), 0)).collect();
 
         let placement = place_extent_chunks(1, 2, 1, &candidates, &engine).unwrap();
         assert_eq!(placement.chunks.len(), 3);
@@ -219,9 +224,7 @@ mod tests {
     #[test]
     fn test_not_enough_nodes() {
         let engine = PlacementEngine::new();
-        let candidates: Vec<NodeInfo> = (1..=4)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let candidates: Vec<NodeInfo> = (1..=4).map(|id| make_node(id, &[], gb(100), 0)).collect();
 
         let result = place_extent_chunks(1, 4, 2, &candidates, &engine);
         assert!(result.is_err());
@@ -230,9 +233,8 @@ mod tests {
     #[test]
     fn test_not_enough_healthy_nodes() {
         let engine = PlacementEngine::new();
-        let mut candidates: Vec<NodeInfo> = (1..=6)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let mut candidates: Vec<NodeInfo> =
+            (1..=6).map(|id| make_node(id, &[], gb(100), 0)).collect();
         // Mark 2 as failed.
         candidates[4].state = NodeState::Failed;
         candidates[5].state = NodeState::Failed;
@@ -308,9 +310,8 @@ mod tests {
     #[test]
     fn test_excludes_faulted_zfs() {
         let engine = PlacementEngine::new();
-        let mut candidates: Vec<NodeInfo> = (1..=7)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let mut candidates: Vec<NodeInfo> =
+            (1..=7).map(|id| make_node(id, &[], gb(100), 0)).collect();
         candidates[0].zfs_health = ZfsHealthState::Faulted;
 
         let placement = place_extent_chunks(1, 4, 2, &candidates, &engine).unwrap();
@@ -323,9 +324,7 @@ mod tests {
     #[test]
     fn test_more_nodes_than_needed() {
         let engine = PlacementEngine::new();
-        let candidates: Vec<NodeInfo> = (1..=10)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let candidates: Vec<NodeInfo> = (1..=10).map(|id| make_node(id, &[], gb(100), 0)).collect();
 
         let placement = place_extent_chunks(1, 2, 1, &candidates, &engine).unwrap();
         assert_eq!(placement.chunks.len(), 3);
@@ -339,9 +338,7 @@ mod tests {
     #[test]
     fn test_chunk_indices_sequential() {
         let engine = PlacementEngine::new();
-        let candidates: Vec<NodeInfo> = (1..=6)
-            .map(|id| make_node(id, &[], gb(100), 0))
-            .collect();
+        let candidates: Vec<NodeInfo> = (1..=6).map(|id| make_node(id, &[], gb(100), 0)).collect();
 
         let placement = place_extent_chunks(1, 4, 2, &candidates, &engine).unwrap();
         for (i, chunk) in placement.chunks.iter().enumerate() {
