@@ -101,10 +101,10 @@ Build the client that serves `ublk` devices, maintains metadata cache and sessio
 
 ### 4C — Read Path
 
-- [ ] **P4C.1** Read pipeline: resolve min visible version → resolve mapping → verify version ≥ watermark → select source → read → checksum verify → return — §4.6
-- [ ] **P4C.2** Read-your-own-writes enforcement via watermark — invariant 5
-- [ ] **P4C.3** Replica fallback on source failure — §4.6, §4.9.4
-- [ ] **P4C.4** Corruption reporting to health subsystem on read failure — §4.9.4
+- [x] **P4C.1** Read pipeline: resolve min visible version → resolve mapping → verify version ≥ watermark → select source → read → checksum verify → return — §4.6
+- [x] **P4C.2** Read-your-own-writes enforcement via watermark — invariant 5
+- [x] **P4C.3** Replica fallback on source failure — §4.6, §4.9.4
+- [x] **P4C.4** Corruption reporting to health subsystem on read failure — §4.9.4
 
 ### 4D — Erasure-Coded Paths
 

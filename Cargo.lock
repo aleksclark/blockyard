@@ -158,6 +158,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "blockyard-client"
+version = "0.1.0"
+dependencies = [
+ "blockyard-common",
+ "blockyard-protocol",
+ "bytes",
+ "parking_lot",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "blockyard-common"
 version = "0.1.0"
 dependencies = [

@@ -2,6 +2,7 @@
 members = [
     "crates/blockyard",
     "crates/blockyard-cli",
+    "crates/blockyard-client",
     "crates/blockyard-common",
     "crates/blockyard-gossip",
     "crates/blockyard-protocol",
