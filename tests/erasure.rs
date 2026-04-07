@@ -43,7 +43,7 @@ async fn ec_volume_basic_file_ops() {
     let _ = cluster
         .ssh_exec(
             0,
-            "blockyard volume create --name ec-test --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
+            "/usr/local/bin/blockyard volume create --name ec-test --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
         )
         .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -84,7 +84,7 @@ async fn ec_survive_one_node_crash() {
     let _ = cluster
         .ssh_exec(
             0,
-            "blockyard volume create --name ec-crash1 --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
+            "/usr/local/bin/blockyard volume create --name ec-crash1 --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
         )
         .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -131,7 +131,7 @@ async fn ec_survive_two_node_crash_data_intact() {
     let _ = cluster
         .ssh_exec(
             0,
-            "blockyard volume create --name ec-crash2 --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
+            "/usr/local/bin/blockyard volume create --name ec-crash2 --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
         )
         .await;
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -180,7 +180,7 @@ async fn ec_concurrent_writes_during_failure() {
     let _ = cluster
         .ssh_exec(
             0,
-            "blockyard volume create --name ec-concurrent --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
+            "/usr/local/bin/blockyard volume create --name ec-concurrent --size 10GB --erasure-coding 2+1 --endpoint http://127.0.0.1:7401 || true",
         )
         .await;
     tokio::time::sleep(Duration::from_secs(2)).await;

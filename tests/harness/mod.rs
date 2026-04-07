@@ -62,7 +62,7 @@ pub async fn mount_volume(cluster: &TestCluster, client_node: usize, vol_name: &
 
     // Start blockyard mount in the background.
     let mount_cmd = format!(
-        "nohup blockyard mount {vol_name} --backend ublk > /var/log/blockyard-mount.log 2>&1 &"
+        "nohup /usr/local/bin/blockyard mount {vol_name} --backend ublk > /var/log/blockyard-mount.log 2>&1 &"
     );
     cluster
         .ssh_exec(client_node, &mount_cmd)

@@ -352,7 +352,7 @@ zfs_pool = "blockyard"
 
         self.ssh_exec(
             node_id,
-            "nohup blockyard start --config /etc/blockyard/config.toml > /var/log/blockyard.log 2>&1 &",
+            "nohup /usr/local/bin/blockyard start --config /etc/blockyard/config.toml > /var/log/blockyard.log 2>&1 &",
         )
         .await?;
 
