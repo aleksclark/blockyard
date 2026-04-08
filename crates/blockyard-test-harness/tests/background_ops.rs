@@ -18,59 +18,65 @@ use blockyard_storage::background::scrub::{
     CorruptionNotification, CorruptionReason, ExtentReader, ScrubConfig, ScrubExtentEntry,
     ScrubWorker,
 };
+use blockyard_storage::extent::{committed_extent_path, compute_checksum};
+use blockyard_storage::{ExtentStore, StorageClass};
 use bytes::Bytes;
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// Mock implementations
+// Disk-backed implementations
 // ---------------------------------------------------------------------------
 
-type ExtentReadResult = Result<(Vec<u8>, String), String>;
-
-struct MockExtentReader {
-    disks: Vec<DiskId>,
+struct DiskBackedExtentReader {
+    stores: Vec<(DiskId, ExtentStore, TempDir)>,
     extents: Vec<ScrubExtentEntry>,
-    read_results: parking_lot::Mutex<HashMap<ExtentId, ExtentReadResult>>,
 }
 
-impl MockExtentReader {
+impl DiskBackedExtentReader {
     fn new() -> Self {
         Self {
-            disks: Vec::new(),
+            stores: Vec::new(),
             extents: Vec::new(),
-            read_results: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
-    fn with_disk(mut self, disk_id: DiskId) -> Self {
-        self.disks.push(disk_id);
-        self
+    fn add_disk(&mut self) -> (DiskId, &ExtentStore) {
+        let tmpdir = TempDir::new().expect("create tempdir");
+        let disk_id = DiskId::generate();
+        let store = ExtentStore::new(tmpdir.path().to_path_buf(), disk_id);
+        store.init_directories().expect("init directories");
+        self.stores.push((disk_id, store, tmpdir));
+        let entry = self.stores.last().unwrap();
+        (entry.0, &entry.1)
     }
 
-    fn with_extent(
-        mut self,
-        entry: ScrubExtentEntry,
-        result: Result<(Vec<u8>, String), String>,
-    ) -> Self {
-        let eid = entry.extent_id;
+    fn register_extent(&mut self, entry: ScrubExtentEntry) {
         self.extents.push(entry);
-        self.read_results.lock().insert(eid, result);
-        self
+    }
+
+    fn tmpdir_for_disk(&self, disk_id: DiskId) -> Option<&TempDir> {
+        self.stores
+            .iter()
+            .find(|(did, _, _)| *did == disk_id)
+            .map(|(_, _, t)| t)
     }
 }
 
-impl ExtentReader for MockExtentReader {
+impl ExtentReader for DiskBackedExtentReader {
     fn read_extent(
         &self,
-        _disk_id: DiskId,
+        disk_id: DiskId,
         extent_id: ExtentId,
-        _version: u64,
+        version: u64,
     ) -> Result<(Vec<u8>, String), String> {
-        let results = self.read_results.lock();
-        results
-            .get(&extent_id)
-            .cloned()
-            .unwrap_or(Err("extent not found".into()))
+        let tmpdir = self
+            .tmpdir_for_disk(disk_id)
+            .ok_or_else(|| format!("no store for disk {disk_id}"))?;
+        let path = committed_extent_path(tmpdir.path(), extent_id, version);
+        let data = std::fs::read(&path).map_err(|e| format!("{e}"))?;
+        let checksum = compute_checksum(&data);
+        Ok((data, checksum))
     }
 
     fn list_extents(&self, disk_id: DiskId) -> Vec<ScrubExtentEntry> {
@@ -82,68 +88,87 @@ impl ExtentReader for MockExtentReader {
     }
 
     fn list_disks(&self) -> Vec<DiskId> {
-        self.disks.clone()
+        self.stores.iter().map(|(did, _, _)| *did).collect()
     }
 }
 
-struct MockRepairReader {
-    data: parking_lot::Mutex<HashMap<(DiskId, ExtentId), Bytes>>,
+struct DiskBackedRepairReader {
+    stores: HashMap<DiskId, (ExtentStore, TempDir)>,
 }
 
-impl MockRepairReader {
+impl DiskBackedRepairReader {
     fn new() -> Self {
         Self {
-            data: parking_lot::Mutex::new(HashMap::new()),
+            stores: HashMap::new(),
         }
     }
 
-    fn add(&self, disk: DiskId, extent: ExtentId, data: Vec<u8>) {
-        self.data.lock().insert((disk, extent), Bytes::from(data));
+    fn add_store(&mut self, disk_id: DiskId, store: ExtentStore, tmpdir: TempDir) {
+        self.stores.insert(disk_id, (store, tmpdir));
     }
 }
 
-impl RepairExtentReader for MockRepairReader {
+impl RepairExtentReader for DiskBackedRepairReader {
     fn read_extent(
         &self,
         source_disk: DiskId,
         extent_id: ExtentId,
-        _version: u64,
+        version: u64,
     ) -> Result<Bytes, String> {
-        self.data
-            .lock()
-            .get(&(source_disk, extent_id))
-            .cloned()
-            .ok_or_else(|| "not found".into())
+        let (store, _) = self
+            .stores
+            .get(&source_disk)
+            .ok_or_else(|| format!("no store for disk {source_disk}"))?;
+        let (data, _) = store.read_extent(extent_id, version).map_err(|e| format!("{e}"))?;
+        Ok(Bytes::from(data))
     }
 }
 
-struct MockRepairWriter {
-    written: parking_lot::Mutex<Vec<(DiskId, ExtentId, Vec<u8>)>>,
+struct DiskBackedRepairWriter {
+    stores: HashMap<DiskId, (ExtentStore, TempDir)>,
 }
 
-impl MockRepairWriter {
+impl DiskBackedRepairWriter {
     fn new() -> Self {
         Self {
-            written: parking_lot::Mutex::new(Vec::new()),
+            stores: HashMap::new(),
         }
     }
 
-    fn written(&self) -> Vec<(DiskId, ExtentId, Vec<u8>)> {
-        self.written.lock().clone()
+    fn add_store(&mut self, disk_id: DiskId, store: ExtentStore, tmpdir: TempDir) {
+        self.stores.insert(disk_id, (store, tmpdir));
+    }
+
+    fn read_back(&self, disk_id: DiskId, extent_id: ExtentId, version: u64) -> Option<(Vec<u8>, String)> {
+        let (store, _) = self.stores.get(&disk_id)?;
+        store.read_extent(extent_id, version).ok()
     }
 }
 
-impl RepairExtentWriter for MockRepairWriter {
+impl RepairExtentWriter for DiskBackedRepairWriter {
     fn write_extent(
         &self,
         target_disk: DiskId,
         extent_id: ExtentId,
-        _version: u64,
+        version: u64,
         data: &[u8],
     ) -> Result<(), String> {
-        self.written
-            .lock()
-            .push((target_disk, extent_id, data.to_vec()));
+        let (store, _) = self
+            .stores
+            .get(&target_disk)
+            .ok_or_else(|| format!("no store for disk {target_disk}"))?;
+        let (_, checksum) = store
+            .stage_extent(extent_id, version, data)
+            .map_err(|e| format!("{e}"))?;
+        store
+            .commit_extent(
+                extent_id,
+                version,
+                &checksum,
+                data.len() as u64,
+                StorageClass::Default,
+            )
+            .map_err(|e| format!("{e}"))?;
         Ok(())
     }
 }
@@ -181,32 +206,60 @@ impl EcReconstructor for MockEcReconstructor {
 
 #[tokio::test]
 async fn test_scrub_detects_corruption_triggers_repair() {
-    let disk_id = DiskId::generate();
-    let healthy_source = DiskId::generate();
-    let target_disk = DiskId::generate();
     let corrupt_eid = ExtentId::generate();
     let healthy_eid = ExtentId::generate();
+    let corrupt_data = vec![0x42u8; 4096];
+    let healthy_data = vec![0xBBu8; 4096];
 
-    let reader = MockExtentReader::new()
-        .with_disk(disk_id)
-        .with_extent(
-            ScrubExtentEntry {
-                extent_id: corrupt_eid,
-                disk_id,
-                expected_checksum: "expected_abc".to_string(),
-                version: 1,
-            },
-            Ok((vec![1, 2, 3], "actual_xyz".to_string())),
+    let mut reader = DiskBackedExtentReader::new();
+    let (disk_id, store) = reader.add_disk();
+
+    let (_, corrupt_checksum) = store
+        .stage_extent(corrupt_eid, 1, &corrupt_data)
+        .expect("stage corrupt extent");
+    store
+        .commit_extent(
+            corrupt_eid,
+            1,
+            &corrupt_checksum,
+            corrupt_data.len() as u64,
+            StorageClass::Default,
         )
-        .with_extent(
-            ScrubExtentEntry {
-                extent_id: healthy_eid,
-                disk_id,
-                expected_checksum: "good_hash".to_string(),
-                version: 1,
-            },
-            Ok((vec![4, 5, 6], "good_hash".to_string())),
-        );
+        .expect("commit corrupt extent");
+
+    let (_, healthy_checksum) = store
+        .stage_extent(healthy_eid, 1, &healthy_data)
+        .expect("stage healthy extent");
+    store
+        .commit_extent(
+            healthy_eid,
+            1,
+            &healthy_checksum,
+            healthy_data.len() as u64,
+            StorageClass::Default,
+        )
+        .expect("commit healthy extent");
+
+    let tmpdir = reader.tmpdir_for_disk(disk_id).unwrap();
+    let corrupt_path = committed_extent_path(tmpdir.path(), corrupt_eid, 1);
+    let mut file_data = std::fs::read(&corrupt_path).expect("read committed file");
+    for byte in file_data.iter_mut().take(128) {
+        *byte ^= 0xFF;
+    }
+    std::fs::write(&corrupt_path, &file_data).expect("write corrupted data");
+
+    reader.register_extent(ScrubExtentEntry {
+        extent_id: corrupt_eid,
+        disk_id,
+        expected_checksum: corrupt_checksum.clone(),
+        version: 1,
+    });
+    reader.register_extent(ScrubExtentEntry {
+        extent_id: healthy_eid,
+        disk_id,
+        expected_checksum: healthy_checksum,
+        version: 1,
+    });
 
     let scrub_worker = ScrubWorker::new(ScrubConfig {
         interval_secs: 3600,
@@ -232,8 +285,9 @@ async fn test_scrub_detects_corruption_triggers_repair() {
 
     match &notification.reason {
         CorruptionReason::ChecksumMismatch { expected, actual } => {
-            assert_eq!(expected, "expected_abc");
-            assert_eq!(actual, "actual_xyz");
+            assert_eq!(expected, &corrupt_checksum);
+            let corrupted_checksum = compute_checksum(&file_data);
+            assert_eq!(actual, &corrupted_checksum);
         }
         other => panic!("expected ChecksumMismatch, got {other:?}"),
     }
@@ -243,23 +297,51 @@ async fn test_scrub_detects_corruption_triggers_repair() {
         "healthy extent should not generate notification"
     );
 
+    let healthy_source_tmpdir = TempDir::new().expect("create healthy source tmpdir");
+    let healthy_source_id = DiskId::generate();
+    let healthy_source_store =
+        ExtentStore::new(healthy_source_tmpdir.path().to_path_buf(), healthy_source_id);
+    healthy_source_store
+        .init_directories()
+        .expect("init healthy source dirs");
+    let (_, src_checksum) = healthy_source_store
+        .stage_extent(corrupt_eid, 1, &corrupt_data)
+        .expect("stage on healthy source");
+    healthy_source_store
+        .commit_extent(
+            corrupt_eid,
+            1,
+            &src_checksum,
+            corrupt_data.len() as u64,
+            StorageClass::Default,
+        )
+        .expect("commit on healthy source");
+
+    let target_tmpdir = TempDir::new().expect("create target tmpdir");
+    let target_disk_id = DiskId::generate();
+    let target_store = ExtentStore::new(target_tmpdir.path().to_path_buf(), target_disk_id);
+    target_store
+        .init_directories()
+        .expect("init target dirs");
+
     let repair_worker = RepairWorker::new(RepairConfig::default());
 
     repair_worker.enqueue(RepairRequest {
         extent_id: notification.extent_id,
         version: 1,
-        target_disk_id: target_disk,
+        target_disk_id,
         repair_type: RepairType::Replication {
-            healthy_sources: vec![healthy_source],
+            healthy_sources: vec![healthy_source_id],
         },
         priority: 50,
     });
 
     assert_eq!(repair_worker.queue_len(), 1);
 
-    let repair_reader = MockRepairReader::new();
-    repair_reader.add(healthy_source, notification.extent_id, vec![1, 2, 3]);
-    let repair_writer = MockRepairWriter::new();
+    let mut repair_reader = DiskBackedRepairReader::new();
+    repair_reader.add_store(healthy_source_id, healthy_source_store, healthy_source_tmpdir);
+    let mut repair_writer = DiskBackedRepairWriter::new();
+    repair_writer.add_store(target_disk_id, target_store, target_tmpdir);
     let frag_reader = MockFragmentReader;
     let ec = MockEcReconstructor;
 
@@ -270,13 +352,13 @@ async fn test_scrub_detects_corruption_triggers_repair() {
 
     assert!(outcome.success, "repair should succeed");
     assert_eq!(outcome.extent_id, corrupt_eid);
-    assert_eq!(outcome.target_disk_id, target_disk);
+    assert_eq!(outcome.target_disk_id, target_disk_id);
 
-    let written = repair_writer.written();
-    assert_eq!(written.len(), 1);
-    assert_eq!(written[0].0, target_disk);
-    assert_eq!(written[0].1, corrupt_eid);
-    assert_eq!(written[0].2, vec![1, 2, 3]);
+    let (repaired_data, repaired_checksum) = repair_writer
+        .read_back(target_disk_id, corrupt_eid, 1)
+        .expect("repaired extent should be readable from disk");
+    assert_eq!(repaired_data, corrupt_data);
+    assert_eq!(repaired_checksum, corrupt_checksum);
 
     assert_eq!(repair_worker.queue_len(), 0);
     assert_eq!(repair_worker.completed().len(), 1);

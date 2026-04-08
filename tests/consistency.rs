@@ -1,11 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use blockyard_common::LeaseResponse;
 use blockyard_common::{
-    EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
+    DiskId, EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
 };
 use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
+use blockyard_storage::extent::compute_checksum;
+use blockyard_storage::{ExtentStore, StorageClass};
 use blockyard_ublk::freshness::FreshnessStatus;
 use blockyard_ublk::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
 use blockyard_ublk::{
@@ -15,6 +17,7 @@ use blockyard_ublk::{
 use bytes::Bytes;
 use openraft::BasicNode;
 use parking_lot::RwLock;
+use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
 // Helpers: stand up a real multi-node Raft cluster in-memory
@@ -87,28 +90,58 @@ async fn find_leader(cluster: &RaftCluster) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Mock DataNodeClient for WritePipeline tests
+// Disk-backed DataNodeClient: each node backed by a real ExtentStore + TempDir
 // ---------------------------------------------------------------------------
 
-struct MockDataNodeClient {
+struct DiskBackedDataNodeClient {
+    stores: parking_lot::Mutex<HashMap<NodeId, (ExtentStore, TempDir)>>,
     fail_nodes: parking_lot::Mutex<Vec<NodeId>>,
-    stored: parking_lot::Mutex<Vec<(NodeId, ExtentId, Bytes)>>,
 }
 
-impl MockDataNodeClient {
+impl DiskBackedDataNodeClient {
     fn new() -> Self {
         Self {
+            stores: parking_lot::Mutex::new(HashMap::new()),
             fail_nodes: parking_lot::Mutex::new(Vec::new()),
-            stored: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
     fn set_fail_nodes(&self, nodes: Vec<NodeId>) {
         *self.fail_nodes.lock() = nodes;
     }
+
+    fn get_or_create_store(&self, node_id: NodeId) -> DiskId {
+        let mut stores = self.stores.lock();
+        stores
+            .entry(node_id)
+            .or_insert_with(|| {
+                let tmpdir = TempDir::new().expect("create tempdir for node");
+                let disk_id = DiskId::generate();
+                let store = ExtentStore::new(tmpdir.path().to_path_buf(), disk_id);
+                store.init_directories().expect("init directories");
+                (store, tmpdir)
+            })
+            .0
+            .disk_id()
+    }
+
+    fn read_back(
+        &self,
+        node_id: NodeId,
+        extent_id: ExtentId,
+        version: u64,
+    ) -> Result<(Vec<u8>, String), String> {
+        let stores = self.stores.lock();
+        let (store, _) = stores
+            .get(&node_id)
+            .ok_or_else(|| format!("no store for node {node_id}"))?;
+        store
+            .read_extent(extent_id, version)
+            .map_err(|e| format!("{e}"))
+    }
 }
 
-impl DataNodeClient for MockDataNodeClient {
+impl DataNodeClient for DiskBackedDataNodeClient {
     async fn write_extent(
         &self,
         node_id: NodeId,
@@ -116,7 +149,7 @@ impl DataNodeClient for MockDataNodeClient {
         _session_id: SessionId,
         _volume_id: VolumeId,
         extent_id: ExtentId,
-        _extent_version: u64,
+        extent_version: u64,
         _epoch: EpochId,
         data: Bytes,
         checksum: String,
@@ -131,7 +164,23 @@ impl DataNodeClient for MockDataNodeClient {
             });
         }
         drop(fail_nodes);
-        self.stored.lock().push((node_id, extent_id, data.clone()));
+
+        self.get_or_create_store(node_id);
+        let mut stores = self.stores.lock();
+        let (store, _) = stores.get_mut(&node_id).unwrap();
+        let (_, disk_checksum) = store
+            .stage_extent(extent_id, extent_version, &data)
+            .map_err(|e| blockyard_common::Error::Storage(format!("{e}")))?;
+        store
+            .commit_extent(
+                extent_id,
+                extent_version,
+                &disk_checksum,
+                data.len() as u64,
+                StorageClass::Default,
+            )
+            .map_err(|e| blockyard_common::Error::Storage(format!("{e}")))?;
+
         Ok(WriteAck {
             node_id,
             success: true,
@@ -360,7 +409,7 @@ async fn test_majority_ack_no_write_loss() {
     let volume_id = VolumeId::generate();
     let epoch = EpochId::new(1);
 
-    let data_client = Arc::new(MockDataNodeClient::new());
+    let data_client = Arc::new(DiskBackedDataNodeClient::new());
     let metadata_client = Arc::new(MockMetadataClient::new(epoch));
     let cache = Arc::new(MetadataCache::new());
     cache.set_epoch(epoch);
@@ -422,14 +471,31 @@ async fn test_majority_ack_no_write_loss() {
     {
         let committed = metadata_client.committed.lock();
         assert_eq!(committed.len(), 1, "one extent mapping should be committed");
-    }
+        let commit_req = &committed[0];
+        let extent_id = commit_req.extent_id;
+        let version = commit_req.extent_version;
 
-    {
-        let stored = data_client.stored.lock();
+        let mut readable_count = 0;
+        for nid in &[node1, node2, node3] {
+            if let Ok((disk_data, disk_checksum)) =
+                data_client.read_back(*nid, extent_id, version)
+            {
+                assert_eq!(
+                    disk_data,
+                    data.as_ref(),
+                    "data on disk must match original"
+                );
+                let expected = compute_checksum(&data);
+                assert_eq!(
+                    disk_checksum, expected,
+                    "checksum from disk must match computed"
+                );
+                readable_count += 1;
+            }
+        }
         assert!(
-            stored.len() >= 2,
-            "at least majority (2 of 3) nodes should have stored data, got {}",
-            stored.len()
+            readable_count >= 2,
+            "at least majority (2 of 3) nodes should have data on disk, got {readable_count}",
         );
     }
 

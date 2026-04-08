@@ -1,9 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use blockyard_common::{
-    EpochId, ExtentId, LeaseResponse, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
+    DiskId, EpochId, ExtentId, LeaseResponse, NodeId, OperationId, ProtectionPolicy, SessionId,
+    VolumeId,
 };
+use blockyard_storage::extent::compute_checksum;
+use blockyard_storage::{ExtentStore, StorageClass};
 use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
 use blockyard_ublk::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
 use blockyard_ublk::{
@@ -11,21 +14,22 @@ use blockyard_ublk::{
     WritePipeline, WriteRequest, WriteWatermark,
 };
 use bytes::Bytes;
+use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
-// Mock DataNodeClient that persists data in-memory
+// Disk-backed DataNodeClient: each node backed by a real ExtentStore + TempDir
 // ---------------------------------------------------------------------------
 
-struct MockDataNode {
+struct DiskBackedDataNode {
+    stores: parking_lot::Mutex<HashMap<NodeId, (ExtentStore, TempDir)>>,
     fail: parking_lot::Mutex<bool>,
-    store: parking_lot::Mutex<Vec<(OperationId, ExtentId, Bytes, String)>>,
 }
 
-impl MockDataNode {
+impl DiskBackedDataNode {
     fn new() -> Self {
         Self {
+            stores: parking_lot::Mutex::new(HashMap::new()),
             fail: parking_lot::Mutex::new(false),
-            store: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -33,20 +37,51 @@ impl MockDataNode {
         *self.fail.lock() = fail;
     }
 
-    fn stored_data(&self) -> Vec<(OperationId, ExtentId, Bytes, String)> {
-        self.store.lock().clone()
+    fn get_or_create_store(&self, node_id: NodeId) -> DiskId {
+        let mut stores = self.stores.lock();
+        stores
+            .entry(node_id)
+            .or_insert_with(|| {
+                let tmpdir = TempDir::new().expect("create tempdir for node");
+                let disk_id = DiskId::generate();
+                let store = ExtentStore::new(tmpdir.path().to_path_buf(), disk_id);
+                store.init_directories().expect("init directories");
+                (store, tmpdir)
+            })
+            .0
+            .disk_id()
+    }
+
+    fn read_back(
+        &self,
+        node_id: NodeId,
+        extent_id: ExtentId,
+        version: u64,
+    ) -> Result<(Vec<u8>, String), String> {
+        let stores = self.stores.lock();
+        let (store, _) = stores
+            .get(&node_id)
+            .ok_or_else(|| format!("no store for node {node_id}"))?;
+        store
+            .read_extent(extent_id, version)
+            .map_err(|e| format!("{e}"))
+    }
+
+    fn stored_count(&self) -> usize {
+        let stores = self.stores.lock();
+        stores.len()
     }
 }
 
-impl DataNodeClient for MockDataNode {
+impl DataNodeClient for DiskBackedDataNode {
     async fn write_extent(
         &self,
         node_id: NodeId,
-        operation_id: OperationId,
+        _operation_id: OperationId,
         _session_id: SessionId,
         _volume_id: VolumeId,
         extent_id: ExtentId,
-        _extent_version: u64,
+        extent_version: u64,
         _epoch: EpochId,
         data: Bytes,
         checksum: String,
@@ -59,9 +94,22 @@ impl DataNodeClient for MockDataNode {
                 error: Some(WriteAckError::DiskUnavailable),
             });
         }
-        self.store
-            .lock()
-            .push((operation_id, extent_id, data, checksum.clone()));
+        self.get_or_create_store(node_id);
+        let mut stores = self.stores.lock();
+        let (store, _) = stores.get_mut(&node_id).unwrap();
+        let (_, disk_checksum) = store
+            .stage_extent(extent_id, extent_version, &data)
+            .map_err(|e| blockyard_common::Error::Storage(format!("{e}")))?;
+        store
+            .commit_extent(
+                extent_id,
+                extent_version,
+                &disk_checksum,
+                data.len() as u64,
+                StorageClass::Default,
+            )
+            .map_err(|e| blockyard_common::Error::Storage(format!("{e}")))?;
+
         Ok(WriteAck {
             node_id,
             success: true,
@@ -189,10 +237,10 @@ fn setup_pipeline(
     volume_id: VolumeId,
     epoch: EpochId,
     node_ids: &[NodeId],
-    data_client: Arc<MockDataNode>,
+    data_client: Arc<DiskBackedDataNode>,
     metadata_client: Arc<MockMetadata>,
 ) -> (
-    WritePipeline<MockDataNode, MockMetadata>,
+    WritePipeline<DiskBackedDataNode, MockMetadata>,
     Arc<MetadataCache>,
     Arc<ClientSession>,
     Arc<WriteWatermark>,
@@ -252,7 +300,7 @@ async fn test_mount_write_crash_remount_verify() {
     let node2 = NodeId::generate();
     let node3 = NodeId::generate();
 
-    let data_client = Arc::new(MockDataNode::new());
+    let data_client = Arc::new(DiskBackedDataNode::new());
     let metadata_client = Arc::new(MockMetadata::new(epoch));
 
     let (pipeline, _cache, _session, _watermark) = setup_pipeline(
@@ -273,9 +321,9 @@ async fn test_mount_write_crash_remount_verify() {
     assert!(result.is_ok(), "write should succeed: {:?}", result.err());
     assert!(matches!(result.unwrap(), WriteOutcome::Committed { .. }));
 
-    let stored_before_crash = data_client.stored_data();
+    let stored_before_crash = data_client.stored_count();
     assert!(
-        !stored_before_crash.is_empty(),
+        stored_before_crash > 0,
         "data should be stored on nodes before crash"
     );
     let committed_before_crash = metadata_client.commits.lock().len();
@@ -283,6 +331,25 @@ async fn test_mount_write_crash_remount_verify() {
         committed_before_crash > 0,
         "metadata commit should have happened"
     );
+
+    let commit_req = metadata_client.commits.lock()[0].clone();
+    let extent_id = commit_req.extent_id;
+    let version = commit_req.extent_version;
+
+    for nid in &[node1, node2, node3] {
+        if let Ok((disk_data, disk_checksum)) = data_client.read_back(*nid, extent_id, version) {
+            assert_eq!(
+                disk_data,
+                write_data.as_ref(),
+                "data on disk must match original write"
+            );
+            let expected = compute_checksum(&write_data);
+            assert_eq!(
+                disk_checksum, expected,
+                "checksum from disk must match computed"
+            );
+        }
+    }
 
     drop(pipeline);
 
@@ -294,18 +361,14 @@ async fn test_mount_write_crash_remount_verify() {
         metadata_client.clone(),
     );
 
-    let stored_after_crash = data_client.stored_data();
-    assert_eq!(
-        stored_after_crash.len(),
-        stored_before_crash.len(),
-        "stored data should persist after pipeline crash"
-    );
-    for (_, _, data, _) in &stored_after_crash {
-        assert_eq!(
-            data.as_ref(),
-            write_data.as_ref(),
-            "persisted data must match original"
-        );
+    for nid in &[node1, node2, node3] {
+        if let Ok((disk_data, _)) = data_client.read_back(*nid, extent_id, version) {
+            assert_eq!(
+                disk_data,
+                write_data.as_ref(),
+                "data on disk must survive pipeline crash"
+            );
+        }
     }
 
     let committed_ops = metadata_client.committed_ops.lock();
@@ -326,7 +389,7 @@ async fn test_partition_follow_leader_stale_epoch() {
     let node1 = NodeId::generate();
     let node2 = NodeId::generate();
 
-    let data_client = Arc::new(MockDataNode::new());
+    let data_client = Arc::new(DiskBackedDataNode::new());
     let metadata_client = Arc::new(MockMetadata::new(old_epoch));
 
     let cache = Arc::new(MetadataCache::new());
@@ -401,7 +464,7 @@ async fn test_write_crash_partial_not_committed() {
     let node2 = NodeId::generate();
     let node3 = NodeId::generate();
 
-    let data_client = Arc::new(MockDataNode::new());
+    let data_client = Arc::new(DiskBackedDataNode::new());
     let metadata_client = Arc::new(MockMetadata::new(epoch));
 
     *metadata_client.fail_commit.lock() = true;
