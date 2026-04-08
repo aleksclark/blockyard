@@ -1,250 +1,481 @@
-//! Phase 9D — Rebalancing integration test scenarios.
+//! Phase 9D — Rebalancing integration tests exercising real Phase 7 workers.
 //!
-//! Rebalancing is not yet implemented (Phase 7 in the ROADMAP). These tests
-//! are placeholders that exercise the test harness's rebalance simulation API.
-//! They will be replaced with real rebalancing logic tests once Phase 7 lands.
-//!
-//! The harness infrastructure (ProcessCluster, WorkloadGenerator, ConsistencyChecker)
-//! is preserved and validated here to ensure it remains functional for when
-//! real rebalancing is implemented.
+//! These tests use the real `RebalanceWorker`, `DrainWorker`, `RepairWorker`,
+//! and `TokenBucket` from `blockyard_storage::background`, wired to mock
+//! inventory implementations that track moves, failures, and progress.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use blockyard_common::VolumeId;
-use blockyard_test_harness::TestNodeId as NodeId;
-use blockyard_test_harness::{
-    AckStatus, Cluster, ClusterConfig, ConsistencyChecker, NetworkConfig, OperationLog,
-    ProcessCluster, WorkloadConfig, WorkloadGenerator,
+use blockyard_common::{DiskId, ExtentId};
+use blockyard_storage::background::drain::{DrainConfig, DrainExtentEntry, DrainInventory, DrainWorker};
+use blockyard_storage::background::rate_limit::TokenBucket;
+use blockyard_storage::background::rebalance::{
+    DiskUtilization, RebalanceConfig, RebalanceInventory, RebalanceWorker,
 };
+use blockyard_storage::background::repair::{
+    EcReconstructor, FragmentReader, RepairConfig, RepairExtentReader, RepairExtentWriter,
+    RepairWorker,
+};
+use bytes::Bytes;
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Mock implementations
 // ---------------------------------------------------------------------------
 
-fn cluster_config(node_count: u32, base_port: u16) -> ClusterConfig {
-    ClusterConfig {
-        node_count,
-        binary_path: PathBuf::from("/usr/bin/false"),
-        base_data_dir: PathBuf::from("/tmp/blockyard-rebal-test"),
-        network: NetworkConfig {
-            base_listen_port: base_port,
-            base_gossip_port: base_port + 1000,
-            host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        },
-    }
+struct MockRebalanceInventory {
+    utilizations: Vec<DiskUtilization>,
+    extents: HashMap<DiskId, Vec<(ExtentId, u64)>>,
+    sources: HashMap<ExtentId, Vec<DiskId>>,
 }
 
-fn workload_for_volumes(volume_ids: &[VolumeId], write_ratio: f64) -> WorkloadGenerator {
-    let config = WorkloadConfig {
-        volume_ids: volume_ids.to_vec(),
-        write_ratio,
-        block_size: 4096,
-        max_offset: 4096 * 64,
-        operations_per_second: 1000,
-        duration: Duration::from_secs(5),
-        concurrent_clients: 4,
-        ..Default::default()
-    };
-    WorkloadGenerator::new(config)
-}
-
-fn simulate_workload(workload: &WorkloadGenerator, op_count: usize, ack_all: bool) {
-    for _ in 0..op_count {
-        let mut op = workload.generate_operation();
-        if ack_all {
-            op.complete(AckStatus::Acked);
-        } else {
-            op.complete(AckStatus::Nacked);
-        }
-        workload.log().record(op);
-    }
-}
-
-fn verify_consistency(
-    log: &OperationLog,
-    min_operations: u64,
-) -> Vec<blockyard_test_harness::CheckReport> {
-    let acked = log.acked_writes();
-    let mut checker = ConsistencyChecker::new(clone_log(log)).with_min_operations(min_operations);
-    for op in &acked {
-        if let Some(checksum) = &op.data_checksum {
-            checker.record_read_back(op.volume_id, op.offset, checksum.clone());
+impl MockRebalanceInventory {
+    fn new() -> Self {
+        Self {
+            utilizations: Vec::new(),
+            extents: HashMap::new(),
+            sources: HashMap::new(),
         }
     }
-    checker.check_all()
-}
 
-fn clone_log(log: &OperationLog) -> OperationLog {
-    let new_log = OperationLog::new();
-    for op in log.all() {
-        new_log.record(op);
+    fn with_disk(
+        mut self,
+        disk_id: DiskId,
+        used: u64,
+        total: u64,
+        extents: Vec<(ExtentId, u64)>,
+    ) -> Self {
+        self.utilizations.push(DiskUtilization {
+            disk_id,
+            used_bytes: used,
+            total_bytes: total,
+            extent_count: extents.len() as u64,
+        });
+        for &(eid, _) in &extents {
+            self.sources.entry(eid).or_default().push(disk_id);
+        }
+        self.extents.insert(disk_id, extents);
+        self
     }
-    new_log
+
 }
 
-// Pending Phase 7: simulates rebalance by returning synthetic counts.
-fn simulate_rebalance(
-    source_nodes: &[NodeId],
-    target_nodes: &[NodeId],
-    volumes: &[VolumeId],
-) -> (u64, Vec<VolumeId>) {
-    let extents_per_volume = 8u64;
-    let total_extents = volumes.len() as u64 * extents_per_volume;
-    let moved = total_extents / (source_nodes.len() + target_nodes.len()) as u64;
-    (moved.max(1), volumes.to_vec())
+impl RebalanceInventory for MockRebalanceInventory {
+    fn get_disk_utilizations(&self) -> Vec<DiskUtilization> {
+        self.utilizations.clone()
+    }
+
+    fn list_moveable_extents(&self, disk_id: DiskId) -> Vec<(ExtentId, u64)> {
+        self.extents.get(&disk_id).cloned().unwrap_or_default()
+    }
+
+    fn healthy_sources_for_extent(&self, extent_id: ExtentId) -> Vec<DiskId> {
+        self.sources.get(&extent_id).cloned().unwrap_or_default()
+    }
 }
 
-// Pending Phase 7: simulates draining a node.
-fn simulate_drain(drain_node: NodeId, remaining: &[NodeId], volumes: &[VolumeId]) -> Vec<VolumeId> {
-    assert!(
-        !remaining.is_empty(),
-        "need at least one remaining node to drain to"
-    );
-    assert!(
-        !remaining.contains(&drain_node),
-        "drain target must not be in remaining set"
-    );
-    volumes.to_vec()
+struct MockDrainInventory {
+    extents: parking_lot::Mutex<Vec<DrainExtentEntry>>,
+    target_disk: parking_lot::Mutex<Option<DiskId>>,
+    draining: parking_lot::Mutex<bool>,
+    transitioned: parking_lot::Mutex<bool>,
+    target_fail_after: parking_lot::Mutex<Option<u64>>,
+    target_calls: AtomicUsize,
+}
+
+impl MockDrainInventory {
+    fn new() -> Self {
+        Self {
+            extents: parking_lot::Mutex::new(Vec::new()),
+            target_disk: parking_lot::Mutex::new(None),
+            draining: parking_lot::Mutex::new(true),
+            transitioned: parking_lot::Mutex::new(false),
+            target_fail_after: parking_lot::Mutex::new(None),
+            target_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn with_extents(self, extents: Vec<DrainExtentEntry>) -> Self {
+        *self.extents.lock() = extents;
+        self
+    }
+
+    fn with_target(self, target: DiskId) -> Self {
+        *self.target_disk.lock() = Some(target);
+        self
+    }
+
+    fn set_fail_after_n_targets(&self, n: u64) {
+        *self.target_fail_after.lock() = Some(n);
+    }
+
+    fn was_transitioned(&self) -> bool {
+        *self.transitioned.lock()
+    }
+}
+
+impl DrainInventory for MockDrainInventory {
+    fn list_extents_on_disk(&self, _disk_id: DiskId) -> Vec<DrainExtentEntry> {
+        self.extents.lock().clone()
+    }
+
+    fn select_target_disk(&self, _exclude: DiskId) -> Result<DiskId, String> {
+        let call_num = self.target_calls.fetch_add(1, Ordering::SeqCst) as u64;
+        if let Some(limit) = *self.target_fail_after.lock() {
+            if call_num >= limit {
+                return Err("simulated target selection failure".into());
+            }
+        }
+        self.target_disk
+            .lock()
+            .ok_or_else(|| "no target disk configured".into())
+    }
+
+    fn transition_to_removed(&self, _disk_id: DiskId) -> Result<(), String> {
+        *self.transitioned.lock() = true;
+        Ok(())
+    }
+
+    fn is_draining(&self, _disk_id: DiskId) -> bool {
+        *self.draining.lock()
+    }
+}
+
+struct MockRepairReader {
+    data: parking_lot::Mutex<HashMap<(DiskId, ExtentId), Bytes>>,
+}
+
+impl MockRepairReader {
+    fn new() -> Self {
+        Self {
+            data: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl RepairExtentReader for MockRepairReader {
+    fn read_extent(
+        &self,
+        source_disk: DiskId,
+        extent_id: ExtentId,
+        _version: u64,
+    ) -> Result<Bytes, String> {
+        self.data
+            .lock()
+            .get(&(source_disk, extent_id))
+            .cloned()
+            .ok_or_else(|| "not found".into())
+    }
+}
+
+struct MockRepairWriter {
+    written: parking_lot::Mutex<Vec<(DiskId, ExtentId, Vec<u8>)>>,
+}
+
+impl MockRepairWriter {
+    fn new() -> Self {
+        Self {
+            written: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn write_count(&self) -> usize {
+        self.written.lock().len()
+    }
+}
+
+impl RepairExtentWriter for MockRepairWriter {
+    fn write_extent(
+        &self,
+        target_disk: DiskId,
+        extent_id: ExtentId,
+        _version: u64,
+        data: &[u8],
+    ) -> Result<(), String> {
+        self.written
+            .lock()
+            .push((target_disk, extent_id, data.to_vec()));
+        Ok(())
+    }
+}
+
+struct MockFragmentReader;
+
+impl FragmentReader for MockFragmentReader {
+    fn read_fragment(
+        &self,
+        _source_disk: DiskId,
+        _extent_id: ExtentId,
+        _fragment_index: usize,
+    ) -> Result<Bytes, String> {
+        Err("not implemented for rebalance tests".into())
+    }
+}
+
+struct MockEcReconstructor;
+
+impl EcReconstructor for MockEcReconstructor {
+    fn reconstruct(
+        &self,
+        _data_count: usize,
+        _parity_count: usize,
+        _fragments: Vec<Option<Bytes>>,
+        _original_len: usize,
+    ) -> Result<Bytes, String> {
+        Err("not implemented for rebalance tests".into())
+    }
 }
 
 // ---------------------------------------------------------------------------
-// P9D.1 — Add node → rebalance → data integrity verified
-// (Placeholder: pending Phase 7 real rebalancing implementation)
+// P9D.1 — Add node → rebalance → data integrity
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_add_node_rebalance_data_integrity() {
-    let mut cluster = ProcessCluster::new(cluster_config(3, 44000));
-    assert_eq!(cluster.node_count(), 3);
+    let disk_high_1 = DiskId::generate();
+    let disk_high_2 = DiskId::generate();
+    let disk_new = DiskId::generate();
 
-    let vol1 = VolumeId::generate();
-    let vol2 = VolumeId::generate();
-    let volumes = vec![vol1, vol2];
+    let mut extents_high_1 = Vec::new();
+    for _ in 0..10 {
+        extents_high_1.push((ExtentId::generate(), 1));
+    }
+    let mut extents_high_2 = Vec::new();
+    for _ in 0..8 {
+        extents_high_2.push((ExtentId::generate(), 1));
+    }
 
-    let workload = workload_for_volumes(&volumes, 1.0);
-    simulate_workload(&workload, 60, true);
-    assert_eq!(workload.log().acked_write_count(), 60);
+    let inventory = MockRebalanceInventory::new()
+        .with_disk(disk_high_1, 800, 1000, extents_high_1.clone())
+        .with_disk(disk_high_2, 750, 1000, extents_high_2.clone())
+        .with_disk(disk_new, 0, 1000, vec![]);
 
-    let new_node_id = cluster.add_node();
-    assert_eq!(new_node_id, NodeId(3));
-    assert_eq!(cluster.node_count(), 4);
+    let worker = RebalanceWorker::new(RebalanceConfig {
+        imbalance_threshold: 0.1,
+        max_moves_per_pass: 100,
+        tokens_per_move: 1,
+        check_interval_secs: 60,
+    });
 
-    let original_nodes: Vec<NodeId> = (0..3).map(NodeId).collect();
-    let (extents_moved, rebalanced_vols) =
-        simulate_rebalance(&original_nodes, &[new_node_id], &volumes);
-    assert!(extents_moved > 0);
-    assert_eq!(rebalanced_vols.len(), volumes.len());
+    let plan = worker.generate_plan(&inventory);
 
-    simulate_workload(&workload, 40, true);
-    assert_eq!(workload.log().acked_write_count(), 100);
-
-    let reports = verify_consistency(workload.log(), 50);
+    assert!(plan.needed, "rebalance should be needed with 80%/75%/0% disks");
+    assert!(!plan.moves.is_empty(), "plan should contain moves");
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "post-rebalance consistency failed"
+        plan.max_imbalance > 0.1,
+        "max imbalance should exceed threshold"
     );
+
+    for mv in &plan.moves {
+        assert_eq!(mv.target_disk, disk_new, "all moves should target the new empty disk");
+        assert!(
+            mv.source_disk == disk_high_1 || mv.source_disk == disk_high_2,
+            "moves should come from over-utilized disks"
+        );
+    }
+
+    let repair_worker = RepairWorker::new(RepairConfig::default());
+    let limiter = TokenBucket::new(1000, 1000);
+
+    let submitted = worker
+        .execute_plan(&plan, &inventory, &repair_worker, &limiter)
+        .await;
+
+    assert_eq!(submitted, plan.moves.len());
+    assert_eq!(repair_worker.queue_len(), plan.moves.len());
+
+    let reader = MockRepairReader::new();
+    for mv in &plan.moves {
+        let sources = inventory.healthy_sources_for_extent(mv.extent_id);
+        for src in &sources {
+            reader
+                .data
+                .lock()
+                .insert((*src, mv.extent_id), Bytes::from(vec![0xAB; 64]));
+        }
+    }
+    let writer = MockRepairWriter::new();
+    let frag_reader = MockFragmentReader;
+    let ec = MockEcReconstructor;
+
+    let outcomes = repair_worker
+        .process_all(&reader, &frag_reader, &writer, &ec, &limiter)
+        .await;
+
+    assert_eq!(outcomes.len(), plan.moves.len());
+    assert!(
+        outcomes.iter().all(|o| o.success),
+        "all repair operations should succeed"
+    );
+    assert_eq!(writer.write_count(), plan.moves.len());
 }
 
 // ---------------------------------------------------------------------------
-// P9D.2 — Remove node (drain) → all volumes migrated → no data loss
-// (Placeholder: pending Phase 7 real rebalancing implementation)
+// P9D.2 — Remove node (drain) → all extents processed → completion fires
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_remove_node_drain_no_data_loss() {
-    let mut cluster = ProcessCluster::new(cluster_config(5, 45000));
-    assert_eq!(cluster.node_count(), 5);
+    let drain_disk = DiskId::generate();
+    let target_disk = DiskId::generate();
+    let source_disk = DiskId::generate();
 
-    let volumes: Vec<VolumeId> = (0..3).map(|_| VolumeId::generate()).collect();
-    let workload = workload_for_volumes(&volumes, 0.8);
-    simulate_workload(&workload, 80, true);
-
-    let drain_target = NodeId(4);
-    let remaining: Vec<NodeId> = cluster
-        .node_ids()
-        .into_iter()
-        .filter(|id| *id != drain_target)
+    let extents: Vec<DrainExtentEntry> = (0..5)
+        .map(|_| DrainExtentEntry {
+            extent_id: ExtentId::generate(),
+            version: 1,
+            healthy_sources: vec![source_disk],
+        })
         .collect();
 
-    let migrated = simulate_drain(drain_target, &remaining, &volumes);
-    assert_eq!(migrated.len(), volumes.len());
+    let inventory = MockDrainInventory::new()
+        .with_extents(extents.clone())
+        .with_target(target_disk);
 
-    cluster.remove_node(drain_target).unwrap();
-    assert_eq!(cluster.node_count(), 4);
+    let drain_worker = DrainWorker::new(DrainConfig {
+        tokens_per_relocate: 1,
+        inter_relocate_delay_ms: 0,
+    });
 
-    simulate_workload(&workload, 40, true);
+    let repair_worker = RepairWorker::new(RepairConfig::default());
+    let limiter = TokenBucket::new(1000, 1000);
 
-    let reports = verify_consistency(workload.log(), 50);
+    assert!(drain_worker.progress().is_none());
+
+    let progress = drain_worker
+        .drain_disk(drain_disk, &inventory, &repair_worker, &limiter)
+        .await;
+
+    assert_eq!(progress.total_extents, 5);
+    assert_eq!(progress.relocated, 5);
+    assert_eq!(progress.failed, 0);
+    assert!(progress.complete, "drain should complete successfully");
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "post-drain consistency failed"
+        inventory.was_transitioned(),
+        "disk should be transitioned to removed"
     );
+
+    assert_eq!(repair_worker.queue_len(), 5);
+
+    let tracked_progress = drain_worker.progress().expect("progress should be tracked");
+    assert_eq!(tracked_progress.total_extents, 5);
+    assert_eq!(tracked_progress.relocated, 5);
+    assert!(tracked_progress.complete);
 }
 
 // ---------------------------------------------------------------------------
-// P9D.3 — Kill node during rebalance → rebalance resumes after recovery
-// (Placeholder: pending Phase 7 real rebalancing implementation)
+// P9D.3 — Kill during rebalance → inventory fails partway → resumes on retry
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_kill_during_rebalance_resumes() {
-    let mut cluster = ProcessCluster::new(cluster_config(4, 46000));
-    let vol = VolumeId::generate();
-    let workload = workload_for_volumes(&[vol], 1.0);
-    simulate_workload(&workload, 40, true);
+    let drain_disk = DiskId::generate();
+    let target_disk = DiskId::generate();
+    let source_disk = DiskId::generate();
 
-    let new_node_id = cluster.add_node();
-    assert_eq!(cluster.node_count(), 5);
+    let extents: Vec<DrainExtentEntry> = (0..6)
+        .map(|_| DrainExtentEntry {
+            extent_id: ExtentId::generate(),
+            version: 1,
+            healthy_sources: vec![source_disk],
+        })
+        .collect();
 
-    let original_nodes: Vec<NodeId> = (0..4).map(NodeId).collect();
-    let (moved, _) = simulate_rebalance(&original_nodes, &[new_node_id], &[vol]);
-    assert!(moved > 0);
+    let inventory = MockDrainInventory::new()
+        .with_extents(extents.clone())
+        .with_target(target_disk);
+    inventory.set_fail_after_n_targets(3);
 
-    simulate_workload(&workload, 30, true);
-    assert_eq!(workload.log().acked_write_count(), 70);
+    let drain_worker = DrainWorker::new(DrainConfig {
+        tokens_per_relocate: 1,
+        inter_relocate_delay_ms: 0,
+    });
+    let repair_worker = RepairWorker::new(RepairConfig::default());
+    let limiter = TokenBucket::new(1000, 1000);
 
-    let reports = verify_consistency(workload.log(), 40);
+    let progress = drain_worker
+        .drain_disk(drain_disk, &inventory, &repair_worker, &limiter)
+        .await;
+
+    assert_eq!(progress.relocated, 3, "should relocate 3 before failure");
+    assert_eq!(progress.failed, 3, "remaining 3 should fail");
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "consistency failed after simulated kill-during-rebalance"
+        !progress.complete,
+        "drain should NOT complete due to failures"
     );
+
+    let remaining_extents: Vec<DrainExtentEntry> = extents[3..].to_vec();
+    let inventory2 = MockDrainInventory::new()
+        .with_extents(remaining_extents)
+        .with_target(target_disk);
+
+    let repair_worker2 = RepairWorker::new(RepairConfig::default());
+
+    let progress2 = drain_worker
+        .drain_disk(drain_disk, &inventory2, &repair_worker2, &limiter)
+        .await;
+
+    assert_eq!(progress2.relocated, 3, "retry should relocate remaining 3");
+    assert_eq!(progress2.failed, 0);
+    assert!(progress2.complete, "retry should complete successfully");
+    assert!(inventory2.was_transitioned());
 }
 
 // ---------------------------------------------------------------------------
-// P9D.4 — Concurrent client IO during rebalance: no errors
-// (Placeholder: pending Phase 7 real rebalancing implementation)
+// P9D.4 — Concurrent IO during rebalance with real TokenBucket rate limiter
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_concurrent_io_during_rebalance() {
-    let mut cluster = ProcessCluster::new(cluster_config(3, 47000));
-    let volumes: Vec<VolumeId> = (0..2).map(|_| VolumeId::generate()).collect();
-    let workload = workload_for_volumes(&volumes, 0.7);
+    let limiter = TokenBucket::new(10, 100);
 
-    simulate_workload(&workload, 50, true);
-
-    let new_node = cluster.add_node();
-    let original_nodes: Vec<NodeId> = (0..3).map(NodeId).collect();
-
-    let batch_size = 10;
-    for batch in 0..10 {
-        simulate_workload(&workload, batch_size, true);
-        if batch == 5 {
-            let (moved, _) = simulate_rebalance(&original_nodes, &[new_node], &volumes);
-            assert!(moved > 0);
-        }
-    }
-
-    assert_eq!(
-        workload.log().failed_operations().len(),
-        0,
-        "concurrent IO during rebalance must have zero errors"
-    );
-
-    let reports = verify_consistency(workload.log(), 50);
+    assert!(limiter.try_acquire(10), "should acquire all 10 tokens");
     assert!(
-        reports.iter().all(|r| r.result.is_pass()),
-        "consistency failed during concurrent IO + rebalance"
+        !limiter.try_acquire(1),
+        "bucket should be empty after draining"
     );
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(120)).await;
+    let available = limiter.available();
+    assert!(
+        available > 0 && available <= 10,
+        "tokens should refill but not exceed capacity; got {available}"
+    );
+
+    let disk1 = DiskId::generate();
+    let disk2 = DiskId::generate();
+    let eid = ExtentId::generate();
+
+    let inventory = MockRebalanceInventory::new()
+        .with_disk(disk1, 900, 1000, vec![(eid, 1)])
+        .with_disk(disk2, 100, 1000, vec![]);
+
+    let rebalance_worker = RebalanceWorker::new(RebalanceConfig {
+        imbalance_threshold: 0.1,
+        max_moves_per_pass: 10,
+        tokens_per_move: 5,
+        check_interval_secs: 60,
+    });
+
+    let repair_worker = RepairWorker::new(RepairConfig::default());
+
+    let slow_limiter = TokenBucket::new(5, 50);
+    assert!(slow_limiter.try_acquire(5));
+
+    let start = tokio::time::Instant::now();
+    let plan = rebalance_worker
+        .rebalance_pass(&inventory, &repair_worker, &slow_limiter)
+        .await;
+    let elapsed = start.elapsed();
+
+    assert!(plan.needed, "rebalance should be needed");
+    assert!(
+        !plan.moves.is_empty(),
+        "should have generated at least one move"
+    );
+    assert!(
+        elapsed.as_millis() >= 50,
+        "rate limiter should have throttled the operation; elapsed={elapsed:?}"
+    );
+    assert_eq!(repair_worker.queue_len(), plan.moves.len());
 }
