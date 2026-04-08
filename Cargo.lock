@@ -177,6 +177,7 @@ name = "blockyard-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blockyard-cli",
  "blockyard-common",
  "chrono",
  "clap",

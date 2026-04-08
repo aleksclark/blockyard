@@ -24,5 +24,17 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 
+[features]
+testutil = ["parking_lot"]
+
+[dependencies.parking_lot]
+workspace = true
+optional = true
+
 [dev-dependencies]
+blockyard-cli = { path = ".", features = ["testutil"] }
+blockyard-common = { path = "../blockyard-common" }
 parking_lot.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+chrono.workspace = true

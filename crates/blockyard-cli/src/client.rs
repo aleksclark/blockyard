@@ -44,7 +44,7 @@ pub trait BlockyardClient: Send + Sync {
     fn unmount(&self, volume_id: VolumeId) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testutil"))]
 pub mod mock {
     use super::*;
     use crate::types::*;
