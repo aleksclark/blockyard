@@ -1,8 +1,4 @@
 //! Phase 9D — Rebalancing integration tests exercising real Phase 7 workers.
-//!
-//! These tests use the real `RebalanceWorker`, `DrainWorker`, `RepairWorker`,
-//! and `TokenBucket` from `blockyard_storage::background`, wired to mock
-//! inventory implementations that track moves, failures, and progress.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,16 +9,15 @@ use blockyard_storage::background::rate_limit::TokenBucket;
 use blockyard_storage::background::rebalance::{
     DiskUtilization, RebalanceConfig, RebalanceInventory, RebalanceWorker,
 };
-use blockyard_storage::background::repair::{
-    EcReconstructor, FragmentReader, RepairConfig, RepairExtentReader, RepairExtentWriter,
-    RepairWorker,
-};
+use blockyard_storage::background::repair::{RepairConfig, RepairWorker};
 use blockyard_storage::{ExtentStore, StorageClass};
-use bytes::Bytes;
+use blockyard_test_harness::repair_testutil::{
+    StubEcReconstructor, StubFragmentReader, TestRepairReader, TestRepairWriter,
+};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
-// Mock implementations
+// Mock implementations (rebalancing-specific)
 // ---------------------------------------------------------------------------
 
 struct MockRebalanceInventory {
@@ -59,7 +54,6 @@ impl MockRebalanceInventory {
         self.extents.insert(disk_id, extents);
         self
     }
-
 }
 
 impl RebalanceInventory for MockRebalanceInventory {
@@ -143,125 +137,6 @@ impl DrainInventory for MockDrainInventory {
     }
 }
 
-struct DiskBackedRepairReader {
-    stores: HashMap<DiskId, (ExtentStore, TempDir)>,
-}
-
-impl DiskBackedRepairReader {
-    fn new() -> Self {
-        Self {
-            stores: HashMap::new(),
-        }
-    }
-
-    fn add_store(&mut self, disk_id: DiskId, store: ExtentStore, tmpdir: TempDir) {
-        self.stores.insert(disk_id, (store, tmpdir));
-    }
-}
-
-impl RepairExtentReader for DiskBackedRepairReader {
-    fn read_extent(
-        &self,
-        source_disk: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-    ) -> Result<Bytes, String> {
-        let (store, _) = self
-            .stores
-            .get(&source_disk)
-            .ok_or_else(|| format!("no store for disk {source_disk}"))?;
-        let (data, _) = store.read_extent(extent_id, version).map_err(|e| format!("{e}"))?;
-        Ok(Bytes::from(data))
-    }
-}
-
-struct DiskBackedRepairWriter {
-    stores: HashMap<DiskId, (ExtentStore, TempDir)>,
-}
-
-impl DiskBackedRepairWriter {
-    fn new() -> Self {
-        Self {
-            stores: HashMap::new(),
-        }
-    }
-
-    fn add_store(&mut self, disk_id: DiskId, store: ExtentStore, tmpdir: TempDir) {
-        self.stores.insert(disk_id, (store, tmpdir));
-    }
-
-    fn write_count(&self) -> usize {
-        let mut count = 0;
-        for (store, _) in self.stores.values() {
-            let index = blockyard_storage::ExtentIndex::new();
-            if let Ok(report) = store.recover(&index) {
-                count += report.committed_recovered;
-            }
-        }
-        count
-    }
-
-    fn read_back(&self, disk_id: DiskId, extent_id: ExtentId, version: u64) -> Option<(Vec<u8>, String)> {
-        let (store, _) = self.stores.get(&disk_id)?;
-        store.read_extent(extent_id, version).ok()
-    }
-}
-
-impl RepairExtentWriter for DiskBackedRepairWriter {
-    fn write_extent(
-        &self,
-        target_disk: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let (store, _) = self
-            .stores
-            .get(&target_disk)
-            .ok_or_else(|| format!("no store for disk {target_disk}"))?;
-        let (_, checksum) = store
-            .stage_extent(extent_id, version, data)
-            .map_err(|e| format!("{e}"))?;
-        store
-            .commit_extent(
-                extent_id,
-                version,
-                &checksum,
-                data.len() as u64,
-                StorageClass::Default,
-            )
-            .map_err(|e| format!("{e}"))?;
-        Ok(())
-    }
-}
-
-struct MockFragmentReader;
-
-impl FragmentReader for MockFragmentReader {
-    fn read_fragment(
-        &self,
-        _source_disk: DiskId,
-        _extent_id: ExtentId,
-        _fragment_index: usize,
-    ) -> Result<Bytes, String> {
-        Err("not implemented for rebalance tests".into())
-    }
-}
-
-struct MockEcReconstructor;
-
-impl EcReconstructor for MockEcReconstructor {
-    fn reconstruct(
-        &self,
-        _data_count: usize,
-        _parity_count: usize,
-        _fragments: Vec<Option<Bytes>>,
-        _original_len: usize,
-    ) -> Result<Bytes, String> {
-        Err("not implemented for rebalance tests".into())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // P9D.1 — Add node → rebalance → data integrity
 // ---------------------------------------------------------------------------
@@ -320,7 +195,7 @@ async fn test_add_node_rebalance_data_integrity() {
     assert_eq!(submitted, plan.moves.len());
     assert_eq!(repair_worker.queue_len(), plan.moves.len());
 
-    let mut reader = DiskBackedRepairReader::new();
+    let mut reader = TestRepairReader::new();
     for mv in &plan.moves {
         let sources = inventory.healthy_sources_for_extent(mv.extent_id);
         for src in &sources {
@@ -348,13 +223,11 @@ async fn test_add_node_rebalance_data_integrity() {
     let target_tmpdir = TempDir::new().expect("create target tmpdir");
     let target_store = ExtentStore::new(target_tmpdir.path().to_path_buf(), disk_new);
     target_store.init_directories().expect("init target dirs");
-    let mut writer = DiskBackedRepairWriter::new();
+    let mut writer = TestRepairWriter::new();
     writer.add_store(disk_new, target_store, target_tmpdir);
-    let frag_reader = MockFragmentReader;
-    let ec = MockEcReconstructor;
 
     let outcomes = repair_worker
-        .process_all(&reader, &frag_reader, &writer, &ec, &limiter)
+        .process_all(&reader, &StubFragmentReader, &writer, &StubEcReconstructor, &limiter)
         .await;
 
     assert_eq!(outcomes.len(), plan.moves.len());
@@ -446,15 +319,13 @@ async fn test_remove_node_drain_no_data_loss() {
 
     assert_eq!(repair_worker.queue_len(), 5);
 
-    let mut reader = DiskBackedRepairReader::new();
+    let mut reader = TestRepairReader::new();
     reader.add_store(source_disk, source_store, source_tmpdir);
-    let mut writer = DiskBackedRepairWriter::new();
+    let mut writer = TestRepairWriter::new();
     writer.add_store(target_disk, target_store, target_tmpdir);
-    let frag_reader = MockFragmentReader;
-    let ec = MockEcReconstructor;
 
     let outcomes = repair_worker
-        .process_all(&reader, &frag_reader, &writer, &ec, &limiter)
+        .process_all(&reader, &StubFragmentReader, &writer, &StubEcReconstructor, &limiter)
         .await;
 
     assert_eq!(outcomes.len(), 5);

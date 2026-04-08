@@ -10,6 +10,12 @@ description = "Integration test harness with VM/process-based cluster management
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
 blockyard-protocol = { path = "../blockyard-protocol" }
+blockyard-raft = { path = "../blockyard-raft" }
+blockyard-storage = { path = "../blockyard-storage" }
+blockyard-ublk = { path = "../blockyard-ublk" }
+blockyard-client = { path = "../blockyard-client" }
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+tempfile = "3"
 
 anyhow.workspace = true
 bytes.workspace = true
@@ -27,10 +33,4 @@ rand = "0.8"
 sha2 = "0.10"
 
 [dev-dependencies]
-blockyard-raft = { path = "../blockyard-raft" }
-blockyard-storage = { path = "../blockyard-storage" }
-bytes.workspace = true
-openraft = { version = "0.9", features = ["serde", "storage-v2"] }
-parking_lot.workspace = true
-tempfile = "3"
 tracing-subscriber = { workspace = true }

@@ -1,8 +1,13 @@
 pub mod checker;
 pub mod cluster;
 pub mod fault;
+pub mod mock_datanode;
+pub mod mock_metadata;
 pub mod network;
 pub mod pattern;
+pub mod pipeline_testutil;
+pub mod raft_testutil;
+pub mod repair_testutil;
 pub mod scenario;
 pub mod snapshot;
 pub mod vm;

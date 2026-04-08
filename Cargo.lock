@@ -292,10 +292,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "blockyard-client",
  "blockyard-common",
  "blockyard-protocol",
  "blockyard-raft",
  "blockyard-storage",
+ "blockyard-ublk",
  "bytes",
  "nix",
  "openraft",

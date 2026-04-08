@@ -1,82 +1,11 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
-use blockyard_common::{
-    DiskId, EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
-};
-use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
+use blockyard_common::{ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
 use blockyard_storage::extent::{
     committed_extent_path, compute_checksum, staged_extent_path, verify_checksum,
 };
-use blockyard_storage::{ExtentIndex, ExtentStore, StorageClass};
-use openraft::BasicNode;
-use parking_lot::RwLock;
+use blockyard_storage::{ExtentIndex, StorageClass};
+use blockyard_test_harness::mock_datanode::create_test_extent_store;
+use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, find_leader};
 use tempfile::TempDir;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn create_extent_store(tmpdir: &TempDir) -> (ExtentStore, DiskId) {
-    let disk_id = DiskId::generate();
-    let store = ExtentStore::new(tmpdir.path().to_path_buf(), disk_id);
-    store.init_directories().expect("init directories");
-    (store, disk_id)
-}
-
-async fn create_raft_cluster(node_count: u64) -> (Vec<MetadataService>, Arc<RwLock<Router>>) {
-    let router = Arc::new(RwLock::new(Router::new()));
-    let config = Arc::new(openraft::Config {
-        heartbeat_interval: 100,
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        ..Default::default()
-    });
-
-    let mut services = Vec::new();
-    for node_id in 1..=node_count {
-        let log_store = LogStore::new();
-        let sm_store = StateMachineStore::new();
-        let network = NetworkFactory::new(Arc::clone(&router));
-        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
-            node_id,
-            config.clone(),
-            network,
-            log_store,
-            sm_store.clone(),
-        )
-        .await
-        .expect("create raft node");
-        router.write().add_node(node_id, raft.clone());
-        services.push(MetadataService::new(raft, sm_store));
-    }
-
-    let mut nodes = BTreeMap::new();
-    for id in 1..=node_count {
-        nodes.insert(id, BasicNode::default());
-    }
-    services[0]
-        .raft()
-        .initialize(nodes)
-        .await
-        .expect("initialize cluster");
-
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    (services, router)
-}
-
-async fn find_leader(services: &[MetadataService]) -> usize {
-    for _ in 0..20 {
-        for (i, svc) in services.iter().enumerate() {
-            let metrics = svc.raft().metrics().borrow().clone();
-            if metrics.current_leader == Some((i + 1) as u64) {
-                return i;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("no leader elected");
-}
 
 // ---------------------------------------------------------------------------
 // P9E.1 — Crash recovery: write extents, simulate crash, run recovery scan
@@ -85,7 +14,7 @@ async fn find_leader(services: &[MetadataService]) -> usize {
 #[tokio::test]
 async fn test_crash_recovery_extents_survive() {
     let tmpdir = TempDir::new().expect("create tempdir");
-    let (store, _disk_id) = create_extent_store(&tmpdir);
+    let (store, _disk_id) = create_test_extent_store(&tmpdir);
     let index = ExtentIndex::new();
 
     let mut committed_extents = Vec::new();
@@ -157,9 +86,9 @@ async fn test_crash_recovery_extents_survive() {
 
 #[tokio::test]
 async fn test_partition_convergence_metadata_state_machine() {
-    let (services, _router) = create_raft_cluster(3).await;
-    let leader_idx = find_leader(&services).await;
-    let leader = &services[leader_idx];
+    let cluster = create_test_raft_cluster(3).await;
+    let leader_idx = find_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
 
     let vol_id = VolumeId::generate();
     leader
@@ -213,7 +142,7 @@ async fn test_partition_convergence_metadata_state_machine() {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    for (i, svc) in services.iter().enumerate() {
+    for (i, svc) in cluster.services.iter().enumerate() {
         let vol = svc.get_volume(&vol_id);
         assert!(
             vol.is_some(),
@@ -244,7 +173,8 @@ async fn test_partition_convergence_metadata_state_machine() {
         );
     }
 
-    let follower_epochs: Vec<EpochId> = services.iter().map(|s| s.current_epoch()).collect();
+    let follower_epochs: Vec<blockyard_common::EpochId> =
+        cluster.services.iter().map(|s| s.current_epoch()).collect();
     let leader_epoch = follower_epochs[leader_idx];
     for (i, e) in follower_epochs.iter().enumerate() {
         assert_eq!(
@@ -265,7 +195,7 @@ async fn test_partition_convergence_metadata_state_machine() {
 #[tokio::test]
 async fn test_corruption_detected_checksum_mismatch() {
     let tmpdir = TempDir::new().expect("create tempdir");
-    let (store, _disk_id) = create_extent_store(&tmpdir);
+    let (store, _disk_id) = create_test_extent_store(&tmpdir);
     let extent_id = ExtentId::generate();
     let data = vec![0x42u8; 8192];
     let (_, checksum) = store
@@ -322,9 +252,9 @@ async fn test_corruption_detected_checksum_mismatch() {
 
 #[tokio::test]
 async fn test_snapshot_verify_state_matches() {
-    let (services, _router) = create_raft_cluster(3).await;
-    let leader_idx = find_leader(&services).await;
-    let leader = &services[leader_idx];
+    let cluster = create_test_raft_cluster(3).await;
+    let leader_idx = find_leader(&cluster).await;
+    let leader = &cluster.services[leader_idx];
 
     let vol_id = VolumeId::generate();
     leader
@@ -393,12 +323,12 @@ async fn test_snapshot_verify_state_matches() {
 
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    for svc in &services {
+    for svc in &cluster.services {
         assert!(svc.get_volume(&vol_id).is_some());
         assert!(svc.get_node(&node_id).is_some());
     }
 
-    for (i, svc) in services.iter().enumerate() {
+    for (i, svc) in cluster.services.iter().enumerate() {
         for (_, version) in &committed_extents {
             let m = svc.lookup_by_extent_version(*version);
             assert!(
@@ -418,7 +348,7 @@ async fn test_snapshot_verify_state_matches() {
     }
 
     let tmpdir = TempDir::new().expect("create tempdir for extent snapshot");
-    let (store, _disk_id) = create_extent_store(&tmpdir);
+    let (store, _disk_id) = create_test_extent_store(&tmpdir);
     let index = ExtentIndex::new();
 
     let original_data = vec![0xDDu8; 4096];

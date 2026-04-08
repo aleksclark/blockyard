@@ -1,249 +1,27 @@
 //! End-to-end integration tests that chain all major components through REAL
 //! filesystem I/O.  Every test uses `TempDir` + `ExtentStore` for data storage.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use blockyard_common::{
-    DiskId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
-};
-use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
+use blockyard_common::{DiskId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
 use blockyard_storage::background::drain::{DrainConfig, DrainExtentEntry, DrainInventory, DrainWorker};
 use blockyard_storage::background::rate_limit::TokenBucket;
-use blockyard_storage::background::repair::{
-    EcReconstructor, FragmentReader, RepairConfig, RepairExtentReader, RepairExtentWriter,
-    RepairType, RepairWorker,
-};
+use blockyard_storage::background::repair::{RepairConfig, RepairType, RepairWorker};
 use blockyard_storage::background::scrub::{
-    CorruptionNotification, ExtentReader, ScrubConfig, ScrubExtentEntry, ScrubWorker,
+    CorruptionNotification, ScrubConfig, ScrubWorker,
 };
 use blockyard_storage::extent::{committed_extent_path, compute_checksum};
 use blockyard_storage::{ExtentStore, StorageClass};
+use blockyard_test_harness::mock_datanode::{
+    create_test_extent_store, deterministic_data, write_test_extent,
+};
+use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, find_leader};
+use blockyard_test_harness::repair_testutil::{
+    StubEcReconstructor, StubFragmentReader, TestExtentReader, TestRepairReader, TestRepairWriter,
+};
 use bytes::Bytes;
-use openraft::BasicNode;
-use parking_lot::RwLock;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Deterministic data pattern: each byte = (extent_index * 0x37) ^ byte_position
-fn deterministic_data(extent_index: usize, len: usize) -> Vec<u8> {
-    (0..len)
-        .map(|pos| ((extent_index.wrapping_mul(0x37)) ^ pos) as u8)
-        .collect()
-}
-
-fn create_extent_store(tmpdir: &TempDir) -> (ExtentStore, DiskId) {
-    let disk_id = DiskId::generate();
-    let store = ExtentStore::new(tmpdir.path().to_path_buf(), disk_id);
-    store.init_directories().expect("init directories");
-    (store, disk_id)
-}
-
-/// Stage + commit an extent with deterministic data. Returns (ExtentId, version, checksum, data).
-fn write_extent(
-    store: &ExtentStore,
-    extent_index: usize,
-    version: u64,
-) -> (ExtentId, u64, String, Vec<u8>) {
-    let extent_id = ExtentId::generate();
-    let data = deterministic_data(extent_index, 4096);
-    let (_staged, checksum) = store
-        .stage_extent(extent_id, version, &data)
-        .expect("stage extent");
-    store
-        .commit_extent(
-            extent_id,
-            version,
-            &checksum,
-            data.len() as u64,
-            StorageClass::Default,
-        )
-        .expect("commit extent");
-    (extent_id, version, checksum, data)
-}
-
-// ---------------------------------------------------------------------------
-// ExtentReader backed by real stores (for scrub)
-// ---------------------------------------------------------------------------
-
-struct RealExtentReader {
-    stores: Vec<(DiskId, ExtentStore)>,
-    entries: Vec<(DiskId, ExtentId, u64, String)>,
-}
-
-impl RealExtentReader {
-    fn new(stores: Vec<(DiskId, ExtentStore)>) -> Self {
-        Self {
-            stores,
-            entries: Vec::new(),
-        }
-    }
-
-    fn register(&mut self, disk_id: DiskId, extent_id: ExtentId, version: u64, checksum: String) {
-        self.entries.push((disk_id, extent_id, version, checksum));
-    }
-
-    fn store_for(&self, disk_id: DiskId) -> Option<&ExtentStore> {
-        self.stores.iter().find(|(d, _)| *d == disk_id).map(|(_, s)| s)
-    }
-}
-
-impl ExtentReader for RealExtentReader {
-    fn read_extent(
-        &self,
-        disk_id: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-    ) -> Result<(Vec<u8>, String), String> {
-        let store = self.store_for(disk_id).ok_or("disk not found")?;
-        // Read raw file and compute checksum (bypass metadata check for scrub)
-        let path = committed_extent_path(store.mount_path(), extent_id, version);
-        let data = std::fs::read(&path).map_err(|e| format!("read error: {e}"))?;
-        let checksum = compute_checksum(&data);
-        Ok((data, checksum))
-    }
-
-    fn list_extents(&self, disk_id: DiskId) -> Vec<ScrubExtentEntry> {
-        self.entries
-            .iter()
-            .filter(|(d, _, _, _)| *d == disk_id)
-            .map(|(d, e, v, c)| ScrubExtentEntry {
-                extent_id: *e,
-                disk_id: *d,
-                expected_checksum: c.clone(),
-                version: *v,
-            })
-            .collect()
-    }
-
-    fn list_disks(&self) -> Vec<DiskId> {
-        self.stores.iter().map(|(d, _)| *d).collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RepairExtentReader/Writer backed by real stores
-// ---------------------------------------------------------------------------
-
-struct RealRepairReader {
-    stores: Vec<(DiskId, ExtentStore)>,
-}
-
-impl RealRepairReader {
-    fn new(stores: Vec<(DiskId, ExtentStore)>) -> Self {
-        Self { stores }
-    }
-}
-
-impl RepairExtentReader for RealRepairReader {
-    fn read_extent(
-        &self,
-        source_disk: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-    ) -> Result<Bytes, String> {
-        let store = self
-            .stores
-            .iter()
-            .find(|(d, _)| *d == source_disk)
-            .map(|(_, s)| s)
-            .ok_or("source disk not found")?;
-        let (data, _checksum) = store
-            .read_extent(extent_id, version)
-            .map_err(|e| format!("{e}"))?;
-        Ok(Bytes::from(data))
-    }
-}
-
-struct RealRepairWriter {
-    stores: Vec<(DiskId, ExtentStore)>,
-}
-
-impl RealRepairWriter {
-    fn new(stores: Vec<(DiskId, ExtentStore)>) -> Self {
-        Self { stores }
-    }
-}
-
-impl RepairExtentWriter for RealRepairWriter {
-    fn write_extent(
-        &self,
-        target_disk: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let store = self
-            .stores
-            .iter()
-            .find(|(d, _)| *d == target_disk)
-            .map(|(_, s)| s)
-            .ok_or("target disk not found")?;
-        let checksum = compute_checksum(data);
-        // Remove existing committed file if present (for repair overwrite)
-        let committed_path = committed_extent_path(store.mount_path(), extent_id, version);
-        if committed_path.exists() {
-            std::fs::remove_file(&committed_path).map_err(|e| format!("{e}"))?;
-            // Also remove the meta file
-            let meta_path = blockyard_storage::extent::extent_meta_path(
-                store.mount_path(),
-                extent_id,
-                version,
-            );
-            if meta_path.exists() {
-                let _ = std::fs::remove_file(&meta_path);
-            }
-        }
-        store
-            .stage_extent(extent_id, version, data)
-            .map_err(|e| format!("{e}"))?;
-        store
-            .commit_extent(
-                extent_id,
-                version,
-                &checksum,
-                data.len() as u64,
-                StorageClass::Default,
-            )
-            .map_err(|e| format!("{e}"))?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub FragmentReader / EcReconstructor (not used in replication tests)
-// ---------------------------------------------------------------------------
-
-struct StubFragmentReader;
-
-impl FragmentReader for StubFragmentReader {
-    fn read_fragment(
-        &self,
-        _source_disk: DiskId,
-        _extent_id: ExtentId,
-        _fragment_index: usize,
-    ) -> Result<Bytes, String> {
-        Err("not implemented".into())
-    }
-}
-
-struct StubEcReconstructor;
-
-impl EcReconstructor for StubEcReconstructor {
-    fn reconstruct(
-        &self,
-        _data_count: usize,
-        _parity_count: usize,
-        _fragments: Vec<Option<Bytes>>,
-        _original_len: usize,
-    ) -> Result<Bytes, String> {
-        Err("not implemented".into())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DrainInventory backed by real store
@@ -273,101 +51,32 @@ impl DrainInventory for RealDrainInventory {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Raft cluster helpers
-// ---------------------------------------------------------------------------
-
-struct RaftCluster {
-    services: Vec<MetadataService>,
-    _router: Arc<RwLock<Router>>,
-}
-
-async fn create_raft_cluster(node_count: u64) -> RaftCluster {
-    let router = Arc::new(RwLock::new(Router::new()));
-    let config = Arc::new(openraft::Config {
-        heartbeat_interval: 100,
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        ..Default::default()
-    });
-
-    let mut services = Vec::new();
-    for node_id in 1..=node_count {
-        let log_store = LogStore::new();
-        let sm_store = StateMachineStore::new();
-        let network = NetworkFactory::new(Arc::clone(&router));
-        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
-            node_id,
-            config.clone(),
-            network,
-            log_store,
-            sm_store.clone(),
-        )
-        .await
-        .expect("create raft node");
-        router.write().add_node(node_id, raft.clone());
-        services.push(MetadataService::new(raft, sm_store));
-    }
-
-    let mut nodes = BTreeMap::new();
-    for id in 1..=node_count {
-        nodes.insert(id, BasicNode::default());
-    }
-    services[0]
-        .raft()
-        .initialize(nodes)
-        .await
-        .expect("initialize cluster");
-
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-    RaftCluster {
-        services,
-        _router: router,
-    }
-}
-
-async fn find_leader(cluster: &RaftCluster) -> usize {
-    for _ in 0..20 {
-        for (i, svc) in cluster.services.iter().enumerate() {
-            let metrics = svc.raft().metrics().borrow().clone();
-            if metrics.current_leader == Some((i + 1) as u64) {
-                return i;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("no leader elected");
-}
-
 // ===========================================================================
 // Test 1: write → scrub → corrupt → scrub detects → repair → scrub clean
 // ===========================================================================
 
 #[tokio::test]
 async fn test_write_scrub_corrupt_repair_chain() {
-    // --- Setup: 3 ExtentStores with TempDirs ---
     let tmp1 = TempDir::new().expect("tmp1");
     let tmp2 = TempDir::new().expect("tmp2");
     let tmp3 = TempDir::new().expect("tmp3");
 
-    let (store1, disk1) = create_extent_store(&tmp1);
-    let (store2, disk2) = create_extent_store(&tmp2);
-    let (store3, disk3) = create_extent_store(&tmp3);
+    let (store1, disk1) = create_test_extent_store(&tmp1);
+    let (store2, disk2) = create_test_extent_store(&tmp2);
+    let (store3, disk3) = create_test_extent_store(&tmp3);
 
-    // --- Write 10 extents per disk (30 total) ---
     let mut all_entries: Vec<(DiskId, ExtentId, u64, String, Vec<u8>)> = Vec::new();
 
     let stores_and_disks = [(&store1, disk1), (&store2, disk2), (&store3, disk3)];
     for (store_idx, (store, disk_id)) in stores_and_disks.iter().enumerate() {
         for i in 0..10 {
             let global_idx = store_idx * 10 + i;
-            let (eid, ver, checksum, data) = write_extent(store, global_idx, 1);
+            let (eid, ver, checksum, data) = write_test_extent(store, global_idx, 1);
             all_entries.push((*disk_id, eid, ver, checksum, data));
         }
     }
 
-    // --- Build ExtentReader and register all entries ---
-    let mut reader = RealExtentReader::new(vec![
+    let mut reader = TestExtentReader::new(vec![
         (disk1, ExtentStore::new(tmp1.path().to_path_buf(), disk1)),
         (disk2, ExtentStore::new(tmp2.path().to_path_buf(), disk2)),
         (disk3, ExtentStore::new(tmp3.path().to_path_buf(), disk3)),
@@ -376,7 +85,6 @@ async fn test_write_scrub_corrupt_repair_chain() {
         reader.register(*disk_id, *eid, *ver, checksum.clone());
     }
 
-    // --- First scrub: should find 0 errors ---
     let scrub = ScrubWorker::new(ScrubConfig::default());
     let limiter = TokenBucket::new(10000, 10000);
     let (tx, mut rx) = mpsc::channel::<CorruptionNotification>(100);
@@ -395,10 +103,8 @@ async fn test_write_scrub_corrupt_repair_chain() {
         0,
         "should find 0 errors on clean data"
     );
-    // Drain channel — should be empty
     assert!(rx.try_recv().is_err(), "no corruption notifications expected");
 
-    // --- Corrupt 3 files on disk1 by flipping bytes ---
     let disk1_entries: Vec<_> = all_entries
         .iter()
         .filter(|(d, _, _, _, _)| *d == disk1)
@@ -416,13 +122,11 @@ async fn test_write_scrub_corrupt_repair_chain() {
         corrupted_eids.push(*eid);
     }
 
-    // --- Re-scrub: should detect 3 checksum errors ---
     let (tx2, mut rx2) = mpsc::channel::<CorruptionNotification>(100);
     let results2 = scrub.scrub_pass(&reader, &limiter, &tx2).await;
     let total_checksum_errors: u64 = results2.iter().map(|r| r.checksum_errors).sum();
     assert_eq!(total_checksum_errors, 3, "should detect 3 corrupted extents");
 
-    // Collect corruption notifications
     let mut notifications = Vec::new();
     while let Ok(n) = rx2.try_recv() {
         notifications.push(n);
@@ -435,26 +139,66 @@ async fn test_write_scrub_corrupt_repair_chain() {
         );
     }
 
-    // --- Repair: read original data, write to disk1 ---
-    let repair_writer = RealRepairWriter::new(vec![
-        (disk1, ExtentStore::new(tmp1.path().to_path_buf(), disk1)),
-    ]);
+    // Repair writes back to disk1's original path so the final scrub sees repaired data
+    struct InPlaceRepairWriter {
+        stores: Vec<(DiskId, ExtentStore)>,
+    }
+    impl blockyard_storage::background::repair::RepairExtentWriter for InPlaceRepairWriter {
+        fn write_extent(
+            &self,
+            target_disk: DiskId,
+            extent_id: ExtentId,
+            version: u64,
+            data: &[u8],
+        ) -> Result<(), String> {
+            let store = self
+                .stores
+                .iter()
+                .find(|(d, _)| *d == target_disk)
+                .map(|(_, s)| s)
+                .ok_or("target disk not found")?;
+            let checksum = compute_checksum(data);
+            let committed_path = committed_extent_path(store.mount_path(), extent_id, version);
+            if committed_path.exists() {
+                std::fs::remove_file(&committed_path).map_err(|e| format!("{e}"))?;
+                let meta_path = blockyard_storage::extent::extent_meta_path(
+                    store.mount_path(),
+                    extent_id,
+                    version,
+                );
+                if meta_path.exists() {
+                    let _ = std::fs::remove_file(&meta_path);
+                }
+            }
+            store
+                .stage_extent(extent_id, version, data)
+                .map_err(|e| format!("{e}"))?;
+            store
+                .commit_extent(
+                    extent_id,
+                    version,
+                    &checksum,
+                    data.len() as u64,
+                    StorageClass::Default,
+                )
+                .map_err(|e| format!("{e}"))?;
+            Ok(())
+        }
+    }
+
+    let repair_writer = InPlaceRepairWriter {
+        stores: vec![(disk1, ExtentStore::new(tmp1.path().to_path_buf(), disk1))],
+    };
 
     let repair_worker = RepairWorker::new(RepairConfig {
         max_concurrent: 4,
         tokens_per_repair: 1,
     });
 
-    // We need to repair from disk2; find the matching extents on disk2
-    // Since disk1 and disk2 have different extents, we need to write the
-    // correct data from disk2. Actually — for repair we need the *same*
-    // extent IDs to exist on another disk. In this test, each extent only
-    // lives on one disk. So we use a custom RepairExtentReader that reads
-    // the original data from our saved `all_entries`.
     struct OriginalDataReader {
         entries: Vec<(DiskId, ExtentId, u64, String, Vec<u8>)>,
     }
-    impl RepairExtentReader for OriginalDataReader {
+    impl blockyard_storage::background::repair::RepairExtentReader for OriginalDataReader {
         fn read_extent(
             &self,
             _source_disk: DiskId,
@@ -499,7 +243,6 @@ async fn test_write_scrub_corrupt_repair_chain() {
         assert!(outcome.success, "repair should succeed: {:?}", outcome.error);
     }
 
-    // --- Verify repaired files match originals ---
     let verify_store = ExtentStore::new(tmp1.path().to_path_buf(), disk1);
     for &eid in &corrupted_eids {
         let (_, _, _, _, original_data) = all_entries
@@ -515,9 +258,7 @@ async fn test_write_scrub_corrupt_repair_chain() {
         );
     }
 
-    // --- Final scrub: 0 errors ---
-    // Rebuild reader with fresh stores to read current disk state
-    let mut final_reader = RealExtentReader::new(vec![
+    let mut final_reader = TestExtentReader::new(vec![
         (disk1, ExtentStore::new(tmp1.path().to_path_buf(), disk1)),
         (disk2, ExtentStore::new(tmp2.path().to_path_buf(), disk2)),
         (disk3, ExtentStore::new(tmp3.path().to_path_buf(), disk3)),
@@ -541,15 +282,13 @@ async fn test_write_scrub_corrupt_repair_chain() {
 
 #[tokio::test]
 async fn test_metadata_commit_then_extent_write() {
-    // --- Create 3-node Raft cluster + ExtentStore ---
-    let cluster = create_raft_cluster(3).await;
+    let cluster = create_test_raft_cluster(3).await;
     let leader_idx = find_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
 
     let tmpdir = TempDir::new().expect("tmpdir");
-    let (store, _disk_id) = create_extent_store(&tmpdir);
+    let (store, _disk_id) = create_test_extent_store(&tmpdir);
 
-    // --- Create volume and advance epoch ---
     let vol_id = VolumeId::generate();
     leader
         .create_volume(
@@ -567,7 +306,6 @@ async fn test_metadata_commit_then_extent_write() {
         .await
         .expect("add node");
 
-    // --- Write extent data to disk ---
     let extent_id = ExtentId::generate();
     let data = deterministic_data(42, 8192);
     let (_staged, checksum) = store
@@ -583,7 +321,6 @@ async fn test_metadata_commit_then_extent_write() {
         )
         .expect("commit extent");
 
-    // --- Commit extent mapping via Raft ---
     let committed_epoch = leader
         .commit_extent_mapping(
             vol_id,
@@ -601,17 +338,14 @@ async fn test_metadata_commit_then_extent_write() {
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    // --- Read back and verify checksum matches metadata ---
     let (read_data, read_checksum) = store.read_extent(extent_id, 1).expect("read extent");
     assert_eq!(read_data, data);
     assert_eq!(read_checksum, checksum);
 
-    // Verify mapping on leader
     let mapping = leader.lookup_by_extent_version(1);
     assert!(mapping.is_some(), "mapping should be committed");
     assert_eq!(mapping.as_ref().unwrap().extent_id, extent_id);
 
-    // --- Shutdown leader, elect new ---
     let old_leader_id = (leader_idx + 1) as u64;
     cluster.services[leader_idx]
         .raft()
@@ -621,7 +355,6 @@ async fn test_metadata_commit_then_extent_write() {
 
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    // Find new leader
     let mut new_leader_idx = None;
     for _ in 0..30 {
         for (i, svc) in cluster.services.iter().enumerate() {
@@ -642,7 +375,6 @@ async fn test_metadata_commit_then_extent_write() {
     let new_leader_idx = new_leader_idx.expect("new leader should be elected");
     let new_leader = &cluster.services[new_leader_idx];
 
-    // --- Verify mapping survives on new leader ---
     let mapping = new_leader.lookup_by_extent_version(1);
     assert!(
         mapping.is_some(),
@@ -653,12 +385,10 @@ async fn test_metadata_commit_then_extent_write() {
     let vol = new_leader.get_volume(&vol_id);
     assert!(vol.is_some(), "volume must survive leader failover");
 
-    // --- Verify extent data still readable from disk ---
     let (final_data, final_checksum) = store.read_extent(extent_id, 1).expect("read after failover");
     assert_eq!(final_data, data);
     assert_eq!(final_checksum, checksum);
 
-    // Verify new leader can accept new writes
     let ext2 = ExtentId::generate();
     let result = new_leader
         .commit_extent_mapping(
@@ -686,21 +416,18 @@ async fn test_metadata_commit_then_extent_write() {
 
 #[tokio::test]
 async fn test_drain_relocates_real_extents() {
-    // --- Setup 2 disks ---
     let tmp1 = TempDir::new().expect("tmp1");
     let tmp2 = TempDir::new().expect("tmp2");
 
-    let (store1, disk1) = create_extent_store(&tmp1);
-    let (_store2, disk2) = create_extent_store(&tmp2);
+    let (store1, disk1) = create_test_extent_store(&tmp1);
+    let (_store2, disk2) = create_test_extent_store(&tmp2);
 
-    // --- Write 5 extents to disk1 ---
     let mut written_extents: Vec<(ExtentId, u64, String, Vec<u8>)> = Vec::new();
     for i in 0..5 {
-        let (eid, ver, checksum, data) = write_extent(&store1, i, 1);
+        let (eid, ver, checksum, data) = write_test_extent(&store1, i, 1);
         written_extents.push((eid, ver, checksum, data));
     }
 
-    // --- Build DrainInventory from real store data ---
     let drain_entries: Vec<DrainExtentEntry> = written_extents
         .iter()
         .map(|(eid, ver, _, _)| DrainExtentEntry {
@@ -716,7 +443,6 @@ async fn test_drain_relocates_real_extents() {
         entries: drain_entries,
     };
 
-    // --- Run drain to enqueue repair requests ---
     let drain_worker = DrainWorker::new(DrainConfig {
         tokens_per_relocate: 1,
         inter_relocate_delay_ms: 0,
@@ -734,13 +460,18 @@ async fn test_drain_relocates_real_extents() {
     assert_eq!(progress.relocated, 5);
     assert!(progress.complete);
 
-    // --- Process all repair requests (read from disk1, write to disk2) ---
-    let repair_reader = RealRepairReader::new(vec![
-        (disk1, ExtentStore::new(tmp1.path().to_path_buf(), disk1)),
-    ]);
-    let repair_writer = RealRepairWriter::new(vec![
-        (disk2, ExtentStore::new(tmp2.path().to_path_buf(), disk2)),
-    ]);
+    let mut repair_reader = TestRepairReader::new();
+    repair_reader.add_store(
+        disk1,
+        ExtentStore::new(tmp1.path().to_path_buf(), disk1),
+        tmp1,
+    );
+    let mut repair_writer = TestRepairWriter::new();
+    repair_writer.add_store(
+        disk2,
+        ExtentStore::new(tmp2.path().to_path_buf(), disk2),
+        tmp2,
+    );
 
     let outcomes = repair_worker
         .process_all(
@@ -756,15 +487,9 @@ async fn test_drain_relocates_real_extents() {
         assert!(outcome.success, "drain repair should succeed: {:?}", outcome.error);
     }
 
-    // --- Verify all 5 extents exist on disk2 with correct data ---
-    let verify_store2 = ExtentStore::new(tmp2.path().to_path_buf(), disk2);
     for (eid, ver, original_checksum, original_data) in &written_extents {
-        assert!(
-            verify_store2.extent_exists(*eid, *ver),
-            "extent {eid} should exist on disk2"
-        );
-        let (data, checksum) = verify_store2
-            .read_extent(*eid, *ver)
+        let (data, checksum) = repair_writer
+            .read_back(disk2, *eid, *ver)
             .expect("read drained extent from disk2");
         assert_eq!(&data, original_data, "data should match original");
         assert_eq!(&checksum, original_checksum, "checksum should match original");
@@ -780,14 +505,12 @@ async fn test_concurrent_writes_and_scrub() {
     let tmpdir = TempDir::new().expect("tmpdir");
     let disk_id = DiskId::generate();
 
-    // Shared store path — each task creates its own ExtentStore instance
     let mount_path = tmpdir.path().to_path_buf();
     {
         let init_store = ExtentStore::new(mount_path.clone(), disk_id);
         init_store.init_directories().expect("init dirs");
     }
 
-    // Pre-generate extent IDs and data to avoid conflicts
     let extent_infos: Vec<(ExtentId, Vec<u8>)> = (0..100)
         .map(|i| {
             let eid = ExtentId::generate();
@@ -800,7 +523,6 @@ async fn test_concurrent_writes_and_scrub() {
     let checksums: Arc<parking_lot::Mutex<Vec<(ExtentId, u64, String)>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-    // --- Spawn concurrent writes ---
     let mut handles = Vec::new();
     for i in 0..100 {
         let mp = mount_path.clone();
@@ -829,19 +551,18 @@ async fn test_concurrent_writes_and_scrub() {
         }));
     }
 
-    // --- Periodically run scrub while writes are in progress ---
     let scrub_mp = mount_path.clone();
     let scrub_cs = Arc::clone(&checksums);
     let scrub_handle = tokio::spawn(async move {
+        use blockyard_storage::background::scrub::{ExtentReader, ScrubExtentEntry};
+
         let scrub_worker = ScrubWorker::new(ScrubConfig::default());
         let limiter = TokenBucket::new(100000, 100000);
         let mut total_scrubbed = 0u64;
 
-        // Run 3 scrub passes during writes
         for _ in 0..3 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
-            // Build reader from current committed extents
             let current_entries: Vec<(ExtentId, u64, String)> = scrub_cs.lock().clone();
             if current_entries.is_empty() {
                 continue;
@@ -905,7 +626,6 @@ async fn test_concurrent_writes_and_scrub() {
         total_scrubbed
     });
 
-    // Wait for all writes to complete
     for h in handles {
         h.await.expect("write task should not panic");
     }
@@ -913,7 +633,6 @@ async fn test_concurrent_writes_and_scrub() {
     let total_scrubbed = scrub_handle.await.expect("scrub task should not panic");
     assert!(total_scrubbed > 0, "scrub should have checked some extents");
 
-    // --- Final verification: all 100 extents have correct checksums ---
     let final_store = ExtentStore::new(mount_path, disk_id);
     let final_entries = checksums.lock().clone();
     assert_eq!(final_entries.len(), 100, "all 100 extents should be committed");
@@ -926,7 +645,6 @@ async fn test_concurrent_writes_and_scrub() {
             &actual_checksum, expected_checksum,
             "checksum mismatch for extent {i}"
         );
-        // Verify data matches deterministic pattern
         let expected_data = deterministic_data(i, 4096);
         assert_eq!(data, expected_data, "data mismatch for extent {i}");
     }

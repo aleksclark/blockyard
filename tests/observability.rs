@@ -17,8 +17,6 @@ use blockyard_common::{
     REPAIR_BACKLOG_SIZE, REPAIR_COMPLETIONS_TOTAL, SCRUB_FINDINGS_TOTAL,
     SCRUB_LAST_COMPLETED_TIMESTAMP, VOLUME_IO_FAILURE_TOTAL, VOLUME_IO_SUCCESS_TOTAL,
 };
-use blockyard_common::LeaseResponse;
-use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
 use blockyard_storage::background::repair::{
     EcReconstructor, FragmentReader, RepairConfig, RepairExtentReader, RepairExtentWriter,
     RepairRequest, RepairType, RepairWorker,
@@ -27,20 +25,19 @@ use blockyard_storage::background::scrub::{
     ExtentReader, ScrubConfig, ScrubExtentEntry, ScrubWorker,
 };
 use blockyard_storage::background::TokenBucket;
-use blockyard_ublk::metadata_cache::CachedExtentMapping;
-use blockyard_ublk::metadata_cache::CachedVolumeInfo;
-use blockyard_ublk::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
+use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
+use blockyard_ublk::traits::WriteAckError;
 use blockyard_ublk::{
-    ClientSession, DataNodeClient, MetadataCache, MetadataClient, StaleEpochHandler,
+    ClientSession, MetadataCache, StaleEpochHandler,
     WritePipeline, WriteRequest, WriteWatermark,
 };
+use blockyard_test_harness::mock_metadata::TestMetadataClient;
+use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, find_leader};
 use bytes::Bytes;
-use openraft::BasicNode;
-use parking_lot::RwLock;
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// Mock DataNodeClient (same pattern as consistency.rs)
+// Mock DataNodeClient (in-memory, observability-specific — no disk backing)
 // ---------------------------------------------------------------------------
 
 struct MockDataNodeClient {
@@ -57,11 +54,11 @@ impl MockDataNodeClient {
     }
 }
 
-impl DataNodeClient for MockDataNodeClient {
+impl blockyard_ublk::DataNodeClient for MockDataNodeClient {
     async fn write_extent(
         &self,
         node_id: NodeId,
-        _operation_id: OperationId,
+        _operation_id: blockyard_common::OperationId,
         _session_id: SessionId,
         _volume_id: VolumeId,
         extent_id: ExtentId,
@@ -69,10 +66,10 @@ impl DataNodeClient for MockDataNodeClient {
         _epoch: EpochId,
         data: Bytes,
         checksum: String,
-    ) -> Result<WriteAck, blockyard_common::Error> {
+    ) -> Result<blockyard_ublk::traits::WriteAck, blockyard_common::Error> {
         let fail_nodes = self.fail_nodes.lock();
         if fail_nodes.contains(&node_id) {
-            return Ok(WriteAck {
+            return Ok(blockyard_ublk::traits::WriteAck {
                 node_id,
                 success: false,
                 checksum,
@@ -81,95 +78,12 @@ impl DataNodeClient for MockDataNodeClient {
         }
         drop(fail_nodes);
         self.stored.lock().push((node_id, extent_id, data));
-        Ok(WriteAck {
+        Ok(blockyard_ublk::traits::WriteAck {
             node_id,
             success: true,
             checksum,
             error: None,
         })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Mock MetadataClient (same pattern as consistency.rs)
-// ---------------------------------------------------------------------------
-
-struct MockMetadataClient {
-    epoch: parking_lot::Mutex<EpochId>,
-    committed: parking_lot::Mutex<Vec<CommitRequest>>,
-}
-
-impl MockMetadataClient {
-    fn new(epoch: EpochId) -> Self {
-        Self {
-            epoch: parking_lot::Mutex::new(epoch),
-            committed: parking_lot::Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl MetadataClient for MockMetadataClient {
-    async fn refresh_metadata(
-        &self,
-        cache: &MetadataCache,
-    ) -> Result<EpochId, blockyard_common::Error> {
-        let epoch = *self.epoch.lock();
-        cache.set_epoch(epoch);
-        Ok(epoch)
-    }
-
-    async fn commit_extent_mapping(
-        &self,
-        request: CommitRequest,
-    ) -> Result<EpochId, blockyard_common::Error> {
-        let epoch = *self.epoch.lock();
-        self.committed.lock().push(request);
-        Ok(epoch)
-    }
-
-    async fn lookup_operation(
-        &self,
-        _operation_id: &OperationId,
-    ) -> Result<Option<CommittedMapping>, blockyard_common::Error> {
-        Ok(None)
-    }
-
-    async fn current_epoch(&self) -> Result<EpochId, blockyard_common::Error> {
-        Ok(*self.epoch.lock())
-    }
-
-    async fn acquire_lease(
-        &self,
-        _volume_id: VolumeId,
-        _session_id: SessionId,
-        _now_ms: u64,
-        _ttl_ms: u64,
-    ) -> Result<LeaseResponse, blockyard_common::Error> {
-        Ok(LeaseResponse::Granted {
-            lease_version: 1,
-            expires_at_ms: u64::MAX,
-        })
-    }
-
-    async fn renew_lease(
-        &self,
-        _volume_id: VolumeId,
-        _session_id: SessionId,
-        _now_ms: u64,
-        _ttl_ms: u64,
-    ) -> Result<LeaseResponse, blockyard_common::Error> {
-        Ok(LeaseResponse::Renewed {
-            lease_version: 1,
-            expires_at_ms: u64::MAX,
-        })
-    }
-
-    async fn release_lease(
-        &self,
-        _volume_id: VolumeId,
-        _session_id: SessionId,
-    ) -> Result<LeaseResponse, blockyard_common::Error> {
-        Ok(LeaseResponse::Released)
     }
 }
 
@@ -327,73 +241,6 @@ impl EcReconstructor for FakeEcReconstructor {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Raft cluster helpers (same pattern as consistency.rs / availability.rs)
-// ---------------------------------------------------------------------------
-
-struct RaftCluster {
-    services: Vec<MetadataService>,
-    _router: Arc<RwLock<Router>>,
-}
-
-async fn create_raft_cluster(node_count: u64) -> RaftCluster {
-    let router = Arc::new(RwLock::new(Router::new()));
-    let config = Arc::new(openraft::Config {
-        heartbeat_interval: 100,
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        ..Default::default()
-    });
-
-    let mut services = Vec::new();
-    for node_id in 1..=node_count {
-        let log_store = LogStore::new();
-        let sm_store = StateMachineStore::new();
-        let network = NetworkFactory::new(Arc::clone(&router));
-        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
-            node_id,
-            config.clone(),
-            network,
-            log_store,
-            sm_store.clone(),
-        )
-        .await
-        .expect("create raft node");
-        router.write().add_node(node_id, raft.clone());
-        services.push(MetadataService::new(raft, sm_store));
-    }
-
-    let mut nodes = BTreeMap::new();
-    for id in 1..=node_count {
-        nodes.insert(id, BasicNode::default());
-    }
-    services[0]
-        .raft()
-        .initialize(nodes)
-        .await
-        .expect("initialize cluster");
-
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-
-    RaftCluster {
-        services,
-        _router: router,
-    }
-}
-
-async fn find_leader(cluster: &RaftCluster) -> usize {
-    for _ in 0..30 {
-        for (i, svc) in cluster.services.iter().enumerate() {
-            let metrics = svc.raft().metrics().borrow().clone();
-            if metrics.current_leader == Some((i + 1) as u64) {
-                return i;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("no leader elected within timeout");
-}
-
 // ===========================================================================
 // Test 1: Volume IO metrics recorded during real WritePipeline execution
 // ===========================================================================
@@ -405,7 +252,7 @@ async fn test_volume_io_metrics_recorded() {
     let epoch = EpochId::new(1);
 
     let data_client = Arc::new(MockDataNodeClient::new());
-    let metadata_client = Arc::new(MockMetadataClient::new(epoch));
+    let metadata_client = Arc::new(TestMetadataClient::new(epoch));
     let cache = Arc::new(MetadataCache::new());
     cache.set_epoch(epoch);
 
@@ -679,7 +526,7 @@ fn test_disk_state_transition_metrics() {
 #[tokio::test]
 async fn test_metadata_quorum_health_metrics() {
     let recorder = InMemoryRecorder::new();
-    let cluster = create_raft_cluster(3).await;
+    let cluster = create_test_raft_cluster(3).await;
     let leader_idx = find_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
 

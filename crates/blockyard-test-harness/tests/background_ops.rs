@@ -1,31 +1,26 @@
 //! Cross-component background operations integration tests.
-//!
-//! Tests that exercise interactions between scrub, repair, and the
-//! scheduler using real types from `blockyard_storage::background`.
-
-use std::collections::HashMap;
 
 use blockyard_common::{DiskId, ExtentId};
 use blockyard_storage::background::drain::DrainConfig;
 use blockyard_storage::background::rate_limit::TokenBucket;
 use blockyard_storage::background::rebalance::RebalanceConfig;
 use blockyard_storage::background::repair::{
-    EcReconstructor, FragmentReader, RepairConfig, RepairExtentReader, RepairExtentWriter,
-    RepairRequest, RepairType, RepairWorker,
+    RepairConfig, RepairRequest, RepairType, RepairWorker,
 };
 use blockyard_storage::background::scheduler::{BackgroundScheduler, SchedulerConfig};
 use blockyard_storage::background::scrub::{
-    CorruptionNotification, CorruptionReason, ExtentReader, ScrubConfig, ScrubExtentEntry,
-    ScrubWorker,
+    CorruptionNotification, CorruptionReason, ScrubConfig, ScrubExtentEntry, ScrubWorker,
 };
 use blockyard_storage::extent::{committed_extent_path, compute_checksum};
 use blockyard_storage::{ExtentStore, StorageClass};
-use bytes::Bytes;
+use blockyard_test_harness::repair_testutil::{
+    StubEcReconstructor, StubFragmentReader, TestRepairReader, TestRepairWriter,
+};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
-// Disk-backed implementations
+// Disk-backed ExtentReader (scrub-specific, not shared)
 // ---------------------------------------------------------------------------
 
 struct DiskBackedExtentReader {
@@ -63,7 +58,7 @@ impl DiskBackedExtentReader {
     }
 }
 
-impl ExtentReader for DiskBackedExtentReader {
+impl blockyard_storage::background::scrub::ExtentReader for DiskBackedExtentReader {
     fn read_extent(
         &self,
         disk_id: DiskId,
@@ -89,114 +84,6 @@ impl ExtentReader for DiskBackedExtentReader {
 
     fn list_disks(&self) -> Vec<DiskId> {
         self.stores.iter().map(|(did, _, _)| *did).collect()
-    }
-}
-
-struct DiskBackedRepairReader {
-    stores: HashMap<DiskId, (ExtentStore, TempDir)>,
-}
-
-impl DiskBackedRepairReader {
-    fn new() -> Self {
-        Self {
-            stores: HashMap::new(),
-        }
-    }
-
-    fn add_store(&mut self, disk_id: DiskId, store: ExtentStore, tmpdir: TempDir) {
-        self.stores.insert(disk_id, (store, tmpdir));
-    }
-}
-
-impl RepairExtentReader for DiskBackedRepairReader {
-    fn read_extent(
-        &self,
-        source_disk: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-    ) -> Result<Bytes, String> {
-        let (store, _) = self
-            .stores
-            .get(&source_disk)
-            .ok_or_else(|| format!("no store for disk {source_disk}"))?;
-        let (data, _) = store.read_extent(extent_id, version).map_err(|e| format!("{e}"))?;
-        Ok(Bytes::from(data))
-    }
-}
-
-struct DiskBackedRepairWriter {
-    stores: HashMap<DiskId, (ExtentStore, TempDir)>,
-}
-
-impl DiskBackedRepairWriter {
-    fn new() -> Self {
-        Self {
-            stores: HashMap::new(),
-        }
-    }
-
-    fn add_store(&mut self, disk_id: DiskId, store: ExtentStore, tmpdir: TempDir) {
-        self.stores.insert(disk_id, (store, tmpdir));
-    }
-
-    fn read_back(&self, disk_id: DiskId, extent_id: ExtentId, version: u64) -> Option<(Vec<u8>, String)> {
-        let (store, _) = self.stores.get(&disk_id)?;
-        store.read_extent(extent_id, version).ok()
-    }
-}
-
-impl RepairExtentWriter for DiskBackedRepairWriter {
-    fn write_extent(
-        &self,
-        target_disk: DiskId,
-        extent_id: ExtentId,
-        version: u64,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let (store, _) = self
-            .stores
-            .get(&target_disk)
-            .ok_or_else(|| format!("no store for disk {target_disk}"))?;
-        let (_, checksum) = store
-            .stage_extent(extent_id, version, data)
-            .map_err(|e| format!("{e}"))?;
-        store
-            .commit_extent(
-                extent_id,
-                version,
-                &checksum,
-                data.len() as u64,
-                StorageClass::Default,
-            )
-            .map_err(|e| format!("{e}"))?;
-        Ok(())
-    }
-}
-
-struct MockFragmentReader;
-
-impl FragmentReader for MockFragmentReader {
-    fn read_fragment(
-        &self,
-        _source_disk: DiskId,
-        _extent_id: ExtentId,
-        _fragment_index: usize,
-    ) -> Result<Bytes, String> {
-        Err("not used".into())
-    }
-}
-
-struct MockEcReconstructor;
-
-impl EcReconstructor for MockEcReconstructor {
-    fn reconstruct(
-        &self,
-        _data_count: usize,
-        _parity_count: usize,
-        _fragments: Vec<Option<Bytes>>,
-        _original_len: usize,
-    ) -> Result<Bytes, String> {
-        Err("not used".into())
     }
 }
 
@@ -338,15 +225,13 @@ async fn test_scrub_detects_corruption_triggers_repair() {
 
     assert_eq!(repair_worker.queue_len(), 1);
 
-    let mut repair_reader = DiskBackedRepairReader::new();
+    let mut repair_reader = TestRepairReader::new();
     repair_reader.add_store(healthy_source_id, healthy_source_store, healthy_source_tmpdir);
-    let mut repair_writer = DiskBackedRepairWriter::new();
+    let mut repair_writer = TestRepairWriter::new();
     repair_writer.add_store(target_disk_id, target_store, target_tmpdir);
-    let frag_reader = MockFragmentReader;
-    let ec = MockEcReconstructor;
 
     let outcome = repair_worker
-        .process_next(&repair_reader, &frag_reader, &repair_writer, &ec, &rate_limiter)
+        .process_next(&repair_reader, &StubFragmentReader, &repair_writer, &StubEcReconstructor, &rate_limiter)
         .await
         .expect("should process repair request");
 

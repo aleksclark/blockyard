@@ -1,87 +1,13 @@
 //! Phase 9C — Availability integration tests using real Raft consensus.
-//!
-//! These tests exercise real MetadataService instances backed by openraft
-//! with in-memory networking. They verify that committed state survives
-//! node failures and that leader election works correctly.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use blockyard_common::{ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
-use blockyard_raft::{LogStore, MetadataService, NetworkFactory, Router, StateMachineStore};
-use openraft::BasicNode;
-use parking_lot::RwLock;
-
-// ---------------------------------------------------------------------------
-// Helpers: real multi-node Raft cluster
-// ---------------------------------------------------------------------------
-
-struct RaftCluster {
-    services: Vec<MetadataService>,
-    router: Arc<RwLock<Router>>,
-}
-
-async fn create_cluster(node_count: u64) -> RaftCluster {
-    let router = Arc::new(RwLock::new(Router::new()));
-    let config = Arc::new(openraft::Config {
-        heartbeat_interval: 100,
-        election_timeout_min: 300,
-        election_timeout_max: 600,
-        ..Default::default()
-    });
-
-    let mut services = Vec::new();
-    for node_id in 1..=node_count {
-        let log_store = LogStore::new();
-        let sm_store = StateMachineStore::new();
-        let network = NetworkFactory::new(Arc::clone(&router));
-        let raft = openraft::Raft::<blockyard_raft::TypeConfig>::new(
-            node_id,
-            config.clone(),
-            network,
-            log_store,
-            sm_store.clone(),
-        )
-        .await
-        .expect("create raft node");
-        router.write().add_node(node_id, raft.clone());
-        services.push(MetadataService::new(raft, sm_store));
-    }
-
-    let mut nodes = BTreeMap::new();
-    for id in 1..=node_count {
-        nodes.insert(id, BasicNode::default());
-    }
-    services[0]
-        .raft()
-        .initialize(nodes)
-        .await
-        .expect("initialize cluster");
-
-    tokio::time::sleep(Duration::from_millis(800)).await;
-
-    RaftCluster { services, router }
-}
-
-async fn find_leader(cluster: &RaftCluster) -> Option<usize> {
-    for _ in 0..30 {
-        for (i, svc) in cluster.services.iter().enumerate() {
-            let metrics = svc.raft().metrics().borrow().clone();
-            if metrics.current_leader == Some((i + 1) as u64) {
-                return Some(i);
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    None
-}
-
-async fn wait_for_leader(cluster: &RaftCluster) -> usize {
-    find_leader(cluster)
-        .await
-        .expect("leader should be elected within timeout")
-}
+use blockyard_raft::{LogStore, NetworkFactory, StateMachineStore};
+use blockyard_test_harness::raft_testutil::{
+    create_test_raft_cluster, wait_for_leader,
+};
 
 // ---------------------------------------------------------------------------
 // P9C.1 — 1-of-3 crash: writes continue after leader re-election
@@ -89,7 +15,7 @@ async fn wait_for_leader(cluster: &RaftCluster) -> usize {
 
 #[tokio::test]
 async fn test_1_of_3_crash_writes_continue() {
-    let cluster = create_cluster(3).await;
+    let cluster = create_test_raft_cluster(3).await;
     let leader_idx = wait_for_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
 
@@ -178,7 +104,7 @@ async fn test_1_of_3_crash_writes_continue() {
 
 #[tokio::test]
 async fn test_1_of_5_crash_zero_downtime_unaffected() {
-    let cluster = create_cluster(5).await;
+    let cluster = create_test_raft_cluster(5).await;
     let leader_idx = wait_for_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
 
@@ -290,7 +216,7 @@ async fn test_1_of_5_crash_zero_downtime_unaffected() {
 
 #[tokio::test]
 async fn test_volume_readable_minority_partition() {
-    let cluster = create_cluster(5).await;
+    let cluster = create_test_raft_cluster(5).await;
     let leader_idx = wait_for_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
 
@@ -397,7 +323,7 @@ async fn test_volume_readable_minority_partition() {
 
 #[tokio::test]
 async fn test_new_leader_elected_within_2s() {
-    let cluster = create_cluster(5).await;
+    let cluster = create_test_raft_cluster(5).await;
     let leader_idx = wait_for_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
 
