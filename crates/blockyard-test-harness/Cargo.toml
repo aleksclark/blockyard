@@ -28,6 +28,8 @@ sha2 = "0.10"
 
 [dev-dependencies]
 blockyard-raft = { path = "../blockyard-raft" }
+blockyard-storage = { path = "../blockyard-storage" }
+bytes.workspace = true
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 parking_lot.workspace = true
 tempfile = "3"
