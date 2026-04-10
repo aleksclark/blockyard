@@ -81,10 +81,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Start management API
     let mgmt_metadata = blockyard_node.metadata().clone();
+    let mgmt_peer_registry = blockyard_node.peer_registry().clone();
     let mgmt_shutdown = shutdown_token.clone();
     let mgmt_handle = tokio::spawn(async move {
         if let Err(e) =
-            api::start_management_api(mgmt_addr, mgmt_metadata, node_id, mgmt_shutdown).await
+            api::start_management_api(mgmt_addr, mgmt_metadata, mgmt_peer_registry, node_id, mgmt_shutdown).await
         {
             tracing::error!(error = %e, "management API failed");
         }

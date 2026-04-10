@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use blockyard_common::{NodeId, ProtectionPolicy, VolumeId};
-use blockyard_raft::MetadataService;
+use blockyard_raft::{MetadataService, PeerRegistry};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -20,6 +20,7 @@ use crate::node::{JoinRequest, JoinResponse};
 #[derive(Clone)]
 struct AppState {
     metadata: MetadataService,
+    peer_registry: PeerRegistry,
     #[allow(dead_code)]
     node_id: NodeId,
 }
@@ -97,10 +98,15 @@ struct ApiError {
 pub async fn start_management_api(
     addr: SocketAddr,
     metadata: MetadataService,
+    peer_registry: PeerRegistry,
     node_id: NodeId,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let state = AppState { metadata, node_id };
+    let state = AppState {
+        metadata,
+        peer_registry,
+        node_id,
+    };
 
     let app = Router::new()
         .route("/api/v1/volumes", post(create_volume))
@@ -333,7 +339,8 @@ async fn list_disks(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
 ///
 /// Allows a new node to join the cluster. The leader registers the node
 /// in the state machine (assigning a raft u64 ID), then adds it to
-/// the Raft membership, and returns the assigned raft_id.
+/// the Raft membership, registers it in the PeerRegistry for immediate
+/// replication, and returns the assigned raft_id plus existing peers.
 async fn cluster_join(
     State(state): State<Arc<AppState>>,
     Json(req): Json<JoinRequest>,
@@ -357,8 +364,14 @@ async fn cluster_join(
         }
     };
 
-    // Step 2: Add node to raft membership
-    // Get current members and add the new node
+    // Step 2: Register the new node in PeerRegistry immediately so the
+    // leader can send AppendEntries without waiting for gossip.
+    if let Ok(addr) = req.raft_addr.parse::<std::net::SocketAddr>() {
+        state.peer_registry.register(raft_id, addr);
+        tracing::info!(raft_id, raft_addr = %addr, "registered new peer in PeerRegistry via join");
+    }
+
+    // Step 3: Add node to raft membership
     let raft = state.metadata.raft();
     let metrics = raft.metrics().borrow().clone();
 
@@ -386,7 +399,20 @@ async fn cluster_join(
         // Not fatal — node might already be in membership
     }
 
-    let resp = JoinResponse { raft_id };
+    // Step 4: Build the peer map for the response so the joining node
+    // can pre-populate its own PeerRegistry immediately.
+    let mut peers = std::collections::HashMap::new();
+    {
+        let sm_data = state.metadata.sm_data();
+        let data = sm_data.read();
+        for node_entry in data.nodes.values() {
+            if let Some(&peer_raft_id) = data.node_raft_map.get(&node_entry.node_id) {
+                peers.insert(peer_raft_id, node_entry.addr.clone());
+            }
+        }
+    }
+
+    let resp = JoinResponse { raft_id, peers };
     (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response()
 }
 
@@ -714,10 +740,16 @@ mod tests {
 
     #[test]
     fn test_join_response_serde() {
-        let resp = JoinResponse { raft_id: 5 };
+        let mut peers = std::collections::HashMap::new();
+        peers.insert(1u64, "10.0.0.1:9810".to_string());
+        let resp = JoinResponse {
+            raft_id: 5,
+            peers,
+        };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: JoinResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.raft_id, 5);
+        assert_eq!(parsed.peers.len(), 1);
     }
 
     #[test]

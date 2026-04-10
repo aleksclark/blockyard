@@ -73,6 +73,11 @@ pub fn raft_bind_addr(config: &NodeConfig) -> SocketAddr {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JoinResponse {
     pub raft_id: u64,
+    /// Existing cluster peers: maps raft_id → raft RPC address.
+    /// The joining node uses this to pre-populate its PeerRegistry so
+    /// Raft replication can start immediately (without waiting for gossip).
+    #[serde(default)]
+    pub peers: std::collections::HashMap<u64, String>,
 }
 
 /// Request body for the cluster join endpoint.
@@ -253,6 +258,7 @@ impl BlockyardNode {
             };
 
             let mut raft_id = None;
+            let mut join_peers = std::collections::HashMap::new();
             let client = reqwest::Client::new();
             for seed in &config.gossip.seed_nodes {
                 // Derive the seed's mgmt_addr from the gossip seed.
@@ -269,6 +275,7 @@ impl BlockyardNode {
                         if let Ok(join_resp) = resp.json::<JoinResponse>().await {
                             info!(raft_id = join_resp.raft_id, seed = %seed, "joined cluster");
                             raft_id = Some(join_resp.raft_id);
+                            join_peers = join_resp.peers;
                             break;
                         }
                     }
@@ -284,6 +291,19 @@ impl BlockyardNode {
             let raft_id = raft_id.ok_or_else(|| {
                 anyhow::anyhow!("failed to join cluster: no seed node responded successfully")
             })?;
+
+            // Pre-populate PeerRegistry with known peers from the leader.
+            // This lets Raft replication start immediately without waiting for gossip.
+            for (peer_raft_id, peer_addr_str) in &join_peers {
+                if *peer_raft_id != raft_id {
+                    if let Ok(addr) = peer_addr_str.parse::<SocketAddr>() {
+                        peer_registry.register(*peer_raft_id, addr);
+                        info!(peer_raft_id, peer_addr = %addr, "pre-populated peer from join response");
+                    }
+                }
+            }
+            // Also register self
+            peer_registry.register(raft_id, raft_addr);
 
             let network =
                 TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
@@ -321,20 +341,27 @@ impl BlockyardNode {
         // Step 10: Start GossipService
         let gossip = Arc::new(GossipService::new(node_id, config.gossip.clone()));
 
-        // Register gossip callbacks to keep PeerRegistry updated
+        // Register gossip callbacks to keep PeerRegistry updated.
+        // IMPORTANT: We use the raft address from the state machine (ClusterNode.addr),
+        // NOT the gossip member_addr. The gossip address is the gossip bind port, but
+        // the PeerRegistry maps raft_id → raft RPC address for TCP transport.
         let peer_reg_join = peer_registry.clone();
         let sm_ref_join = metadata.sm_data().clone();
-        gossip.on_member_join(Box::new(move |member_node_id, member_addr| {
-            // Look up raft_id for this member from state machine
+        gossip.on_member_join(Box::new(move |member_node_id, _gossip_addr| {
             let data = sm_ref_join.read();
             if let Some(&raft_nid) = data.node_raft_map.get(&member_node_id) {
-                peer_reg_join.register(raft_nid, member_addr);
-                tracing::debug!(
-                    node_id = %member_node_id,
-                    raft_id = raft_nid,
-                    addr = %member_addr,
-                    "registered peer in PeerRegistry via gossip"
-                );
+                // Use the raft address stored in the state machine, not the gossip address
+                if let Some(node_entry) = data.nodes.get(&member_node_id.to_string()) {
+                    if let Ok(raft_addr) = node_entry.addr.parse::<SocketAddr>() {
+                        peer_reg_join.register(raft_nid, raft_addr);
+                        tracing::debug!(
+                            node_id = %member_node_id,
+                            raft_id = raft_nid,
+                            raft_addr = %raft_addr,
+                            "registered peer in PeerRegistry via gossip"
+                        );
+                    }
+                }
             }
         }));
 
@@ -469,10 +496,25 @@ mod tests {
 
     #[test]
     fn test_join_response_serde_roundtrip() {
-        let resp = JoinResponse { raft_id: 42 };
+        let mut peers = std::collections::HashMap::new();
+        peers.insert(1u64, "10.0.0.1:9810".to_string());
+        peers.insert(2u64, "10.0.0.2:9810".to_string());
+        let resp = JoinResponse { raft_id: 42, peers };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: JoinResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.raft_id, 42);
+        assert_eq!(parsed.peers.len(), 2);
+        assert_eq!(parsed.peers[&1], "10.0.0.1:9810");
+        assert_eq!(parsed.peers[&2], "10.0.0.2:9810");
+    }
+
+    #[test]
+    fn test_join_response_serde_backwards_compat() {
+        // Old JoinResponse without peers field should still deserialize
+        let json = r#"{"raft_id": 7}"#;
+        let parsed: JoinResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.raft_id, 7);
+        assert!(parsed.peers.is_empty());
     }
 
     #[test]
