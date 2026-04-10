@@ -16,7 +16,6 @@ use blockyard_protocol::messages::{
 use blockyard_protocol::server::{DataPlaneHandler, DataPlaneServer};
 use blockyard_storage::extent::compute_checksum;
 use blockyard_storage::{DataNodeService, DiskInventory, ExtentIndex, ExtentStore};
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -309,9 +308,8 @@ impl TestClient {
 }
 
 fn compute_sha256(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    // Use canonical blake3 checksum (was SHA-256, now blake3 via blockyard_common)
+    compute_checksum(data)
 }
 
 // ===========================================================================

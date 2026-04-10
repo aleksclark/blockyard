@@ -673,10 +673,8 @@ impl TcpDataClient {
         version: u64,
         data: &[u8],
     ) -> anyhow::Result<serde_json::Value> {
-        use sha2::{Digest, Sha256};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let checksum = format!("{:x}", Sha256::digest(data));
+        let checksum = blockyard_common::checksum::compute_checksum(data);
         let op_id = uuid::Uuid::new_v4().to_string();
         let session_id = uuid::Uuid::new_v4().to_string();
 

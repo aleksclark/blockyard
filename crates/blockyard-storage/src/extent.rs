@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 use blockyard_common::{DiskId, ExtentId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::error::StorageError;
@@ -162,11 +161,9 @@ pub fn extent_meta_path(mount_path: &Path, extent_id: ExtentId, version: ExtentV
     p
 }
 
-/// Compute SHA-256 checksum of data.
+/// Compute blake3 checksum of data (canonical implementation from blockyard-common).
 pub fn compute_checksum(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    blockyard_common::checksum::compute_checksum(data)
 }
 
 /// Verify data against a previously computed checksum.
