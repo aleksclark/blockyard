@@ -49,10 +49,11 @@ impl ProcessNode {
     ) -> Self {
         let offset = index as u16 * 100;
         let data_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset).parse().unwrap();
+        // Gossip (UDP) and mgmt API (TCP) share the same port number — no conflict.
         let gossip_addr: SocketAddr =
             format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
         let mgmt_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 2).parse().unwrap();
+            format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
         let raft_addr: SocketAddr =
             format!("127.0.0.1:{}", base_port + offset + 10).parse().unwrap();
 
@@ -86,7 +87,7 @@ impl ProcessNode {
         let gossip_addr: SocketAddr =
             format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
         let mgmt_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 2).parse().unwrap();
+            format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
         let raft_addr: SocketAddr =
             format!("127.0.0.1:{}", base_port + offset + 10).parse().unwrap();
 
@@ -585,9 +586,46 @@ pub async fn build_binary() -> anyhow::Result<PathBuf> {
 }
 
 pub fn unique_base_port() -> u16 {
-    use std::sync::atomic::{AtomicU16, Ordering};
-    static PORT_COUNTER: AtomicU16 = AtomicU16::new(19800);
-    PORT_COUNTER.fetch_add(500, Ordering::SeqCst)
+    use std::io::{Read, Seek, Write};
+    // Cross-process port allocation using a shared lock file to prevent
+    // collisions between concurrent test binaries.
+    let lock_path = std::env::temp_dir().join("blockyard-test-port.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .expect("open port lock file");
+
+    // Acquire exclusive file lock (blocks until available)
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    unsafe {
+        nix::libc::flock(fd, nix::libc::LOCK_EX);
+    }
+
+    // Read current port from file (or start fresh)
+    let mut contents = String::new();
+    let _ = file.read_to_string(&mut contents);
+    let mut port: u16 = contents.trim().parse().unwrap_or(20000);
+    if port < 20000 || port > 60000 {
+        port = 20000;
+    }
+    let result = port;
+
+    // Write the next port value
+    let next = port + 500;
+    file.seek(std::io::SeekFrom::Start(0)).unwrap();
+    file.set_len(0).unwrap();
+    write!(file, "{}", next).unwrap();
+
+    // Release lock (automatically on drop, but be explicit)
+    unsafe {
+        nix::libc::flock(fd, nix::libc::LOCK_UN);
+    }
+
+    result
 }
 
 pub struct TcpDataClient {
@@ -725,7 +763,7 @@ mod tests {
         let node = ProcessNode::new(0, 19800, PathBuf::from("/bin/false"), vec![]);
         assert_eq!(node.data_addr().port(), 19800);
         assert_eq!(node.gossip_addr().port(), 19801);
-        assert_eq!(node.mgmt_addr().port(), 19802);
+        assert_eq!(node.mgmt_addr().port(), 19801); // same as gossip (UDP vs TCP)
         assert_eq!(node.raft_addr().port(), 19810);
         assert_eq!(node.state(), ProcessNodeState::Stopped);
         assert!(node.pid().is_none());
@@ -736,7 +774,7 @@ mod tests {
         let node = ProcessNode::new(1, 19800, PathBuf::from("/bin/false"), vec![]);
         assert_eq!(node.data_addr().port(), 19900);
         assert_eq!(node.gossip_addr().port(), 19901);
-        assert_eq!(node.mgmt_addr().port(), 19902);
+        assert_eq!(node.mgmt_addr().port(), 19901); // same as gossip
         assert_eq!(node.raft_addr().port(), 19910);
     }
 
@@ -750,7 +788,7 @@ mod tests {
         );
         let config = node.generate_config();
         assert!(config.contains("listen_addr = \"127.0.0.1:19800\""));
-        assert!(config.contains("mgmt_addr = \"127.0.0.1:19802\""));
+        assert!(config.contains("mgmt_addr = \"127.0.0.1:19801\""));
         assert!(config.contains("bind_addr = \"127.0.0.1:19810\""));
         assert!(config.contains("\"127.0.0.1:19801\""));
     }
@@ -763,11 +801,12 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_base_port_monotonic() {
+    fn test_unique_base_port_different() {
         let p1 = unique_base_port();
         let p2 = unique_base_port();
-        assert!(p2 > p1);
-        assert_eq!(p2 - p1, 500);
+        assert_ne!(p1, p2, "ports should be different");
+        assert!(p1 >= 20000, "port should be >= 20000, got {}", p1);
+        assert!(p2 >= 20000, "port should be >= 20000, got {}", p2);
     }
 
     #[test]
