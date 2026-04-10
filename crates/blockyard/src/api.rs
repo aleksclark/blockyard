@@ -349,9 +349,10 @@ async fn cluster_join(
     use std::collections::BTreeSet;
 
     // Step 1: Register node in state machine (get raft_id)
+    // Store the data_addr (listen address) so clients know where to send IO.
     let raft_id = match state
         .metadata
-        .register_node(req.node_id, req.raft_addr.clone())
+        .register_node(req.node_id, req.data_addr.clone())
         .await
     {
         Ok(id) => id,

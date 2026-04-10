@@ -159,7 +159,13 @@ async fn run_scenario(
         .refresh_metadata(&metadata_cache)
         .await
         .context("refresh metadata")?;
-    eprintln!("[ublk-e2e] metadata cache populated");
+
+    // Register node addresses with the TCP data client so it knows where to send writes.
+    for node in metadata_cache.list_nodes() {
+        eprintln!("[ublk-e2e] registering data node {} at {}", node.node_id, node.addr);
+        data_client.register_node(node.node_id, node.addr);
+    }
+    eprintln!("[ublk-e2e] metadata cache populated, {} nodes registered", metadata_cache.list_nodes().len());
 
     // Set up client session, lease manager, etc.
     let volume_id: blockyard_common::VolumeId = vol_id.parse().context("parse volume id")?;

@@ -132,7 +132,7 @@ impl BlockyardNode {
         }
 
         // Step 4: Create DataNodeService, wrap in handler
-        let service = DataNodeService::new(inventory, index, EpochId::new(1));
+        let service = DataNodeService::new(inventory, index, EpochId::new(0));
 
         // Step 5: Register stores
         for (disk_id, store) in stores {
@@ -242,7 +242,7 @@ impl BlockyardNode {
             // Register self in state machine via raft commit
             let metadata_tmp = MetadataService::new(raft.clone(), sm_data.clone());
             let registered_id = metadata_tmp
-                .register_node(node_id, raft_addr.to_string())
+                .register_node(node_id, config.listen_addr.to_string())
                 .await?;
             info!(raft_id = registered_id, "registered self in state machine");
 
