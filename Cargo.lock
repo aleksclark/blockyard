@@ -233,7 +233,10 @@ version = "0.1.0"
 dependencies = [
  "blockyard-common",
  "bytes",
+ "parking_lot 0.12.5",
  "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
