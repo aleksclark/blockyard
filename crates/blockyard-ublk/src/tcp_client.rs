@@ -763,29 +763,14 @@ mod tests {
         let client = TcpDataNodeClient::new();
         let node_id = NodeId::generate();
 
-        // Insert a fake entry
-        client.connections.write().insert(
-            node_id.to_string(),
-            std::sync::Arc::new(TcpConnection {
-                addr: "127.0.0.1:9999".parse().unwrap(),
-                stream: TokioMutex::new(TcpStream::connect("127.0.0.1:1").await.unwrap_or_else(
-                    |_| {
-                        // We can't easily create a fake TcpStream, so we just test
-                        // that drop_connection removes the entry
-                        panic!("this test just verifies the drop_connection logic");
-                    },
-                )),
-                handshake_done: true,
-            }),
-        );
-
-        // This just tests the method works - can't easily create fake TcpStream
-        // So let's test with the simpler approach
-        let client2 = TcpDataNodeClient::new();
-        let nid = NodeId::generate();
         // drop_connection on empty map is a no-op
-        client2.drop_connection(&nid);
-        assert!(client2.connections.read().is_empty());
+        client.drop_connection(&node_id);
+        assert!(client.connections.read().is_empty());
+
+        // drop_connection on non-existent key is also a no-op
+        let nid = NodeId::generate();
+        client.drop_connection(&nid);
+        assert!(client.connections.read().is_empty());
     }
 
     #[tokio::test]
