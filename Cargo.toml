@@ -6,6 +6,25 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+ublk-kernel = ["blockyard-ublk/ublk-kernel"]
+
+[[bin]]
+name = "ublk-e2e"
+path = "tools/ublk_e2e.rs"
+required-features = ["ublk-kernel"]
+
+[dependencies]
+blockyard-common = { path = "crates/blockyard-common" }
+blockyard-ublk = { path = "crates/blockyard-ublk" }
+blockyard-test-harness = { path = "crates/blockyard-test-harness" }
+anyhow.workspace = true
+blake3.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }
+uuid.workspace = true
+
 [workspace]
 members = [
     "crates/blockyard",

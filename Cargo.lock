@@ -592,6 +592,7 @@ dependencies = [
 name = "blockyard-workspace"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "blake3",
  "blockyard-client",
  "blockyard-common",

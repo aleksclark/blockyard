@@ -1,96 +1,120 @@
-//! Full-stack UBLK filesystem tests with real blockyard processes.
+//! Full-stack UBLK filesystem tests with real blockyard processes in a QEMU VM.
 //!
-//! These tests require root (or CAP_SYS_ADMIN) for ublk device creation
-//! and are marked #[ignore] for normal test runs.
+//! These tests boot a QEMU VM with KVM, SCP the blockyard and ublk-e2e
+//! binaries into it, and execute end-to-end filesystem scenarios that
+//! exercise the real ublk kernel driver.
+//!
+//! Requirements (checked at runtime):
+//! - QEMU (`qemu-system-x86_64`) with KVM (`/dev/kvm`)
+//! - `genisoimage` for cloud-init seed ISO creation
+//! - Internet access for first-run cloud image download (~500 MB, cached)
+//! - `ssh`, `scp`, `ssh-keygen` in PATH
 
 use std::time::Duration;
 
-use blockyard_test_harness::process_harness::{
-    RealProcessCluster, build_binary, unique_base_port,
-};
+use blockyard_test_harness::qemu_harness::{QemuVm, QemuVmConfig, build_ublk_test_binaries};
 
-#[tokio::test]
-#[ignore = "requires root and ublk kernel module"]
-async fn test_mount_format_write_read() {
-    let binary = build_binary().await.expect("build binary");
-    let base_port = unique_base_port();
-    let cluster = RealProcessCluster::new(3, binary, base_port);
-    cluster.start_all().await.expect("start cluster");
-    cluster
-        .wait_cluster_healthy(Duration::from_secs(30))
-        .await
-        .expect("cluster healthy");
+/// Check if the QEMU VM test prerequisites are available.
+fn check_prerequisites() -> bool {
+    // Check /dev/kvm exists.
+    if !std::path::Path::new("/dev/kvm").exists() {
+        eprintln!("SKIP: /dev/kvm not available");
+        return false;
+    }
 
-    let vol = cluster
-        .create_volume(
-            "ublk-mount-test",
-            1024 * 1024 * 256,
-            serde_json::json!({"Replicated": {"replicas": 3}}),
-        )
-        .await
-        .expect("create volume");
-    let _vol_id = vol["id"].as_str().unwrap().to_string();
+    // Check qemu-system-x86_64 is in PATH.
+    if std::process::Command::new("qemu-system-x86_64")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("SKIP: qemu-system-x86_64 not found");
+        return false;
+    }
 
-    // TODO(ublk): When UblkDevice::start() is implemented:
-    // 1. Create ClusterBlockHandler with real TCP/HTTP clients
-    // 2. Create UblkDevice, start it → get /dev/ublkbN
-    // 3. mkfs.ext4 /dev/ublkbN
-    // 4. mount /dev/ublkbN /tmp/mnt
-    // 5. Write a test file, compute sha256
-    // 6. Unmount, remount
-    // 7. Verify sha256 matches
-    //
-    // For now, verify cluster is up and volume was created
-    let status = cluster.cluster_status().await.expect("status");
-    assert_eq!(status["quorum_health"].as_str(), Some("healthy"));
+    // Check genisoimage is in PATH.
+    if std::process::Command::new("genisoimage")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_err()
+    {
+        eprintln!("SKIP: genisoimage not found");
+        return false;
+    }
+
+    true
+}
+
+/// Boot a VM, SCP binaries in, run a test scenario, check the result.
+async fn run_vm_test(scenario: &str) {
+    if !check_prerequisites() {
+        eprintln!("Skipping QEMU VM test — prerequisites not met");
+        return;
+    }
+
+    // Build the binaries.
+    let (blockyard_bin, ublk_e2e_bin) =
+        build_ublk_test_binaries().expect("build test binaries");
+
+    // Boot the VM.
+    let config = QemuVmConfig {
+        memory_mb: 1024,
+        cpus: 2,
+        extra_packages: vec!["e2fsprogs".to_string()],
+        extra_runcmd: vec!["modprobe ublk_drv".to_string()],
+        ..Default::default()
+    };
+    let mut vm = QemuVm::boot(config).expect("boot QEMU VM");
+    vm.wait_ready(Duration::from_secs(180))
+        .expect("VM SSH ready");
+
+    // SCP binaries into the VM.
+    vm.scp_to(&blockyard_bin, "/usr/local/bin/blockyard")
+        .expect("scp blockyard binary");
+    vm.ssh_exec_checked("chmod +x /usr/local/bin/blockyard")
+        .expect("chmod blockyard");
+
+    vm.scp_to(&ublk_e2e_bin, "/usr/local/bin/ublk-e2e")
+        .expect("scp ublk-e2e binary");
+    vm.ssh_exec_checked("chmod +x /usr/local/bin/ublk-e2e")
+        .expect("chmod ublk-e2e");
+
+    // Ensure ublk_drv module is loaded.
+    vm.ssh_exec_checked("modprobe ublk_drv")
+        .expect("modprobe ublk_drv");
+
+    // Run the test scenario inside the VM.
+    let cmd = format!(
+        "/usr/local/bin/ublk-e2e --test {} --blockyard-bin /usr/local/bin/blockyard --cluster-size 3",
+        scenario
+    );
+    let output = vm
+        .ssh_exec_checked(&cmd)
+        .expect("ublk-e2e test runner");
+
+    eprintln!("=== ublk-e2e output ===\n{}\n=== end ===", output);
+
+    // Verify PASS in output.
+    assert!(
+        output.contains("PASS"),
+        "ublk-e2e did not report PASS. Output:\n{}",
+        output
+    );
+
+    // Shutdown VM (also happens on drop).
+    vm.shutdown();
 }
 
 #[tokio::test]
-#[ignore = "requires root and ublk kernel module"]
+async fn test_mount_format_write_read() {
+    run_vm_test("mount-write-read").await;
+}
+
+#[tokio::test]
 async fn test_mount_node_failure_fs_survives() {
-    let binary = build_binary().await.expect("build binary");
-    let base_port = unique_base_port();
-    let cluster = RealProcessCluster::new(3, binary, base_port);
-    cluster.start_all().await.expect("start cluster");
-    cluster
-        .wait_cluster_healthy(Duration::from_secs(30))
-        .await
-        .expect("cluster healthy");
-
-    let vol = cluster
-        .create_volume(
-            "ublk-fault-test",
-            1024 * 1024 * 256,
-            serde_json::json!({"Replicated": {"replicas": 3}}),
-        )
-        .await
-        .expect("create volume");
-    let _vol_id = vol["id"].as_str().unwrap().to_string();
-
-    // TODO(ublk): When UblkDevice::start() is implemented:
-    // 1. Mount ext4 on ublk device
-    // 2. Start writing files
-    // 3. Kill one of 3 nodes
-    // 4. Continue writing files — verify no IO errors
-    // 5. Unmount, remount, fsck
-    //
-    // For now, verify we can kill a node and remaining cluster is healthy
-    cluster.kill_node(2).expect("kill node 2");
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let mut any_alive = false;
-    for i in 0..2 {
-        let url = format!("{}/api/v1/cluster/status", cluster.node(i).mgmt_url());
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                any_alive = true;
-                break;
-            }
-        }
-    }
-    assert!(any_alive, "surviving nodes should still respond");
+    run_vm_test("node-failure").await;
 }

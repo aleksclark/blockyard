@@ -7,6 +7,7 @@ pub mod network;
 pub mod pattern;
 pub mod pipeline_testutil;
 pub mod process_harness;
+pub mod qemu_harness;
 pub mod raft_testutil;
 pub mod repair_testutil;
 pub mod scenario;

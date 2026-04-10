@@ -167,9 +167,9 @@ impl<H: BlockHandler> UblkDevice<H> {
     /// into the tokio runtime via channels.
     #[cfg(feature = "ublk-kernel")]
     pub async fn start_kernel(&self) -> Result<String, Error> {
-        use libublk::ctrl::UblkCtrlBuilder;
+        use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
         use libublk::io::{UblkDev, UblkIOCtx, UblkQueue};
-        use libublk::{UblkFlags, UblkIORes};
+        use libublk::{UblkError as LibUblkError, UblkFlags, UblkIORes};
         use std::rc::Rc;
 
         if self.config.device_size_bytes == 0 {
@@ -187,11 +187,15 @@ impl<H: BlockHandler> UblkDevice<H> {
         let tokio_handle = tokio::runtime::Handle::current();
 
         let thread = std::thread::spawn(move || {
+            let path_tx = std::sync::Mutex::new(Some(path_tx));
+            let path_tx_arc = std::sync::Arc::new(path_tx);
+            let path_tx_err = std::sync::Arc::clone(&path_tx_arc);
+
             let result = (|| -> Result<(), Error> {
                 let ctrl = UblkCtrlBuilder::default()
                     .name("blockyard")
-                    .nr_queues(nr_queues)
-                    .depth(queue_depth)
+                    .nr_queues(nr_queues as u16)
+                    .depth(queue_depth as u16)
                     .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
                     .build()
                     .map_err(|e| Error::Storage(format!("failed to create ublk ctrl: {e}")))?;
@@ -216,9 +220,9 @@ impl<H: BlockHandler> UblkDevice<H> {
                         let bufs = bufs.clone();
                         move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
                             let iod = q.get_iod(tag);
-                            let op = unsafe { (*iod).op_flags & 0xFF };
-                            let offset = unsafe { (*iod).start_sect } * 512;
-                            let nr_sectors = unsafe { (*iod).nr_sectors };
+                            let op = iod.op_flags & 0xFF;
+                            let offset = iod.start_sector * 512;
+                            let nr_sectors = iod.nr_sectors;
                             let length = nr_sectors as u32 * 512;
 
                             let io_op = match op {
@@ -227,11 +231,12 @@ impl<H: BlockHandler> UblkDevice<H> {
                                 2 => IoOperation::Flush,   // REQ_OP_FLUSH
                                 3 => IoOperation::Discard, // REQ_OP_DISCARD
                                 _ => {
+                                    let buf_addr = bufs[tag as usize].as_mut_ptr();
                                     q.complete_io_cmd(
                                         tag,
-                                        Err(UblkIORes::Result(-libc::EOPNOTSUPP)),
-                                    )
-                                    .unwrap();
+                                        buf_addr,
+                                        Err(LibUblkError::OtherError(-95)),
+                                    );
                                     return;
                                 }
                             };
@@ -271,12 +276,12 @@ impl<H: BlockHandler> UblkDevice<H> {
                                             }
                                         }
                                     }
-                                    q.complete_io_cmd(tag, Ok(UblkIORes::Result(length as i32)))
-                                        .unwrap();
+                                    let buf_addr = bufs[tag as usize].as_mut_ptr();
+                                    q.complete_io_cmd(tag, buf_addr, Ok(UblkIORes::Result(length as i32)));
                                 }
                                 Err(_e) => {
-                                    q.complete_io_cmd(tag, Err(UblkIORes::Result(-libc::EIO)))
-                                        .unwrap();
+                                    let buf_addr = bufs[tag as usize].as_mut_ptr();
+                                    q.complete_io_cmd(tag, buf_addr, Err(LibUblkError::OtherError(-5)));
                                 }
                             }
                         }
@@ -288,8 +293,13 @@ impl<H: BlockHandler> UblkDevice<H> {
                     queue.wait_and_handle_io(io_handler);
                 };
 
-                let dev_ready = |ctrl_ref: &UblkCtrl| {
-                    let _ = path_tx.send(device_path.clone());
+                let device_path_clone = device_path.clone();
+                let path_tx_ready = std::sync::Arc::clone(&path_tx_arc);
+
+                let dev_ready = move |ctrl_ref: &UblkCtrl| {
+                    if let Some(tx) = path_tx_ready.lock().unwrap().take() {
+                        let _ = tx.send(device_path_clone.clone());
+                    }
                     ctrl_ref.dump();
                 };
 
@@ -301,7 +311,9 @@ impl<H: BlockHandler> UblkDevice<H> {
 
             if let Err(e) = result {
                 tracing::error!(error = %e, "ublk kernel thread failed");
-                let _ = path_tx.send(String::new());
+                if let Some(tx) = path_tx_err.lock().unwrap().take() {
+                    let _ = tx.send(String::new());
+                }
             }
         });
 
@@ -340,7 +352,7 @@ impl<H: BlockHandler> UblkDevice<H> {
 
     /// Stop the device.
     pub async fn stop(&self) -> Result<(), Error> {
-        let _mode = self.mode.lock().clone();
+        let mode = self.mode.lock().clone();
 
         #[cfg(feature = "ublk-kernel")]
         if let DeviceMode::Kernel { device_id, .. } = mode {
@@ -349,8 +361,8 @@ impl<H: BlockHandler> UblkDevice<H> {
             }
 
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                use libublk::ctrl::UblkCtrlBuilder;
-                if let Ok(ctrl) = UblkCtrlBuilder::default().id(device_id).build() {
+                use libublk::ctrl::UblkCtrl;
+                if let Ok(ctrl) = UblkCtrl::new_simple(device_id) {
                     let _ = ctrl.kill_dev();
                     let _ = ctrl.del_dev();
                 }
