@@ -305,17 +305,18 @@ impl MetadataClient for HttpMetadataClient {
 
         // All fields should be present when found=true
         Ok(Some(CommittedMapping {
-            extent_id: lookup.extent_id.ok_or_else(|| {
-                Error::Network("operation lookup missing extent_id".into())
-            })?,
-            extent_version: lookup.extent_version.ok_or_else(|| {
-                Error::Network("operation lookup missing extent_version".into())
-            })?,
-            epoch: EpochId::new(lookup.epoch.ok_or_else(|| {
-                Error::Network("operation lookup missing epoch".into())
-            })?),
-            block_range: lookup.block_range_start.unwrap_or(0)
-                ..lookup.block_range_end.unwrap_or(0),
+            extent_id: lookup
+                .extent_id
+                .ok_or_else(|| Error::Network("operation lookup missing extent_id".into()))?,
+            extent_version: lookup
+                .extent_version
+                .ok_or_else(|| Error::Network("operation lookup missing extent_version".into()))?,
+            epoch: EpochId::new(
+                lookup
+                    .epoch
+                    .ok_or_else(|| Error::Network("operation lookup missing epoch".into()))?,
+            ),
+            block_range: lookup.block_range_start.unwrap_or(0)..lookup.block_range_end.unwrap_or(0),
             replica_locations: lookup.replica_locations.unwrap_or_default(),
             checksums: lookup.checksums.unwrap_or_default(),
         }))
@@ -492,25 +493,19 @@ mod tests {
         )
     }
 
-    async fn mock_acquire_lease(
-        Json(_req): Json<LeaseRequest>,
-    ) -> impl IntoResponse {
+    async fn mock_acquire_lease(Json(_req): Json<LeaseRequest>) -> impl IntoResponse {
         Json(serde_json::json!({
             "Denied": { "reason": "mock server" }
         }))
     }
 
-    async fn mock_renew_lease(
-        Json(_req): Json<LeaseRequest>,
-    ) -> impl IntoResponse {
+    async fn mock_renew_lease(Json(_req): Json<LeaseRequest>) -> impl IntoResponse {
         Json(serde_json::json!({
             "Denied": { "reason": "mock server" }
         }))
     }
 
-    async fn mock_release_lease(
-        Json(_req): Json<LeaseReleaseRequest>,
-    ) -> impl IntoResponse {
+    async fn mock_release_lease(Json(_req): Json<LeaseReleaseRequest>) -> impl IntoResponse {
         Json(serde_json::json!("Released"))
     }
 

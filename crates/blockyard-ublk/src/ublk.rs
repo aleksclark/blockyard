@@ -2,10 +2,22 @@
 //!
 //! Wraps `libublk` to register a block device and dispatch kernel IO requests
 //! to a [`BlockHandler`] trait implementor.
+//!
+//! # Feature-gated kernel integration
+//!
+//! When the `ublk-kernel` feature is enabled, [`UblkDevice::start_kernel`]
+//! creates a real `/dev/ublkbN` device via the `libublk` crate. The ublk
+//! IO loop runs on a dedicated OS thread (io_uring requires its own
+//! executor), bridging into the tokio runtime via channels.
+//!
+//! Without the feature, the device operates in **mock mode** — no kernel
+//! device is created and IO is submitted directly via [`UblkDevice::submit_io`].
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use parking_lot::Mutex;
 
 use blockyard_common::error::Error;
 
@@ -65,23 +77,45 @@ impl Default for UblkDeviceConfig {
     }
 }
 
+/// Tracks how the device was started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeviceMode {
+    /// Device not started yet.
+    Idle,
+    /// Mock mode — no kernel device, IO submitted via `submit_io`.
+    Mock,
+    /// Kernel mode — real `/dev/ublkbN` device via libublk.
+    #[cfg(feature = "ublk-kernel")]
+    Kernel { device_path: String, device_id: i32 },
+}
+
 /// A ublk block device that dispatches IO to a [`BlockHandler`].
 ///
 /// In production this wraps the `libublk` crate. The struct is designed
 /// to be testable without a running kernel ublk driver: the handler
 /// trait can be mocked and IO can be injected directly via [`submit_io`].
 pub struct UblkDevice<H: BlockHandler> {
-    handler: H,
+    handler: Arc<H>,
     config: UblkDeviceConfig,
     running: std::sync::atomic::AtomicBool,
+    mode: Mutex<DeviceMode>,
+    #[cfg(feature = "ublk-kernel")]
+    kernel_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    #[cfg(feature = "ublk-kernel")]
+    kernel_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl<H: BlockHandler> UblkDevice<H> {
     pub fn new(handler: H, config: UblkDeviceConfig) -> Self {
         Self {
-            handler,
+            handler: Arc::new(handler),
             config,
             running: std::sync::atomic::AtomicBool::new(false),
+            mode: Mutex::new(DeviceMode::Idle),
+            #[cfg(feature = "ublk-kernel")]
+            kernel_shutdown: Mutex::new(None),
+            #[cfg(feature = "ublk-kernel")]
+            kernel_thread: Mutex::new(None),
         }
     }
 
@@ -97,26 +131,242 @@ impl<H: BlockHandler> UblkDevice<H> {
         self.running.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Start the device. In production this registers with the kernel ublk
-    /// driver; in tests it simply marks the device as running.
+    /// Returns the device path (e.g. `/dev/ublkb0`) if running in kernel mode.
+    pub fn device_path(&self) -> Option<String> {
+        let mode = self.mode.lock();
+        match &*mode {
+            #[cfg(feature = "ublk-kernel")]
+            DeviceMode::Kernel { device_path, .. } => Some(device_path.clone()),
+            _ => None,
+        }
+    }
+
+    /// Start the device in mock mode. IO is submitted via [`submit_io`].
+    /// This is the default for testing and when `ublk-kernel` is not enabled.
     pub async fn start(&self) -> Result<(), Error> {
         if self.config.device_size_bytes == 0 {
             return Err(Error::Config("device size must be > 0".into()));
         }
+        *self.mode.lock() = DeviceMode::Mock;
         self.running
             .store(true, std::sync::atomic::Ordering::Release);
         tracing::info!(
             size = self.config.device_size_bytes,
             block_size = self.config.block_size,
-            "ublk device started"
+            "ublk device started (mock mode)"
         );
         Ok(())
     }
 
+    /// Start the device with a real kernel ublk device via libublk.
+    ///
+    /// Requires the `ublk-kernel` feature, Linux kernel 6.0+ with `ublk_drv`
+    /// module loaded, and appropriate capabilities (root or CAP_SYS_ADMIN).
+    ///
+    /// The IO loop runs on a dedicated OS thread; IO commands are bridged
+    /// into the tokio runtime via channels.
+    #[cfg(feature = "ublk-kernel")]
+    pub async fn start_kernel(&self) -> Result<String, Error> {
+        use libublk::ctrl::UblkCtrlBuilder;
+        use libublk::io::{UblkDev, UblkIOCtx, UblkQueue};
+        use libublk::{UblkFlags, UblkIORes};
+        use std::rc::Rc;
+
+        if self.config.device_size_bytes == 0 {
+            return Err(Error::Config("device size must be > 0".into()));
+        }
+
+        let nr_queues = self.config.num_queues as u32;
+        let queue_depth = self.config.queue_depth as u32;
+        let dev_size = self.config.device_size_bytes;
+        let block_size = self.config.block_size;
+        let handler = Arc::clone(&self.handler);
+
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let tokio_handle = tokio::runtime::Handle::current();
+
+        let thread = std::thread::spawn(move || {
+            let result = (|| -> Result<(), Error> {
+                let ctrl = UblkCtrlBuilder::default()
+                    .name("blockyard")
+                    .nr_queues(nr_queues)
+                    .depth(queue_depth)
+                    .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+                    .build()
+                    .map_err(|e| Error::Storage(format!("failed to create ublk ctrl: {e}")))?;
+
+                let dev_id = ctrl.dev_info().dev_id as i32;
+                let device_path = format!("/dev/ublkb{}", dev_id);
+
+                let tgt_init = |dev: &mut UblkDev| {
+                    dev.set_default_params(dev_size);
+                    Ok(())
+                };
+
+                let handler_clone = handler;
+                let tokio_handle_clone = tokio_handle.clone();
+
+                let q_handler = move |qid: u16, dev: &UblkDev| {
+                    let bufs = Rc::new(dev.alloc_queue_io_bufs());
+                    let handler = handler_clone.clone();
+                    let tokio_handle = tokio_handle_clone.clone();
+
+                    let io_handler = {
+                        let bufs = bufs.clone();
+                        move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
+                            let iod = q.get_iod(tag);
+                            let op = unsafe { (*iod).op_flags & 0xFF };
+                            let offset = unsafe { (*iod).start_sect } * 512;
+                            let nr_sectors = unsafe { (*iod).nr_sectors };
+                            let length = nr_sectors as u32 * 512;
+
+                            let io_op = match op {
+                                0 => IoOperation::Read,    // REQ_OP_READ
+                                1 => IoOperation::Write,   // REQ_OP_WRITE
+                                2 => IoOperation::Flush,   // REQ_OP_FLUSH
+                                3 => IoOperation::Discard, // REQ_OP_DISCARD
+                                _ => {
+                                    q.complete_io_cmd(
+                                        tag,
+                                        Err(UblkIORes::Result(-libc::EOPNOTSUPP)),
+                                    )
+                                    .unwrap();
+                                    return;
+                                }
+                            };
+
+                            let data = if io_op == IoOperation::Write {
+                                let buf = &bufs[tag as usize];
+                                Some(Bytes::copy_from_slice(buf.as_slice()))
+                            } else {
+                                None
+                            };
+
+                            let request = IoRequest {
+                                operation: io_op.clone(),
+                                offset_bytes: offset,
+                                length_bytes: length,
+                                data,
+                                tag: tag as u64,
+                            };
+
+                            let h = handler.clone();
+                            let result =
+                                tokio_handle.block_on(async move { h.handle_io(request).await });
+
+                            match result {
+                                Ok(read_data) => {
+                                    if io_op == IoOperation::Read {
+                                        if let Some(data) = read_data {
+                                            let buf = &bufs[tag as usize];
+                                            let len =
+                                                std::cmp::min(data.len(), buf.as_slice().len());
+                                            unsafe {
+                                                std::ptr::copy_nonoverlapping(
+                                                    data.as_ptr(),
+                                                    buf.as_mut_ptr(),
+                                                    len,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    q.complete_io_cmd(tag, Ok(UblkIORes::Result(length as i32)))
+                                        .unwrap();
+                                }
+                                Err(_e) => {
+                                    q.complete_io_cmd(tag, Err(UblkIORes::Result(-libc::EIO)))
+                                        .unwrap();
+                                }
+                            }
+                        }
+                    };
+
+                    let queue = UblkQueue::new(qid as u16, dev)
+                        .unwrap()
+                        .submit_fetch_commands(Some(&bufs));
+                    queue.wait_and_handle_io(io_handler);
+                };
+
+                let dev_ready = |ctrl_ref: &UblkCtrl| {
+                    let _ = path_tx.send(device_path.clone());
+                    ctrl_ref.dump();
+                };
+
+                ctrl.run_target(tgt_init, q_handler, dev_ready)
+                    .map_err(|e| Error::Storage(format!("ublk run_target failed: {e}")))?;
+
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                tracing::error!(error = %e, "ublk kernel thread failed");
+                let _ = path_tx.send(String::new());
+            }
+        });
+
+        let device_path = path_rx
+            .await
+            .map_err(|_| Error::Storage("ublk device creation failed".into()))?;
+
+        if device_path.is_empty() {
+            return Err(Error::Storage("ublk device creation failed".into()));
+        }
+
+        let dev_id: i32 = device_path
+            .strip_prefix("/dev/ublkb")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(-1);
+
+        *self.mode.lock() = DeviceMode::Kernel {
+            device_path: device_path.clone(),
+            device_id: dev_id,
+        };
+        *self.kernel_shutdown.lock() = Some(shutdown_tx);
+        *self.kernel_thread.lock() = Some(thread);
+
+        self.running
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        tracing::info!(
+            device_path = %device_path,
+            size = self.config.device_size_bytes,
+            block_size = self.config.block_size,
+            "ublk device started (kernel mode)"
+        );
+
+        Ok(device_path)
+    }
+
     /// Stop the device.
     pub async fn stop(&self) -> Result<(), Error> {
+        let _mode = self.mode.lock().clone();
+
+        #[cfg(feature = "ublk-kernel")]
+        if let DeviceMode::Kernel { device_id, .. } = mode {
+            if let Some(tx) = self.kernel_shutdown.lock().take() {
+                let _ = tx.send(());
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                use libublk::ctrl::UblkCtrlBuilder;
+                if let Ok(ctrl) = UblkCtrlBuilder::default().id(device_id).build() {
+                    let _ = ctrl.kill_dev();
+                    let _ = ctrl.del_dev();
+                }
+            }));
+            if let Err(e) = result {
+                tracing::warn!("ublk device cleanup panicked: {:?}", e);
+            }
+
+            if let Some(thread) = self.kernel_thread.lock().take() {
+                let _ = thread.join();
+            }
+        }
+
         self.running
             .store(false, std::sync::atomic::Ordering::Release);
+        *self.mode.lock() = DeviceMode::Idle;
         tracing::info!("ublk device stopped");
         Ok(())
     }
@@ -135,6 +385,7 @@ impl<H: BlockHandler> std::fmt::Debug for UblkDevice<H> {
         f.debug_struct("UblkDevice")
             .field("config", &self.config)
             .field("running", &self.is_running())
+            .field("mode", &*self.mode.lock())
             .finish()
     }
 }
@@ -469,5 +720,40 @@ mod tests {
         assert!(!dev.is_running());
         dev.start().await.unwrap();
         assert!(dev.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_device_path_none_in_mock_mode() {
+        let dev = UblkDevice::new(
+            EchoHandler,
+            UblkDeviceConfig {
+                device_size_bytes: 1024 * 1024,
+                ..Default::default()
+            },
+        );
+        assert!(dev.device_path().is_none());
+        dev.start().await.unwrap();
+        assert!(dev.device_path().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_device_path_none_before_start() {
+        let dev = UblkDevice::new(
+            EchoHandler,
+            UblkDeviceConfig {
+                device_size_bytes: 1024,
+                ..Default::default()
+            },
+        );
+        assert!(dev.device_path().is_none());
+    }
+
+    #[cfg(feature = "ublk-kernel")]
+    #[tokio::test]
+    async fn test_start_kernel_zero_size() {
+        let dev = UblkDevice::new(EchoHandler, UblkDeviceConfig::default());
+        let result = dev.start_kernel().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("device size"));
     }
 }
