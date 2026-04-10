@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crate::node::{JoinRequest, JoinResponse};
+
 #[derive(Clone)]
 struct AppState {
     metadata: MetadataService,
@@ -108,6 +110,7 @@ pub async fn start_management_api(
         .route("/api/v1/nodes", get(list_nodes))
         .route("/api/v1/nodes/{id}", get(inspect_node))
         .route("/api/v1/cluster/status", get(cluster_status))
+        .route("/api/v1/cluster/join", post(cluster_join))
         .route("/api/v1/disks", get(list_disks))
         .with_state(Arc::new(state));
 
@@ -316,6 +319,62 @@ async fn list_disks(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::to_value(&disks).unwrap())
 }
 
+/// POST /api/v1/cluster/join
+///
+/// Allows a new node to join the cluster. The leader registers the node
+/// in the state machine (assigning a raft u64 ID), then adds it to
+/// the Raft membership, and returns the assigned raft_id.
+async fn cluster_join(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<JoinRequest>,
+) -> impl IntoResponse {
+    use openraft::BasicNode;
+    use std::collections::BTreeSet;
+
+    // Step 1: Register node in state machine (get raft_id)
+    let raft_id = match state
+        .metadata
+        .register_node(req.node_id, req.raft_addr.clone())
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("failed to register node: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Step 2: Add node to raft membership
+    // Get current members and add the new node
+    let raft = state.metadata.raft();
+    let metrics = raft.metrics().borrow().clone();
+
+    let mut new_members = BTreeSet::new();
+    if let Some(membership) = &metrics.membership_config.membership().get_joint_config().first() {
+        for &node_id in *membership {
+            new_members.insert(node_id);
+        }
+    }
+    new_members.insert(raft_id);
+
+    // First, add the node as a learner
+    if let Err(e) = raft.add_learner(raft_id, BasicNode::default(), true).await {
+        tracing::warn!(error = %e, raft_id, "failed to add learner (may already be a member)");
+    }
+
+    // Then try to change membership to include the new node
+    if let Err(e) = raft.change_membership(new_members, false).await {
+        tracing::warn!(error = %e, raft_id, "failed to change membership (may already be a member)");
+        // Not fatal — node might already be in membership
+    }
+
+    let resp = JoinResponse { raft_id };
+    (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +471,26 @@ mod tests {
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("/dev/sda"));
+    }
+
+    #[test]
+    fn test_join_request_serde() {
+        let req = JoinRequest {
+            node_id: NodeId::generate(),
+            raft_addr: "10.0.0.1:9810".into(),
+            data_addr: "10.0.0.1:9800".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: JoinRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.raft_addr, "10.0.0.1:9810");
+        assert_eq!(parsed.data_addr, "10.0.0.1:9800");
+    }
+
+    #[test]
+    fn test_join_response_serde() {
+        let resp = JoinResponse { raft_id: 5 };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: JoinResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.raft_id, 5);
     }
 }

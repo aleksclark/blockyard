@@ -52,4 +52,8 @@ pub enum MetadataRequest {
 
     /// Acquire, renew, or release a volume write lease (P6.1).
     Lease(LeaseRequest),
+
+    /// Register a node and assign it a raft u64 ID.
+    /// Returns [`MetadataResponse::NodeRegistered`] with the assigned raft ID.
+    RegisterNode { node_id: NodeId, addr: String },
 }

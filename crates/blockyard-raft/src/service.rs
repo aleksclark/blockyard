@@ -102,9 +102,7 @@ impl MetadataService {
         match resp {
             MetadataResponse::Epoch(e) => Ok(e),
             MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
-            MetadataResponse::Ok | MetadataResponse::Lease(_) => {
-                Err(Error::Raft("unexpected response from advance_epoch".into()))
-            }
+            _ => Err(Error::Raft("unexpected response from advance_epoch".into())),
         }
     }
     /// Commit an extent mapping (P3.4, P3.5).
@@ -140,7 +138,7 @@ impl MetadataService {
         match resp {
             MetadataResponse::Epoch(e) => Ok(e),
             MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
-            MetadataResponse::Ok | MetadataResponse::Lease(_) => Err(Error::Raft(
+            _ => Err(Error::Raft(
                 "unexpected response from commit_extent_mapping".into(),
             )),
         }
@@ -269,11 +267,43 @@ impl MetadataService {
     pub fn raft(&self) -> &Raft<TypeConfig> {
         &self.raft
     }
+
+    /// Register a node in the state machine, assigning it a raft u64 ID.
+    pub async fn register_node(&self, node_id: NodeId, addr: String) -> Result<u64, Error> {
+        let resp = self
+            .commit(MetadataRequest::RegisterNode { node_id, addr })
+            .await?;
+        match resp {
+            MetadataResponse::NodeRegistered(raft_id) => Ok(raft_id),
+            MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
+            _ => Err(Error::Raft(
+                "unexpected response from register_node".into(),
+            )),
+        }
+    }
+
+    /// Look up the raft u64 ID for a blockyard NodeId from local state.
+    pub fn get_raft_id(&self, node_id: &NodeId) -> Option<u64> {
+        self.sm_data.read().get_raft_id(node_id)
+    }
+
+    /// Look up the blockyard NodeId for a raft u64 ID from local state.
+    pub fn get_node_id_by_raft_id(&self, raft_id: u64) -> Option<NodeId> {
+        self.sm_data.read().get_node_id_by_raft_id(raft_id)
+    }
+
+    /// Get a reference to the shared state machine data.
+    pub fn sm_data(&self) -> &Arc<RwLock<MetadataStateMachineData>> {
+        &self.sm_data
+    }
 }
 
 fn check_response(resp: MetadataResponse) -> Result<(), Error> {
     match resp {
-        MetadataResponse::Ok | MetadataResponse::Epoch(_) | MetadataResponse::Lease(_) => Ok(()),
+        MetadataResponse::Ok
+        | MetadataResponse::Epoch(_)
+        | MetadataResponse::Lease(_)
+        | MetadataResponse::NodeRegistered(_) => Ok(()),
         MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
     }
 }
@@ -301,5 +331,10 @@ mod tests {
         let result = check_response(MetadataResponse::Error("fail".into()));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("fail"));
+    }
+
+    #[test]
+    fn test_check_response_node_registered() {
+        assert!(check_response(MetadataResponse::NodeRegistered(42)).is_ok());
     }
 }

@@ -17,6 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
+blockyard-gossip = { path = "../blockyard-gossip" }
 blockyard-protocol = { path = "../blockyard-protocol" }
 blockyard-raft = { path = "../blockyard-raft" }
 blockyard-storage = { path = "../blockyard-storage" }
@@ -32,3 +33,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 axum.workspace = true
 chrono.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

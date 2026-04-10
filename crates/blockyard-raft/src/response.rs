@@ -18,6 +18,9 @@ pub enum MetadataResponse {
 
     /// Response to a lease request (P6.1).
     Lease(LeaseResponse),
+
+    /// A raft node ID was assigned for a newly registered node.
+    NodeRegistered(u64),
 }
 
 impl MetadataResponse {

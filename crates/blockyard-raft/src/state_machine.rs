@@ -3,6 +3,7 @@
 //! protection policies (P3.2).
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
@@ -85,6 +86,14 @@ pub struct MetadataStateMachineData {
 
     /// Global monotonically increasing lease version counter (P6.1).
     pub lease_version_counter: LeaseVersion,
+
+    /// Counter for assigning sequential raft u64 node IDs.
+    #[serde(default)]
+    pub raft_id_counter: u64,
+
+    /// Mapping from blockyard NodeId (UUID) to raft u64 node ID.
+    #[serde(default)]
+    pub node_raft_map: HashMap<NodeId, u64>,
 }
 
 impl Default for MetadataStateMachineData {
@@ -101,6 +110,8 @@ impl Default for MetadataStateMachineData {
             placement_map: BTreeMap::new(),
             leases: BTreeMap::new(),
             lease_version_counter: 0,
+            raft_id_counter: 0,
+            node_raft_map: HashMap::new(),
         }
     }
 }
@@ -267,6 +278,39 @@ impl MetadataStateMachineData {
             MetadataRequest::Lease(lease_req) => {
                 MetadataResponse::Lease(self.apply_lease_request(lease_req))
             }
+
+            MetadataRequest::RegisterNode { node_id, addr } => {
+                // If already registered, return the existing raft ID
+                if let Some(&existing_raft_id) = self.node_raft_map.get(node_id) {
+                    // Update address in cluster nodes
+                    let key = node_id.to_string();
+                    self.nodes.insert(
+                        key,
+                        ClusterNode {
+                            node_id: *node_id,
+                            addr: addr.clone(),
+                        },
+                    );
+                    return MetadataResponse::NodeRegistered(existing_raft_id);
+                }
+
+                // Assign next raft ID
+                self.raft_id_counter += 1;
+                let raft_id = self.raft_id_counter;
+                self.node_raft_map.insert(*node_id, raft_id);
+
+                // Also add to cluster nodes
+                let key = node_id.to_string();
+                self.nodes.insert(
+                    key,
+                    ClusterNode {
+                        node_id: *node_id,
+                        addr: addr.clone(),
+                    },
+                );
+
+                MetadataResponse::NodeRegistered(raft_id)
+            }
         }
     }
 
@@ -314,6 +358,24 @@ impl MetadataStateMachineData {
     /// Get the current placement epoch (P3.3).
     pub fn current_epoch(&self) -> EpochId {
         self.epoch
+    }
+
+    /// Look up the raft u64 ID for a blockyard NodeId.
+    pub fn get_raft_id(&self, node_id: &NodeId) -> Option<u64> {
+        self.node_raft_map.get(node_id).copied()
+    }
+
+    /// Look up the blockyard NodeId for a raft u64 ID.
+    pub fn get_node_id_by_raft_id(&self, raft_id: u64) -> Option<NodeId> {
+        self.node_raft_map
+            .iter()
+            .find(|&(_, &v)| v == raft_id)
+            .map(|(&k, _)| k)
+    }
+
+    /// Get the current raft_id_counter value.
+    pub fn raft_id_counter(&self) -> u64 {
+        self.raft_id_counter
     }
 
     /// Apply a lease request to the state machine (P6.1).
@@ -1697,5 +1759,132 @@ mod tests {
         let lease = restored.get_lease(&vid).unwrap();
         assert!(lease.is_held_by(sid));
         assert_eq!(lease.lease_version, 1);
+    }
+
+    #[test]
+    fn test_register_node_assigns_sequential_raft_ids() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+        let n2 = make_node_id();
+
+        let resp1 = sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+        let resp2 = sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n2,
+            addr: "10.0.0.2:9810".into(),
+        });
+
+        assert!(matches!(resp1, MetadataResponse::NodeRegistered(1)));
+        assert!(matches!(resp2, MetadataResponse::NodeRegistered(2)));
+        assert_eq!(sm.raft_id_counter(), 2);
+    }
+
+    #[test]
+    fn test_register_node_idempotent_returns_same_id() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+
+        let resp1 = sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+        let resp2 = sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9999".into(),
+        });
+
+        assert!(matches!(resp1, MetadataResponse::NodeRegistered(1)));
+        assert!(matches!(resp2, MetadataResponse::NodeRegistered(1)));
+        assert_eq!(sm.raft_id_counter(), 1);
+    }
+
+    #[test]
+    fn test_register_node_adds_to_cluster_nodes() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+
+        let node = sm.get_node(&n1).unwrap();
+        assert_eq!(node.node_id, n1);
+        assert_eq!(node.addr, "10.0.0.1:9810");
+    }
+
+    #[test]
+    fn test_register_node_updates_addr_on_reregister() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9999".into(),
+        });
+
+        assert_eq!(sm.get_node(&n1).unwrap().addr, "10.0.0.1:9999");
+    }
+
+    #[test]
+    fn test_get_raft_id() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+
+        assert!(sm.get_raft_id(&n1).is_none());
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+        assert_eq!(sm.get_raft_id(&n1), Some(1));
+    }
+
+    #[test]
+    fn test_get_node_id_by_raft_id() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+
+        assert_eq!(sm.get_node_id_by_raft_id(1), Some(n1));
+        assert_eq!(sm.get_node_id_by_raft_id(999), None);
+    }
+
+    #[test]
+    fn test_raft_id_counter_accessor() {
+        let sm = MetadataStateMachineData::new();
+        assert_eq!(sm.raft_id_counter(), 0);
+    }
+
+    #[test]
+    fn test_node_raft_map_survives_serde() {
+        let mut sm = MetadataStateMachineData::new();
+        let n1 = make_node_id();
+        let n2 = make_node_id();
+
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n1,
+            addr: "10.0.0.1:9810".into(),
+        });
+        sm.apply_request(&MetadataRequest::RegisterNode {
+            node_id: n2,
+            addr: "10.0.0.2:9810".into(),
+        });
+
+        let json = serde_json::to_string(&sm).unwrap();
+        let restored: MetadataStateMachineData = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.get_raft_id(&n1), Some(1));
+        assert_eq!(restored.get_raft_id(&n2), Some(2));
+        assert_eq!(restored.raft_id_counter(), 2);
     }
 }

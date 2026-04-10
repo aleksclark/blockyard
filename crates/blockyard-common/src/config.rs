@@ -72,6 +72,11 @@ pub struct RaftSection {
     /// Snapshot threshold (number of log entries before compaction).
     #[serde(default = "default_snapshot_threshold")]
     pub snapshot_threshold: u64,
+
+    /// Bind address for the Raft RPC TCP transport.
+    /// Defaults to `None`, which means derive from `listen_addr` with port + 10.
+    #[serde(default)]
+    pub bind_addr: Option<SocketAddr>,
 }
 
 /// SWIM gossip protocol configuration.
@@ -584,5 +589,38 @@ seed_nodes = ["10.0.0.2:9801", "10.0.0.3:9801"]
         let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
         let debug = format!("{:?}", config.raft);
         assert!(debug.contains("RaftSection"));
+    }
+
+    #[test]
+    fn test_raft_bind_addr_default_is_none() {
+        let config = NodeConfig::from_toml(&minimal_toml()).unwrap();
+        assert!(config.raft.bind_addr.is_none());
+    }
+
+    #[test]
+    fn test_raft_bind_addr_explicit() {
+        let toml = r#"
+listen_addr = "127.0.0.1:9800"
+data_dir = "/tmp/blockyard"
+
+[storage]
+disk_paths = ["/mnt/disk0"]
+
+[raft]
+election_timeout_min_ms = 150
+election_timeout_max_ms = 300
+heartbeat_interval_ms = 50
+bind_addr = "10.0.0.1:5555"
+
+[gossip]
+bind_addr = "127.0.0.1:9801"
+
+[protocol]
+"#;
+        let config = NodeConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            config.raft.bind_addr,
+            Some("10.0.0.1:5555".parse().unwrap())
+        );
     }
 }
