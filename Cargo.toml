@@ -59,15 +59,19 @@ blockyard-storage = { path = "crates/blockyard-storage" }
 blockyard-ublk = { path = "crates/blockyard-ublk" }
 blockyard-client = { path = "crates/blockyard-client" }
 blockyard-test-harness = { path = "crates/blockyard-test-harness" }
+blockyard-protocol = { path = "crates/blockyard-protocol" }
 blake3.workspace = true
 bytes.workspace = true
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 parking_lot.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 tempfile = "3"
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
+tracing-subscriber = { workspace = true }
 uuid.workspace = true
 
 [profile.release]

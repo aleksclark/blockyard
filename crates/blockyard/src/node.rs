@@ -261,13 +261,10 @@ impl BlockyardNode {
             let mut join_peers = std::collections::HashMap::new();
             let client = reqwest::Client::new();
             for seed in &config.gossip.seed_nodes {
-                // Derive the seed's mgmt_addr from the gossip seed.
-                // Convention: mgmt API runs on same host, port from config.protocol.mgmt_addr
-                // But we use the seed directly as the gossip addr. The mgmt endpoint
-                // is at the default management port. We'll try the seed's IP with the
-                // default mgmt port.
-                let mgmt_addr =
-                    format!("http://{}:{}", seed.ip(), config.protocol.mgmt_addr.port());
+                // Convention: the management API binds the same port number as gossip
+                // but on TCP (gossip uses UDP), so we can derive the mgmt address
+                // directly from the gossip seed address.
+                let mgmt_addr = format!("http://{}:{}", seed.ip(), seed.port());
                 let url = format!("{}/api/v1/cluster/join", mgmt_addr);
 
                 match client.post(&url).json(&join_req).send().await {
