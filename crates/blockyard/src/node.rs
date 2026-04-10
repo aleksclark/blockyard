@@ -9,7 +9,8 @@ use blockyard_protocol::{
     WriteExtentResponse,
 };
 use blockyard_raft::{
-    LogStore, MetadataService, NetworkFactory, Router, StateMachineStore, TypeConfig,
+    MetadataService, NetworkFactory, PersistentLogStore, PersistentStateMachineStore, Router,
+    TypeConfig,
 };
 use blockyard_storage::{
     DataNodeService, DiskInventory, ExtentIndex, ExtentStore,
@@ -90,9 +91,11 @@ impl BlockyardNode {
 
         let data_service = Arc::new(DataNodeHandler(service));
 
-        // Step 6: Create single-node Raft
-        let log_store = LogStore::new();
-        let sm_store = StateMachineStore::new();
+        // Step 6: Create single-node Raft with persistent storage
+        let log_store = PersistentLogStore::new(&config.data_dir.join("raft.db"))
+            .map_err(|e| anyhow::anyhow!("failed to open raft log store: {e}"))?;
+        let sm_store = PersistentStateMachineStore::new(&config.data_dir.join("raft-sm.db"))
+            .map_err(|e| anyhow::anyhow!("failed to open raft state machine store: {e}"))?;
         let router = Arc::new(RwLock::new(Router::new()));
         let network = NetworkFactory::new(router.clone());
 
@@ -103,6 +106,7 @@ impl BlockyardNode {
             ..Default::default()
         };
 
+        let sm_data = sm_store.data_arc().clone();
         let raft = Raft::<TypeConfig>::new(
             1, // node ID for Raft (u64)
             Arc::new(raft_config),
@@ -123,7 +127,7 @@ impl BlockyardNode {
         info!("raft cluster initialized (single-node)");
 
         // Step 8: Create MetadataService
-        let metadata = MetadataService::new(raft, sm_store);
+        let metadata = MetadataService::new(raft, sm_data);
 
         // Step 9: Start BackgroundScheduler
         let scheduler = BackgroundScheduler::new(SchedulerConfig::default());

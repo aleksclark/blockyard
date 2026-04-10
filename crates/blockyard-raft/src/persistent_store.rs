@@ -50,7 +50,7 @@ pub struct PersistentLogStore {
 
 impl PersistentLogStore {
     /// Open or create a persistent log store at the given path.
-    pub fn new(path: &Path) -> Result<Self, redb::Error> {
+    pub fn new(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db = Database::create(path)?;
         {
             let txn = db.begin_write()?;
@@ -239,7 +239,7 @@ impl PersistentStateMachineStore {
     ///
     /// Loads previously persisted state from redb on startup, restoring
     /// last_applied, membership, and the full MetadataStateMachineData.
-    pub fn new(path: &Path) -> Result<Self, redb::Error> {
+    pub fn new(path: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db = Database::create(path)?;
         {
             let txn = db.begin_write()?;
@@ -288,6 +288,12 @@ impl PersistentStateMachineStore {
         self.data.read()
     }
 
+    /// Get the shared state machine data handle (for MetadataService).
+    pub fn data_arc(&self) -> &Arc<RwLock<MetadataStateMachineData>> {
+        &self.data
+    }
+
+    #[allow(clippy::result_large_err)]
     fn persist_state(&self) -> Result<(), StorageError<u64>> {
         let data = self.data.read();
         let sm_json = serde_json::to_vec(&*data).map_err(io_err)?;
@@ -861,7 +867,6 @@ mod tests {
 
         let writer = {
             let mut sm_w = sm_clone.clone();
-            let vid = vid;
             tokio::spawn(async move {
                 let entry = make_normal(
                     1,
@@ -917,5 +922,189 @@ mod tests {
 
         let sm3 = PersistentStateMachineStore::new(&path2).unwrap();
         assert!(sm3.data().get_volume(&vid).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_persistent_log_large_batch() {
+        let (_dir, path) = temp_db_path("log.redb");
+        let mut store = PersistentLogStore::new(&path).unwrap();
+
+        let entries: Vec<_> = (1..=200).map(|i| make_blank(i, 1)).collect();
+        store.insert_entries(entries);
+
+        let read = store.try_get_log_entries(1..=200).await.unwrap();
+        assert_eq!(read.len(), 200);
+
+        let state = store.get_log_state().await.unwrap();
+        assert_eq!(state.last_log_id.unwrap().index, 200);
+
+        // Read a subset
+        let subset = store.try_get_log_entries(50..=100).await.unwrap();
+        assert_eq!(subset.len(), 51);
+        assert_eq!(subset[0].log_id.index, 50);
+        assert_eq!(subset[50].log_id.index, 100);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_log_multiple_reopen_cycles() {
+        let (_dir, path) = temp_db_path("log.redb");
+
+        // Cycle 1: write entries 1-3
+        {
+            let store = PersistentLogStore::new(&path).unwrap();
+            store.insert_entries(vec![make_blank(1, 1), make_blank(2, 1), make_blank(3, 1)]);
+        }
+
+        // Cycle 2: verify and write more
+        {
+            let mut store = PersistentLogStore::new(&path).unwrap();
+            let read = store.try_get_log_entries(1..=3).await.unwrap();
+            assert_eq!(read.len(), 3);
+            store.insert_entries(vec![make_blank(4, 2), make_blank(5, 2)]);
+        }
+
+        // Cycle 3: verify all, purge some
+        {
+            let mut store = PersistentLogStore::new(&path).unwrap();
+            let read = store.try_get_log_entries(1..=5).await.unwrap();
+            assert_eq!(read.len(), 5);
+
+            let lid = LogId::new(openraft::CommittedLeaderId::new(1, 1), 2);
+            store.purge(lid).await.unwrap();
+        }
+
+        // Cycle 4: verify purge persisted and remaining entries
+        {
+            let mut store = PersistentLogStore::new(&path).unwrap();
+            let state = store.get_log_state().await.unwrap();
+            assert_eq!(state.last_purged_log_id.unwrap().index, 2);
+            assert_eq!(state.last_log_id.unwrap().index, 5);
+
+            let read = store.try_get_log_entries(1..=5).await.unwrap();
+            assert_eq!(read.len(), 3); // indices 3,4,5
+        }
+    }
+
+    #[tokio::test]
+    async fn test_persistent_sm_snapshot_after_many_applies() {
+        let (_dir, path) = temp_db_path("sm.redb");
+        let mut sm = PersistentStateMachineStore::new(&path).unwrap();
+
+        // Create multiple volumes
+        let mut vids = Vec::new();
+        for i in 1..=10 {
+            let vid = VolumeId::generate();
+            vids.push(vid);
+            let entry = make_normal(
+                i,
+                1,
+                MetadataRequest::CreateVolume {
+                    volume_id: vid,
+                    size_bytes: 1024 * i,
+                    protection: ProtectionPolicy::Replicated { replicas: 1 },
+                },
+            );
+            sm.apply(vec![entry]).await.unwrap();
+        }
+
+        // Build snapshot
+        let snap = sm.build_snapshot().await.unwrap();
+        assert_eq!(snap.meta.last_log_id.unwrap().index, 10);
+
+        // Install into fresh store
+        let (_dir2, path2) = temp_db_path("sm2.redb");
+        let mut sm2 = PersistentStateMachineStore::new(&path2).unwrap();
+        let raw = snap.snapshot.into_inner();
+        sm2.install_snapshot(&snap.meta, Box::new(Cursor::new(raw)))
+            .await
+            .unwrap();
+
+        // Verify all volumes present
+        for vid in &vids {
+            assert!(sm2.data().get_volume(vid).is_some());
+        }
+        let (last, _) = sm2.applied_state().await.unwrap();
+        assert_eq!(last.unwrap().index, 10);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_sm_multiple_reopen_cycles() {
+        let (_dir, path) = temp_db_path("sm.redb");
+        let vid1 = VolumeId::generate();
+        let vid2 = VolumeId::generate();
+
+        // Cycle 1: create first volume
+        {
+            let mut sm = PersistentStateMachineStore::new(&path).unwrap();
+            let entry = make_normal(
+                1,
+                1,
+                MetadataRequest::CreateVolume {
+                    volume_id: vid1,
+                    size_bytes: 1024,
+                    protection: ProtectionPolicy::Replicated { replicas: 1 },
+                },
+            );
+            sm.apply(vec![entry]).await.unwrap();
+        }
+
+        // Cycle 2: verify and create second volume
+        {
+            let mut sm = PersistentStateMachineStore::new(&path).unwrap();
+            assert!(sm.data().get_volume(&vid1).is_some());
+            let entry = make_normal(
+                2,
+                1,
+                MetadataRequest::CreateVolume {
+                    volume_id: vid2,
+                    size_bytes: 2048,
+                    protection: ProtectionPolicy::Replicated { replicas: 2 },
+                },
+            );
+            sm.apply(vec![entry]).await.unwrap();
+        }
+
+        // Cycle 3: verify both volumes survived
+        {
+            let mut sm = PersistentStateMachineStore::new(&path).unwrap();
+            assert!(sm.data().get_volume(&vid1).is_some());
+            assert!(sm.data().get_volume(&vid2).is_some());
+            let (last, _) = sm.applied_state().await.unwrap();
+            assert_eq!(last.unwrap().index, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_persistent_log_get_log_state_accuracy() {
+        let (_dir, path) = temp_db_path("log.redb");
+        let mut store = PersistentLogStore::new(&path).unwrap();
+
+        // Empty state
+        let state = store.get_log_state().await.unwrap();
+        assert!(state.last_log_id.is_none());
+        assert!(state.last_purged_log_id.is_none());
+
+        // After inserting entries
+        store.insert_entries(vec![make_blank(1, 1), make_blank(2, 1), make_blank(3, 2)]);
+
+        let state = store.get_log_state().await.unwrap();
+        assert_eq!(state.last_log_id.unwrap().index, 3);
+        assert!(state.last_purged_log_id.is_none());
+
+        // After purge
+        let lid = LogId::new(openraft::CommittedLeaderId::new(1, 1), 1);
+        store.purge(lid).await.unwrap();
+
+        let state = store.get_log_state().await.unwrap();
+        assert_eq!(state.last_log_id.unwrap().index, 3);
+        assert_eq!(state.last_purged_log_id.unwrap().index, 1);
+
+        // After truncate
+        let lid = LogId::new(openraft::CommittedLeaderId::new(2, 1), 3);
+        store.truncate(lid).await.unwrap();
+
+        let state = store.get_log_state().await.unwrap();
+        assert_eq!(state.last_log_id.unwrap().index, 2);
+        assert_eq!(state.last_purged_log_id.unwrap().index, 1);
     }
 }

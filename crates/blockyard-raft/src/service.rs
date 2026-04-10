@@ -11,8 +11,11 @@
 //! `client_write` will return `ForwardToLeader` or timeout if the node is in
 //! a minority partition, which the caller must handle.
 
+use std::sync::Arc;
+
 use openraft::Raft;
 use openraft::error::{ClientWriteError, RaftError};
+use parking_lot::RwLock;
 
 use blockyard_common::error::Error;
 use blockyard_common::{
@@ -22,8 +25,7 @@ use blockyard_common::{
 
 use crate::request::MetadataRequest;
 use crate::response::MetadataResponse;
-use crate::state_machine::{ClusterNode, ExtentMapping, VolumeMetadata};
-use crate::store::StateMachineStore;
+use crate::state_machine::{ClusterNode, ExtentMapping, MetadataStateMachineData, VolumeMetadata};
 use crate::typ::TypeConfig;
 
 /// The metadata service: a strongly consistent replicated state machine
@@ -31,12 +33,15 @@ use crate::typ::TypeConfig;
 #[derive(Clone)]
 pub struct MetadataService {
     raft: Raft<TypeConfig>,
-    sm: StateMachineStore,
+    sm_data: Arc<RwLock<MetadataStateMachineData>>,
 }
 
 impl MetadataService {
-    pub fn new(raft: Raft<TypeConfig>, sm: StateMachineStore) -> Self {
-        Self { raft, sm }
+    /// Create a new metadata service from a Raft instance and shared state
+    /// machine data. Use `store.data_arc()` (on either `StateMachineStore`
+    /// or `PersistentStateMachineStore`) to get the `Arc`.
+    pub fn new(raft: Raft<TypeConfig>, sm_data: Arc<RwLock<MetadataStateMachineData>>) -> Self {
+        Self { raft, sm_data }
     }
 
     /// Submit a metadata request through Raft consensus.
@@ -208,7 +213,7 @@ impl MetadataService {
 
     /// Get the current lease for a volume (local read, no Raft round-trip).
     pub fn get_lease(&self, volume_id: &VolumeId) -> Option<VolumeLease> {
-        self.sm.data().get_lease(volume_id).cloned()
+        self.sm_data.read().get_lease(volume_id).cloned()
     }
 
     /// Validate a write lease for fencing (P6.2, local read).
@@ -219,45 +224,45 @@ impl MetadataService {
         lease_version: LeaseVersion,
         now_ms: u64,
     ) -> Result<(), Error> {
-        self.sm
-            .data()
+        self.sm_data
+            .read()
             .validate_lease(volume_id, session_id, lease_version, now_ms)
             .map_err(Error::Auth)
     }
 
     /// Query committed state by operation ID (P3.6).
     pub fn lookup_by_operation_id(&self, op_id: &OperationId) -> Option<ExtentMapping> {
-        self.sm.data().lookup_by_operation_id(op_id).cloned()
+        self.sm_data.read().lookup_by_operation_id(op_id).cloned()
     }
 
     /// Query committed state by extent version (P3.6).
     pub fn lookup_by_extent_version(&self, version: u64) -> Option<ExtentMapping> {
-        self.sm.data().lookup_by_extent_version(version).cloned()
+        self.sm_data.read().lookup_by_extent_version(version).cloned()
     }
 
     /// Get volume metadata (read from local committed state).
     pub fn get_volume(&self, volume_id: &VolumeId) -> Option<VolumeMetadata> {
-        self.sm.data().get_volume(volume_id).cloned()
+        self.sm_data.read().get_volume(volume_id).cloned()
     }
 
     /// List all volumes.
     pub fn list_volumes(&self) -> Vec<VolumeMetadata> {
-        self.sm.data().list_volumes().into_iter().cloned().collect()
+        self.sm_data.read().list_volumes().into_iter().cloned().collect()
     }
 
     /// Get a cluster node.
     pub fn get_node(&self, node_id: &NodeId) -> Option<ClusterNode> {
-        self.sm.data().get_node(node_id).cloned()
+        self.sm_data.read().get_node(node_id).cloned()
     }
 
     /// List all cluster nodes.
     pub fn list_nodes(&self) -> Vec<ClusterNode> {
-        self.sm.data().list_nodes().into_iter().cloned().collect()
+        self.sm_data.read().list_nodes().into_iter().cloned().collect()
     }
 
     /// Get the current placement epoch (P3.3).
     pub fn current_epoch(&self) -> EpochId {
-        self.sm.data().current_epoch()
+        self.sm_data.read().current_epoch()
     }
 
     /// Get a reference to the underlying Raft instance.

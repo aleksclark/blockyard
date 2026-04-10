@@ -34,7 +34,7 @@ pub async fn create_test_raft_cluster(node_count: u64) -> TestRaftCluster {
         .await
         .expect("failed to create Raft node");
         router.write().add_node(node_id, raft.clone());
-        services.push(MetadataService::new(raft, sm_store));
+        services.push(MetadataService::new(raft, sm_store.data_arc().clone()));
     }
 
     let mut nodes = BTreeMap::new();

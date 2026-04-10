@@ -184,6 +184,11 @@ impl StateMachineStore {
     pub fn data(&self) -> parking_lot::RwLockReadGuard<'_, MetadataStateMachineData> {
         self.data.read()
     }
+
+    /// Get the shared state machine data handle (for MetadataService).
+    pub fn data_arc(&self) -> &Arc<RwLock<MetadataStateMachineData>> {
+        &self.data
+    }
 }
 
 impl Default for StateMachineStore {
