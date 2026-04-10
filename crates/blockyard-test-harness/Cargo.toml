@@ -35,3 +35,8 @@ tokio-util.workspace = true
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
+reqwest.workspace = true
+serde_json.workspace = true
+axum.workspace = true
+chrono.workspace = true
+blockyard-node = { path = "../blockyard", package = "blockyard" }

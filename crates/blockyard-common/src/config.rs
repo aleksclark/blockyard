@@ -107,6 +107,10 @@ pub struct ProtocolSection {
     /// Request timeout in milliseconds.
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+
+    /// Bind address for the management (REST) API.
+    #[serde(default = "default_mgmt_addr")]
+    pub mgmt_addr: SocketAddr,
 }
 
 /// TLS configuration for node-to-node and client-to-node communication.
@@ -168,6 +172,9 @@ fn default_connect_timeout_ms() -> u64 {
 }
 fn default_request_timeout_ms() -> u64 {
     30000
+}
+fn default_mgmt_addr() -> SocketAddr {
+    "127.0.0.1:9801".parse().expect("valid default mgmt_addr")
 }
 
 impl NodeConfig {
@@ -256,6 +263,7 @@ suspicion_mult = 4
 max_message_size = 67108864
 connect_timeout_ms = 5000
 request_timeout_ms = 30000
+mgmt_addr = "127.0.0.1:9801"
 
 # [tls]
 # cert_path = "/etc/blockyard/tls/node.crt"
