@@ -410,13 +410,17 @@ dependencies = [
 name = "blockyard-ublk"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "blockyard-common",
  "blockyard-protocol",
  "bytes",
  "parking_lot 0.12.5",
  "reed-solomon-erasure",
+ "reqwest",
  "serde",
+ "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]

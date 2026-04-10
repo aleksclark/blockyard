@@ -21,6 +21,10 @@ pub enum Error {
     #[error("storage error: {0}")]
     Storage(String),
 
+    /// Network communication errors (connection, timeout, framing).
+    #[error("network error: {0}")]
+    Network(String),
+
     /// Wire protocol errors (serialization, version mismatch).
     #[error("protocol error: {0}")]
     Protocol(String),
@@ -70,6 +74,27 @@ mod tests {
     fn test_protocol_error_display() {
         let err = Error::Protocol("version mismatch".into());
         assert_eq!(err.to_string(), "protocol error: version mismatch");
+    }
+
+    #[test]
+    fn test_network_error_display() {
+        let err = Error::Network("connection refused".into());
+        assert_eq!(err.to_string(), "network error: connection refused");
+    }
+
+    #[test]
+    fn test_network_error_debug() {
+        let err = Error::Network("timeout".into());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Network"));
+        assert!(debug.contains("timeout"));
+    }
+
+    #[test]
+    fn test_network_error_source() {
+        use std::error::Error as StdError;
+        let err = Error::Network("conn reset".into());
+        assert!(err.source().is_none());
     }
 
     #[test]
