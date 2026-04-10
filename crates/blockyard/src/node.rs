@@ -51,7 +51,7 @@ pub struct BlockyardNode {
 impl BlockyardNode {
     /// Start a single Blockyard node from the given configuration.
     pub async fn start(config: NodeConfig) -> anyhow::Result<Self> {
-        let node_id = NodeId::generate();
+        let node_id = NodeId::load_or_create(&config.data_dir)?;
         let shutdown = CancellationToken::new();
 
         info!(%node_id, "starting blockyard node");

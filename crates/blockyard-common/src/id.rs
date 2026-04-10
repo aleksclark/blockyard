@@ -3,10 +3,13 @@
 //! All IDs are newtypes providing type safety, Display/FromStr, and serde support.
 
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::error::Error;
 
 macro_rules! define_u64_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
@@ -91,6 +94,28 @@ macro_rules! define_uuid_id {
 define_uuid_id! {
     /// Unique identifier for a cluster node.
     NodeId
+}
+
+impl NodeId {
+    /// Load existing node identity from `data_dir/node_id`, or generate a new
+    /// one and persist it. Guarantees the same ID across restarts.
+    pub fn load_or_create(data_dir: &Path) -> Result<NodeId, Error> {
+        let id_path = data_dir.join("node_id");
+
+        if id_path.exists() {
+            let contents = std::fs::read_to_string(&id_path)?;
+            let trimmed = contents.trim();
+            let uuid: Uuid = trimmed
+                .parse()
+                .map_err(|e| Error::Config(format!("corrupt node_id file: {e}")))?;
+            return Ok(NodeId(uuid));
+        }
+
+        std::fs::create_dir_all(data_dir)?;
+        let id = NodeId::generate();
+        std::fs::write(&id_path, id.to_string())?;
+        Ok(id)
+    }
 }
 
 define_uuid_id! {
@@ -318,5 +343,54 @@ mod tests {
         let copied = id;
         assert_eq!(id, cloned);
         assert_eq!(id, copied);
+    }
+
+    #[test]
+    fn test_load_or_create_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = NodeId::load_or_create(dir.path()).unwrap();
+        let id_path = dir.path().join("node_id");
+        assert!(id_path.exists());
+        let contents = std::fs::read_to_string(&id_path).unwrap();
+        assert_eq!(contents.trim(), id.to_string());
+    }
+
+    #[test]
+    fn test_load_or_create_returns_same_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let id1 = NodeId::load_or_create(dir.path()).unwrap();
+        let id2 = NodeId::load_or_create(dir.path()).unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_load_or_create_handles_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let id_path = dir.path().join("node_id");
+        std::fs::write(&id_path, "not-a-valid-uuid").unwrap();
+        let result = NodeId::load_or_create(dir.path());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("corrupt node_id"));
+    }
+
+    #[test]
+    fn test_load_or_create_creates_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested").join("deep");
+        let id = NodeId::load_or_create(&nested).unwrap();
+        assert!(nested.join("node_id").exists());
+        let id2 = NodeId::load_or_create(&nested).unwrap();
+        assert_eq!(id, id2);
+    }
+
+    #[test]
+    fn test_load_or_create_with_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let id_path = dir.path().join("node_id");
+        let id = NodeId::generate();
+        std::fs::write(&id_path, format!("  {} \n", id)).unwrap();
+        let loaded = NodeId::load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded, id);
     }
 }

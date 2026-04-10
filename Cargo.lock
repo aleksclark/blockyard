@@ -276,8 +276,10 @@ dependencies = [
  "openraft",
  "parking_lot 0.12.5",
  "rand",
+ "redb",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1263,6 +1265,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "redb"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eca1e9d98d5a7e9002d0013e18d5a9b000aee942eb134883a82f06ebffb6c01"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

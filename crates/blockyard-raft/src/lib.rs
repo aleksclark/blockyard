@@ -17,6 +17,7 @@
 //! - [`service`] — high-level [`MetadataService`] API wrapping Raft
 
 pub mod network;
+pub mod persistent_store;
 pub mod request;
 pub mod response;
 pub mod rpc;
@@ -28,6 +29,7 @@ pub mod tcp_transport;
 pub mod typ;
 
 pub use network::{NetworkFactory, Router};
+pub use persistent_store::{PersistentLogStore, PersistentStateMachineStore};
 pub use request::MetadataRequest;
 pub use response::MetadataResponse;
 pub use rpc::{RaftRpc, RaftRpcResponse};
