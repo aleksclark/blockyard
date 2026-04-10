@@ -21,11 +21,13 @@ pub mod ambiguous_write;
 pub mod crash_recovery;
 pub mod ec_write_pipeline;
 pub mod freshness;
+pub mod http_metadata_client;
 pub mod lease_manager;
 pub mod metadata_cache;
 pub mod quorum_health;
 pub mod session;
 pub mod stale_epoch;
+pub mod tcp_client;
 pub mod traits;
 pub mod ublk;
 pub mod watermark;
@@ -38,11 +40,13 @@ pub use ec_write_pipeline::{
     PendingWrite,
 };
 pub use freshness::FreshnessChecker;
+pub use http_metadata_client::HttpMetadataClient;
 pub use lease_manager::{LeaseManager, LeaseState};
 pub use metadata_cache::MetadataCache;
 pub use quorum_health::{QuorumHealthMonitor, QuorumLossReadPolicy, QuorumStatus};
 pub use session::ClientSession;
 pub use stale_epoch::StaleEpochHandler;
+pub use tcp_client::TcpDataNodeClient;
 pub use traits::{DataNodeClient, MetadataClient};
 pub use ublk::{BlockHandler, IoOperation, IoRequest, UblkDevice};
 pub use watermark::WriteWatermark;

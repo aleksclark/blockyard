@@ -112,6 +112,11 @@ pub async fn start_management_api(
         .route("/api/v1/cluster/status", get(cluster_status))
         .route("/api/v1/cluster/join", post(cluster_join))
         .route("/api/v1/disks", get(list_disks))
+        .route("/api/v1/extent-mappings", post(commit_extent_mapping))
+        .route("/api/v1/operations/{id}", get(lookup_operation))
+        .route("/api/v1/leases/acquire", post(acquire_lease))
+        .route("/api/v1/leases/renew", post(renew_lease))
+        .route("/api/v1/leases/release", post(release_lease))
         .with_state(Arc::new(state));
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -375,6 +380,212 @@ async fn cluster_join(
     (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response()
 }
 
+// --- Data plane wiring API endpoints ---
+
+/// Request body for committing extent mappings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExtentMappingRequest {
+    volume_id: VolumeId,
+    block_range_start: u64,
+    block_range_end: u64,
+    extent_id: blockyard_common::ExtentId,
+    extent_version: u64,
+    epoch: u64,
+    replica_locations: Vec<NodeId>,
+    checksums: Vec<Vec<u8>>,
+    operation_id: Option<blockyard_common::OperationId>,
+    previous_version: Option<u64>,
+}
+
+/// Response from extent mapping commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ExtentMappingResponse {
+    epoch: u64,
+}
+
+/// Response from operation lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperationLookupResponse {
+    found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extent_id: Option<blockyard_common::ExtentId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extent_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epoch: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_range_start: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_range_end: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replica_locations: Option<Vec<NodeId>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksums: Option<Vec<Vec<u8>>>,
+}
+
+/// Request body for lease acquire/renew.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LeaseActionRequest {
+    volume_id: VolumeId,
+    session_id: blockyard_common::SessionId,
+    now_ms: u64,
+    ttl_ms: u64,
+}
+
+/// Request body for lease release.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LeaseReleaseRequest {
+    volume_id: VolumeId,
+    session_id: blockyard_common::SessionId,
+}
+
+/// POST /api/v1/extent-mappings
+///
+/// Commit an extent mapping through Raft consensus.
+async fn commit_extent_mapping(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtentMappingRequest>,
+) -> impl IntoResponse {
+    match state
+        .metadata
+        .commit_extent_mapping(
+            req.volume_id,
+            req.block_range_start..req.block_range_end,
+            req.extent_id,
+            req.extent_version,
+            blockyard_common::EpochId::new(req.epoch),
+            req.replica_locations,
+            req.checksums,
+            req.operation_id,
+            req.previous_version,
+        )
+        .await
+    {
+        Ok(epoch) => {
+            let resp = ExtentMappingResponse {
+                epoch: epoch.as_u64(),
+            };
+            (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/v1/operations/{id}
+///
+/// Look up a committed operation by its OperationId.
+async fn lookup_operation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let operation_id: blockyard_common::OperationId = match id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid operation ID"})),
+            )
+                .into_response();
+        }
+    };
+
+    match state.metadata.lookup_by_operation_id(&operation_id) {
+        Some(mapping) => {
+            let resp = OperationLookupResponse {
+                found: true,
+                extent_id: Some(mapping.extent_id),
+                extent_version: Some(mapping.extent_version),
+                epoch: Some(mapping.epoch.as_u64()),
+                block_range_start: Some(mapping.block_range.start),
+                block_range_end: Some(mapping.block_range.end),
+                replica_locations: Some(mapping.replica_locations.clone()),
+                checksums: Some(mapping.checksums.clone()),
+            };
+            Json(serde_json::to_value(&resp).unwrap()).into_response()
+        }
+        None => {
+            let resp = OperationLookupResponse {
+                found: false,
+                extent_id: None,
+                extent_version: None,
+                epoch: None,
+                block_range_start: None,
+                block_range_end: None,
+                replica_locations: None,
+                checksums: None,
+            };
+            Json(serde_json::to_value(&resp).unwrap()).into_response()
+        }
+    }
+}
+
+/// POST /api/v1/leases/acquire
+///
+/// Acquire a volume write lease.
+async fn acquire_lease(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LeaseActionRequest>,
+) -> impl IntoResponse {
+    match state
+        .metadata
+        .acquire_lease(req.volume_id, req.session_id, req.now_ms, req.ttl_ms)
+        .await
+    {
+        Ok(resp) => Json(serde_json::to_value(&resp).unwrap()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/leases/renew
+///
+/// Renew a volume write lease.
+async fn renew_lease(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LeaseActionRequest>,
+) -> impl IntoResponse {
+    match state
+        .metadata
+        .renew_lease(req.volume_id, req.session_id, req.now_ms, req.ttl_ms)
+        .await
+    {
+        Ok(resp) => Json(serde_json::to_value(&resp).unwrap()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/leases/release
+///
+/// Release a volume write lease.
+async fn release_lease(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LeaseReleaseRequest>,
+) -> impl IntoResponse {
+    match state
+        .metadata
+        .release_lease(req.volume_id, req.session_id)
+        .await
+    {
+        Ok(resp) => Json(serde_json::to_value(&resp).unwrap()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +703,93 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: JoinResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.raft_id, 5);
+    }
+
+    #[test]
+    fn test_extent_mapping_request_serde() {
+        let req = ExtentMappingRequest {
+            volume_id: VolumeId::generate(),
+            block_range_start: 0,
+            block_range_end: 64,
+            extent_id: blockyard_common::ExtentId::generate(),
+            extent_version: 1,
+            epoch: 10,
+            replica_locations: vec![NodeId::generate()],
+            checksums: vec![vec![0xFF]],
+            operation_id: Some(blockyard_common::OperationId::generate()),
+            previous_version: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: ExtentMappingRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.extent_version, 1);
+        assert_eq!(parsed.epoch, 10);
+    }
+
+    #[test]
+    fn test_extent_mapping_response_serde() {
+        let resp = ExtentMappingResponse { epoch: 42 };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: ExtentMappingResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.epoch, 42);
+    }
+
+    #[test]
+    fn test_operation_lookup_response_found_serde() {
+        let resp = OperationLookupResponse {
+            found: true,
+            extent_id: Some(blockyard_common::ExtentId::generate()),
+            extent_version: Some(3),
+            epoch: Some(5),
+            block_range_start: Some(0),
+            block_range_end: Some(64),
+            replica_locations: Some(vec![NodeId::generate()]),
+            checksums: Some(vec![vec![1, 2]]),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: OperationLookupResponse = serde_json::from_str(&json).unwrap();
+        assert!(parsed.found);
+        assert_eq!(parsed.extent_version, Some(3));
+    }
+
+    #[test]
+    fn test_operation_lookup_response_not_found_serde() {
+        let resp = OperationLookupResponse {
+            found: false,
+            extent_id: None,
+            extent_version: None,
+            epoch: None,
+            block_range_start: None,
+            block_range_end: None,
+            replica_locations: None,
+            checksums: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: OperationLookupResponse = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.found);
+    }
+
+    #[test]
+    fn test_lease_action_request_serde() {
+        let req = LeaseActionRequest {
+            volume_id: VolumeId::generate(),
+            session_id: blockyard_common::SessionId::generate(),
+            now_ms: 1000,
+            ttl_ms: 5000,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: LeaseActionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.now_ms, 1000);
+        assert_eq!(parsed.ttl_ms, 5000);
+    }
+
+    #[test]
+    fn test_lease_release_request_serde() {
+        let req = LeaseReleaseRequest {
+            volume_id: VolumeId::generate(),
+            session_id: blockyard_common::SessionId::generate(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: LeaseReleaseRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.volume_id, req.volume_id);
     }
 }
