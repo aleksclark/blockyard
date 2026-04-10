@@ -432,6 +432,7 @@ dependencies = [
  "blake3",
  "blockyard-client",
  "blockyard-common",
+ "blockyard-protocol",
  "blockyard-raft",
  "blockyard-storage",
  "blockyard-test-harness",
@@ -439,11 +440,14 @@ dependencies = [
  "bytes",
  "openraft",
  "parking_lot 0.12.5",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

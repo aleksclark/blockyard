@@ -6,6 +6,7 @@ pub mod mock_metadata;
 pub mod network;
 pub mod pattern;
 pub mod pipeline_testutil;
+pub mod process_harness;
 pub mod raft_testutil;
 pub mod repair_testutil;
 pub mod scenario;
@@ -19,6 +20,10 @@ pub use fault::{Fault, FaultInjector, FaultRecord, ProcessFaultInjector};
 pub use network::{NetworkConfig, NodeAddress, PortAllocator};
 pub use pattern::{
     PatternBlock, PatternConfig, PatternGenerator, PatternKind, PatternVerifyResult,
+};
+pub use process_harness::{
+    ProcessNode, ProcessNodeState, RealProcessCluster, TcpDataClient, build_binary,
+    unique_base_port,
 };
 pub use scenario::{
     AckPolicy, MountState, ReadPolicy, ScenarioConfig, ScenarioContext, StalenessResult, UblkMount,
