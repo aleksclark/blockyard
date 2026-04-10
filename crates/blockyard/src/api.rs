@@ -388,16 +388,31 @@ async fn cluster_join(
     }
     new_members.insert(raft_id);
 
-    // First, add the node as a learner
-    if let Err(e) = raft.add_learner(raft_id, BasicNode::default(), true).await {
+    // First, add the node as a learner (non-blocking: the joining node hasn't
+    // started its Raft RPC server yet — it's waiting for our response. If we
+    // block here, we'll deadlock: we wait for replication, but the joiner can't
+    // receive AppendEntries until it gets our response and starts its Raft.)
+    if let Err(e) = raft.add_learner(raft_id, BasicNode::default(), false).await {
         tracing::warn!(error = %e, raft_id, "failed to add learner (may already be a member)");
     }
 
-    // Then try to change membership to include the new node
-    if let Err(e) = raft.change_membership(new_members, false).await {
-        tracing::warn!(error = %e, raft_id, "failed to change membership (may already be a member)");
-        // Not fatal — node might already be in membership
-    }
+    // Defer voter promotion: the joining node needs time to receive our
+    // response, create its Raft instance, and start its RPC server.
+    // change_membership with the new voter set requires a quorum that includes
+    // the new node, so it can't succeed until the joiner is ready.
+    let raft_for_promote = state.metadata.raft().clone();
+    tokio::spawn(async move {
+        // Give the joining node time to start its Raft RPC server
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if let Err(e) = raft_for_promote
+            .change_membership(new_members, false)
+            .await
+        {
+            tracing::warn!(error = %e, "deferred change_membership failed (may already be a member)");
+        } else {
+            tracing::info!("voter promotion complete for raft_id={}", raft_id);
+        }
+    });
 
     // Step 4: Build the peer map for the response so the joining node
     // can pre-populate its own PeerRegistry immediately.
