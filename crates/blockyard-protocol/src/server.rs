@@ -15,8 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::messages::{
-    ProtocolMessage, ReadExtentRequest, ReadExtentResponse, WriteExtentRequest,
-    WriteExtentResponse,
+    ProtocolMessage, ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
 };
 use crate::version::negotiate_version;
 

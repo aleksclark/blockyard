@@ -56,11 +56,7 @@ impl BlockyardClient for HttpClient {
     }
 
     async fn volume_list(&self) -> Result<Vec<VolumeInfo>> {
-        let resp = self
-            .client
-            .get(self.url("/api/v1/volumes"))
-            .send()
-            .await?;
+        let resp = self.client.get(self.url("/api/v1/volumes")).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!("list volumes failed: {}", text);
@@ -82,11 +78,7 @@ impl BlockyardClient for HttpClient {
     }
 
     async fn disk_list(&self) -> Result<Vec<DiskInfo>> {
-        let resp = self
-            .client
-            .get(self.url("/api/v1/disks"))
-            .send()
-            .await?;
+        let resp = self.client.get(self.url("/api/v1/disks")).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!("list disks failed: {}", text);
@@ -107,11 +99,7 @@ impl BlockyardClient for HttpClient {
     }
 
     async fn node_list(&self) -> Result<Vec<NodeInfo>> {
-        let resp = self
-            .client
-            .get(self.url("/api/v1/nodes"))
-            .send()
-            .await?;
+        let resp = self.client.get(self.url("/api/v1/nodes")).send().await?;
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
             anyhow::bail!("list nodes failed: {}", text);
@@ -177,7 +165,10 @@ mod tests {
     #[test]
     fn test_http_client_url() {
         let client = HttpClient::new("http://127.0.0.1:9801");
-        assert_eq!(client.url("/api/v1/volumes"), "http://127.0.0.1:9801/api/v1/volumes");
+        assert_eq!(
+            client.url("/api/v1/volumes"),
+            "http://127.0.0.1:9801/api/v1/volumes"
+        );
     }
 
     #[test]

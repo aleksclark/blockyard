@@ -9,8 +9,8 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use blockyard_common::{
-    EpochId, ExtentId, LeaseRequest, LeaseResponse, LeaseVersion, NodeId, OperationId,
-    ProtectionPolicy, SessionId, VolumeId, VolumeLease,
+    DiskId, DiskState, EpochId, ExtentId, LeaseRequest, LeaseResponse, LeaseVersion, NodeId,
+    OperationId, ProtectionPolicy, SessionId, VolumeId, VolumeLease,
 };
 
 use crate::request::MetadataRequest;
@@ -43,6 +43,16 @@ pub struct ExtentMapping {
 pub struct ClusterNode {
     pub node_id: NodeId,
     pub addr: String,
+}
+
+/// A disk registered in the cluster metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterDisk {
+    pub disk_id: DiskId,
+    pub node_id: NodeId,
+    pub capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub state: DiskState,
 }
 
 /// The full metadata state machine state.
@@ -94,6 +104,10 @@ pub struct MetadataStateMachineData {
     /// Mapping from blockyard NodeId (UUID) to raft u64 node ID.
     #[serde(default)]
     pub node_raft_map: HashMap<NodeId, u64>,
+
+    /// Cluster disk inventory, keyed by DiskId string.
+    #[serde(default)]
+    pub cluster_disks: HashMap<DiskId, ClusterDisk>,
 }
 
 impl Default for MetadataStateMachineData {
@@ -112,6 +126,7 @@ impl Default for MetadataStateMachineData {
             lease_version_counter: 0,
             raft_id_counter: 0,
             node_raft_map: HashMap::new(),
+            cluster_disks: HashMap::new(),
         }
     }
 }
@@ -311,6 +326,42 @@ impl MetadataStateMachineData {
 
                 MetadataResponse::NodeRegistered(raft_id)
             }
+
+            MetadataRequest::RegisterDisk {
+                disk_id,
+                node_id,
+                capacity_bytes,
+            } => {
+                let disk = ClusterDisk {
+                    disk_id: *disk_id,
+                    node_id: *node_id,
+                    capacity_bytes: *capacity_bytes,
+                    used_bytes: 0,
+                    state: DiskState::Healthy,
+                };
+                self.cluster_disks.insert(*disk_id, disk);
+                MetadataResponse::DiskRegistered
+            }
+
+            MetadataRequest::UpdateDiskUsage {
+                disk_id,
+                used_bytes,
+            } => {
+                if let Some(disk) = self.cluster_disks.get_mut(disk_id) {
+                    disk.used_bytes = *used_bytes;
+                    MetadataResponse::DiskRegistered
+                } else {
+                    MetadataResponse::error(format!("disk {disk_id} not found"))
+                }
+            }
+
+            MetadataRequest::DeregisterDisk { disk_id } => {
+                if self.cluster_disks.remove(disk_id).is_some() {
+                    MetadataResponse::DiskRegistered
+                } else {
+                    MetadataResponse::error(format!("disk {disk_id} not found"))
+                }
+            }
         }
     }
 
@@ -376,6 +427,16 @@ impl MetadataStateMachineData {
     /// Get the current raft_id_counter value.
     pub fn raft_id_counter(&self) -> u64 {
         self.raft_id_counter
+    }
+
+    /// Get a registered cluster disk.
+    pub fn get_cluster_disk(&self, disk_id: &DiskId) -> Option<&ClusterDisk> {
+        self.cluster_disks.get(disk_id)
+    }
+
+    /// List all registered cluster disks.
+    pub fn list_cluster_disks(&self) -> Vec<&ClusterDisk> {
+        self.cluster_disks.values().collect()
     }
 
     /// Apply a lease request to the state machine (P6.1).
@@ -1886,5 +1947,182 @@ mod tests {
         assert_eq!(restored.get_raft_id(&n1), Some(1));
         assert_eq!(restored.get_raft_id(&n2), Some(2));
         assert_eq!(restored.raft_id_counter(), 2);
+    }
+
+    fn make_disk_id() -> blockyard_common::DiskId {
+        blockyard_common::DiskId::generate()
+    }
+
+    #[test]
+    fn test_register_disk() {
+        let mut sm = MetadataStateMachineData::new();
+        let nid = make_node_id();
+        let did = make_disk_id();
+
+        let resp = sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: did,
+            node_id: nid,
+            capacity_bytes: 1_000_000,
+        });
+        assert!(!resp.is_error());
+        assert!(matches!(resp, MetadataResponse::DiskRegistered));
+
+        let disk = sm.get_cluster_disk(&did).unwrap();
+        assert_eq!(disk.disk_id, did);
+        assert_eq!(disk.node_id, nid);
+        assert_eq!(disk.capacity_bytes, 1_000_000);
+        assert_eq!(disk.used_bytes, 0);
+        assert_eq!(disk.state, blockyard_common::DiskState::Healthy);
+    }
+
+    #[test]
+    fn test_register_disk_idempotent() {
+        let mut sm = MetadataStateMachineData::new();
+        let nid = make_node_id();
+        let did = make_disk_id();
+
+        sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: did,
+            node_id: nid,
+            capacity_bytes: 1_000_000,
+        });
+        let resp = sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: did,
+            node_id: nid,
+            capacity_bytes: 2_000_000,
+        });
+        assert!(!resp.is_error());
+
+        let disk = sm.get_cluster_disk(&did).unwrap();
+        assert_eq!(disk.capacity_bytes, 2_000_000);
+    }
+
+    #[test]
+    fn test_update_disk_usage() {
+        let mut sm = MetadataStateMachineData::new();
+        let nid = make_node_id();
+        let did = make_disk_id();
+
+        sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: did,
+            node_id: nid,
+            capacity_bytes: 1_000_000,
+        });
+
+        let resp = sm.apply_request(&MetadataRequest::UpdateDiskUsage {
+            disk_id: did,
+            used_bytes: 500_000,
+        });
+        assert!(!resp.is_error());
+
+        let disk = sm.get_cluster_disk(&did).unwrap();
+        assert_eq!(disk.used_bytes, 500_000);
+    }
+
+    #[test]
+    fn test_update_disk_usage_not_found() {
+        let mut sm = MetadataStateMachineData::new();
+        let did = make_disk_id();
+
+        let resp = sm.apply_request(&MetadataRequest::UpdateDiskUsage {
+            disk_id: did,
+            used_bytes: 500_000,
+        });
+        assert!(resp.is_error());
+    }
+
+    #[test]
+    fn test_deregister_disk() {
+        let mut sm = MetadataStateMachineData::new();
+        let nid = make_node_id();
+        let did = make_disk_id();
+
+        sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: did,
+            node_id: nid,
+            capacity_bytes: 1_000_000,
+        });
+
+        let resp = sm.apply_request(&MetadataRequest::DeregisterDisk { disk_id: did });
+        assert!(!resp.is_error());
+        assert!(sm.get_cluster_disk(&did).is_none());
+    }
+
+    #[test]
+    fn test_deregister_disk_not_found() {
+        let mut sm = MetadataStateMachineData::new();
+        let did = make_disk_id();
+
+        let resp = sm.apply_request(&MetadataRequest::DeregisterDisk { disk_id: did });
+        assert!(resp.is_error());
+    }
+
+    #[test]
+    fn test_list_cluster_disks() {
+        let mut sm = MetadataStateMachineData::new();
+        let nid = make_node_id();
+        let d1 = make_disk_id();
+        let d2 = make_disk_id();
+
+        sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: d1,
+            node_id: nid,
+            capacity_bytes: 1_000_000,
+        });
+        sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: d2,
+            node_id: nid,
+            capacity_bytes: 2_000_000,
+        });
+
+        let disks = sm.list_cluster_disks();
+        assert_eq!(disks.len(), 2);
+    }
+
+    #[test]
+    fn test_list_cluster_disks_empty() {
+        let sm = MetadataStateMachineData::new();
+        assert!(sm.list_cluster_disks().is_empty());
+    }
+
+    #[test]
+    fn test_cluster_disks_survives_serde() {
+        let mut sm = MetadataStateMachineData::new();
+        let nid = make_node_id();
+        let did = make_disk_id();
+
+        sm.apply_request(&MetadataRequest::RegisterDisk {
+            disk_id: did,
+            node_id: nid,
+            capacity_bytes: 1_000_000,
+        });
+
+        let json = serde_json::to_string(&sm).unwrap();
+        let restored: MetadataStateMachineData = serde_json::from_str(&json).unwrap();
+
+        let disk = restored.get_cluster_disk(&did).unwrap();
+        assert_eq!(disk.node_id, nid);
+        assert_eq!(disk.capacity_bytes, 1_000_000);
+    }
+
+    #[test]
+    fn test_cluster_disk_clone_debug() {
+        let disk = ClusterDisk {
+            disk_id: make_disk_id(),
+            node_id: make_node_id(),
+            capacity_bytes: 1000,
+            used_bytes: 100,
+            state: blockyard_common::DiskState::Healthy,
+        };
+        let cloned = disk.clone();
+        assert_eq!(cloned.disk_id, disk.disk_id);
+        let debug = format!("{:?}", disk);
+        assert!(debug.contains("ClusterDisk"));
+    }
+
+    #[test]
+    fn test_disk_registered_response() {
+        let resp = MetadataResponse::DiskRegistered;
+        assert!(!resp.is_error());
     }
 }

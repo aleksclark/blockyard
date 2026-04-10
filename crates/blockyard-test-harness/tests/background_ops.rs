@@ -186,8 +186,10 @@ async fn test_scrub_detects_corruption_triggers_repair() {
 
     let healthy_source_tmpdir = TempDir::new().expect("create healthy source tmpdir");
     let healthy_source_id = DiskId::generate();
-    let healthy_source_store =
-        ExtentStore::new(healthy_source_tmpdir.path().to_path_buf(), healthy_source_id);
+    let healthy_source_store = ExtentStore::new(
+        healthy_source_tmpdir.path().to_path_buf(),
+        healthy_source_id,
+    );
     healthy_source_store
         .init_directories()
         .expect("init healthy source dirs");
@@ -207,9 +209,7 @@ async fn test_scrub_detects_corruption_triggers_repair() {
     let target_tmpdir = TempDir::new().expect("create target tmpdir");
     let target_disk_id = DiskId::generate();
     let target_store = ExtentStore::new(target_tmpdir.path().to_path_buf(), target_disk_id);
-    target_store
-        .init_directories()
-        .expect("init target dirs");
+    target_store.init_directories().expect("init target dirs");
 
     let repair_worker = RepairWorker::new(RepairConfig::default());
 
@@ -226,12 +226,22 @@ async fn test_scrub_detects_corruption_triggers_repair() {
     assert_eq!(repair_worker.queue_len(), 1);
 
     let mut repair_reader = TestRepairReader::new();
-    repair_reader.add_store(healthy_source_id, healthy_source_store, healthy_source_tmpdir);
+    repair_reader.add_store(
+        healthy_source_id,
+        healthy_source_store,
+        healthy_source_tmpdir,
+    );
     let mut repair_writer = TestRepairWriter::new();
     repair_writer.add_store(target_disk_id, target_store, target_tmpdir);
 
     let outcome = repair_worker
-        .process_next(&repair_reader, &StubFragmentReader, &repair_writer, &StubEcReconstructor, &rate_limiter)
+        .process_next(
+            &repair_reader,
+            &StubFragmentReader,
+            &repair_writer,
+            &StubEcReconstructor,
+            &rate_limiter,
+        )
         .await
         .expect("should process repair request");
 
@@ -307,7 +317,10 @@ async fn test_scheduler_coordinates_workers() {
     assert!(scheduler.rebalance_worker().last_plan().is_none());
 
     assert_eq!(scheduler.drain_worker().config().tokens_per_relocate, 8);
-    assert_eq!(scheduler.drain_worker().config().inter_relocate_delay_ms, 50);
+    assert_eq!(
+        scheduler.drain_worker().config().inter_relocate_delay_ms,
+        50
+    );
     assert!(scheduler.drain_worker().progress().is_none());
 
     let status = scheduler.status();

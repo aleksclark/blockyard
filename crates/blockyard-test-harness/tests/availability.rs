@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 
 use blockyard_common::{ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
 use blockyard_raft::{LogStore, NetworkFactory, StateMachineStore};
-use blockyard_test_harness::raft_testutil::{
-    create_test_raft_cluster, wait_for_leader,
-};
+use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, wait_for_leader};
 
 // ---------------------------------------------------------------------------
 // P9C.1 — 1-of-3 crash: writes continue after leader re-election

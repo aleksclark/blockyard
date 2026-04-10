@@ -19,6 +19,7 @@ pub mod error;
 pub mod extent;
 pub mod failure;
 pub mod health;
+pub mod placement;
 pub mod region;
 pub mod service;
 
@@ -30,5 +31,9 @@ pub use extent::{
 };
 pub use failure::{DedupCheckResult, DiskFailureReport, DiskRecoveryDetail, NodeRecoveryReport};
 pub use health::{DiskHealthTracker, DiskTelemetry, HealthPolicy};
+pub use placement::{
+    ExtentPlacement, PlacementDisk, PlacementEngine, PlacementError, PlacementNode,
+    PlacementVolumeInfo,
+};
 pub use region::{BadRegion, BadRegionMap};
 pub use service::{CachedLease, DataNodeService, OperationRecord};

@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 
-use blockyard_common::{
-    DiskId, EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId,
-};
+use blockyard_common::{DiskId, EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
 use blockyard_storage::extent::compute_checksum;
 use blockyard_storage::{ExtentStore, StorageClass};
-use blockyard_ublk::traits::{WriteAck, WriteAckError};
 use blockyard_ublk::DataNodeClient;
+use blockyard_ublk::traits::{WriteAck, WriteAckError};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use tempfile::TempDir;

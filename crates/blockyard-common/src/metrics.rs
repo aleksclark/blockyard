@@ -526,18 +526,12 @@ mod tests {
 
     #[test]
     fn test_metric_name_p8_3_foreground() {
-        assert_eq!(
-            NODE_FOREGROUND_IO_LOAD,
-            "blockyard_node_foreground_io_load"
-        );
+        assert_eq!(NODE_FOREGROUND_IO_LOAD, "blockyard_node_foreground_io_load");
     }
 
     #[test]
     fn test_metric_name_p8_3_background() {
-        assert_eq!(
-            NODE_BACKGROUND_IO_LOAD,
-            "blockyard_node_background_io_load"
-        );
+        assert_eq!(NODE_BACKGROUND_IO_LOAD, "blockyard_node_background_io_load");
     }
 
     #[test]
@@ -1081,8 +1075,14 @@ mod tests {
         record_metadata_commit_latency(&r, "rg-2", 0.100);
         let l1 = Labels::from_pairs(&[("raft_group_id", "rg-1")]);
         let l2 = Labels::from_pairs(&[("raft_group_id", "rg-2")]);
-        assert_eq!(r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &l1), vec![0.001]);
-        assert_eq!(r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &l2), vec![0.100]);
+        assert_eq!(
+            r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &l1),
+            vec![0.001]
+        );
+        assert_eq!(
+            r.histogram(METADATA_COMMIT_LATENCY_SECONDS, &l2),
+            vec![0.100]
+        );
     }
 
     // -- Trait object tests -------------------------------------------------
@@ -1132,11 +1132,8 @@ mod tests {
         record_disk_state_transition(&r, disk, "failed", "removed");
 
         let check = |from: &str, to: &str, expected: u64| {
-            let labels = Labels::from_pairs(&[
-                ("disk_id", disk),
-                ("from_state", from),
-                ("to_state", to),
-            ]);
+            let labels =
+                Labels::from_pairs(&[("disk_id", disk), ("from_state", from), ("to_state", to)]);
             assert_eq!(r.counter(DISK_STATE_TRANSITION_TOTAL, &labels), expected);
         };
         check("healthy", "suspect", 1);

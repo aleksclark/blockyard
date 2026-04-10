@@ -21,6 +21,9 @@ pub enum MetadataResponse {
 
     /// A raft node ID was assigned for a newly registered node.
     NodeRegistered(u64),
+
+    /// A disk was registered (or updated) in the cluster metadata.
+    DiskRegistered,
 }
 
 impl MetadataResponse {

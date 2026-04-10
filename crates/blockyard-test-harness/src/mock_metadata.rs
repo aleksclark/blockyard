@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use blockyard_common::{
-    EpochId, LeaseResponse, OperationId, SessionId, VolumeId,
-};
+use blockyard_common::{EpochId, LeaseResponse, OperationId, SessionId, VolumeId};
 use blockyard_ublk::traits::{CommitRequest, CommittedMapping};
 use blockyard_ublk::{MetadataCache, MetadataClient};
 use parking_lot::Mutex;

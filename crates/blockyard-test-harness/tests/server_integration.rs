@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use blockyard_common::{DiskId, EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
 use blockyard_protocol::messages::{
-    HandshakeRequest, HandshakeResponse, ProtocolMessage, ReadExtentRequest, ReadExtentResponse,
-    WriteExtentRequest, WriteExtentResponse, CURRENT_PROTOCOL_VERSION,
+    CURRENT_PROTOCOL_VERSION, HandshakeRequest, HandshakeResponse, ProtocolMessage,
+    ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
 };
 use blockyard_protocol::server::{DataPlaneHandler, DataPlaneServer};
 use parking_lot::RwLock;
@@ -465,9 +465,7 @@ async fn test_write_single_extent() {
 
     let data = vec![0xABu8; 4096]; // 4KB
     let extent_id = ExtentId::generate();
-    let resp = client
-        .write_extent(extent_id, &data, EpochId::new(1))
-        .await;
+    let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
 
     assert!(resp.success, "write failed: {:?}", resp.error);
     assert_eq!(resp.extent_id, extent_id);
@@ -485,9 +483,7 @@ async fn test_write_multiple_extents() {
     for i in 0..10 {
         let data = format!("extent-data-{i}").into_bytes();
         let extent_id = ExtentId::generate();
-        let resp = client
-            .write_extent(extent_id, &data, EpochId::new(1))
-            .await;
+        let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
         assert!(resp.success, "write {i} failed: {:?}", resp.error);
         assert_eq!(resp.extent_id, extent_id);
     }
@@ -503,9 +499,7 @@ async fn test_write_large_payload() {
 
     let data = vec![0x42u8; 1024 * 1024]; // 1MB
     let extent_id = ExtentId::generate();
-    let resp = client
-        .write_extent(extent_id, &data, EpochId::new(1))
-        .await;
+    let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
 
     assert!(resp.success, "write failed: {:?}", resp.error);
     assert_eq!(resp.checksum, compute_sha256(&data));
@@ -521,9 +515,7 @@ async fn test_write_zero_payload() {
 
     let data = b"";
     let extent_id = ExtentId::generate();
-    let resp = client
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let resp = client.write_extent(extent_id, data, EpochId::new(1)).await;
 
     assert!(resp.success, "write failed: {:?}", resp.error);
 
@@ -572,15 +564,11 @@ async fn test_read_after_write() {
     let extent_id = ExtentId::generate();
 
     // Write
-    let write_resp = client
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let write_resp = client.write_extent(extent_id, data, EpochId::new(1)).await;
     assert!(write_resp.success);
 
     // Read back
-    let (read_resp, payload) = client
-        .read_extent(extent_id, 1, EpochId::new(1))
-        .await;
+    let (read_resp, payload) = client.read_extent(extent_id, 1, EpochId::new(1)).await;
     assert!(read_resp.success, "read failed: {:?}", read_resp.error);
     assert_eq!(read_resp.payload_size, data.len() as u64);
     assert_eq!(payload.unwrap(), data);
@@ -618,18 +606,14 @@ async fn test_read_write_roundtrip_multiple() {
     for i in 0..n {
         let data = format!("roundtrip-data-{i:04}").into_bytes();
         let extent_id = ExtentId::generate();
-        let resp = client
-            .write_extent(extent_id, &data, EpochId::new(1))
-            .await;
+        let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
         assert!(resp.success, "write {i} failed: {:?}", resp.error);
         extents.push((extent_id, data));
     }
 
     // Read all back and verify
     for (i, (extent_id, expected_data)) in extents.iter().enumerate() {
-        let (resp, payload) = client
-            .read_extent(*extent_id, 1, EpochId::new(1))
-            .await;
+        let (resp, payload) = client.read_extent(*extent_id, 1, EpochId::new(1)).await;
         assert!(resp.success, "read {i} failed: {:?}", resp.error);
         assert_eq!(
             payload.as_deref(),
@@ -655,9 +639,7 @@ async fn test_write_stale_epoch() {
     let data = b"stale-epoch-data";
     let extent_id = ExtentId::generate();
     // Write with epoch 1 when server is at epoch 5
-    let resp = client
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let resp = client.write_extent(extent_id, data, EpochId::new(1)).await;
 
     assert!(!resp.success);
     assert!(resp.error.as_deref().unwrap().contains("stale epoch"));
@@ -700,15 +682,11 @@ async fn test_read_wrong_version() {
     let extent_id = ExtentId::generate();
 
     // Write as version 1
-    let write_resp = client
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let write_resp = client.write_extent(extent_id, data, EpochId::new(1)).await;
     assert!(write_resp.success);
 
     // Try to read version 2 (doesn't exist)
-    let (resp, payload) = client
-        .read_extent(extent_id, 2, EpochId::new(1))
-        .await;
+    let (resp, payload) = client.read_extent(extent_id, 2, EpochId::new(1)).await;
     assert!(!resp.success);
     assert!(resp.error.is_some());
     assert!(payload.is_none());
@@ -733,10 +711,12 @@ async fn test_concurrent_writes() {
 
             let data = format!("concurrent-write-{i}").into_bytes();
             let extent_id = ExtentId::generate();
-            let resp = client
-                .write_extent(extent_id, &data, EpochId::new(1))
-                .await;
-            assert!(resp.success, "concurrent write {i} failed: {:?}", resp.error);
+            let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
+            assert!(
+                resp.success,
+                "concurrent write {i} failed: {:?}",
+                resp.error
+            );
             (extent_id, data)
         }));
     }
@@ -751,9 +731,7 @@ async fn test_concurrent_writes() {
     client.handshake().await;
 
     for (extent_id, expected) in &results {
-        let (resp, payload) = client
-            .read_extent(*extent_id, 1, EpochId::new(1))
-            .await;
+        let (resp, payload) = client.read_extent(*extent_id, 1, EpochId::new(1)).await;
         assert!(resp.success);
         assert_eq!(payload.unwrap(), *expected);
     }
@@ -773,9 +751,7 @@ async fn test_concurrent_read_write() {
     for i in 0..5 {
         let data = format!("pre-written-{i}").into_bytes();
         let extent_id = ExtentId::generate();
-        let resp = client
-            .write_extent(extent_id, &data, EpochId::new(1))
-            .await;
+        let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
         assert!(resp.success);
         written.push((extent_id, data));
     }
@@ -829,9 +805,7 @@ async fn test_graceful_shutdown() {
     client.handshake().await;
     let data = b"pre-shutdown-data";
     let extent_id = ExtentId::generate();
-    let resp = client
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let resp = client.write_extent(extent_id, data, EpochId::new(1)).await;
     assert!(resp.success);
 
     // Drop the client first so the server isn't waiting on it
@@ -931,15 +905,15 @@ async fn test_session_multiple_operations() {
         let extent_id = ExtentId::generate();
 
         // Write
-        let write_resp = client
-            .write_extent(extent_id, &data, EpochId::new(1))
-            .await;
-        assert!(write_resp.success, "write {i} failed: {:?}", write_resp.error);
+        let write_resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
+        assert!(
+            write_resp.success,
+            "write {i} failed: {:?}",
+            write_resp.error
+        );
 
         // Read back immediately
-        let (read_resp, payload) = client
-            .read_extent(extent_id, 1, EpochId::new(1))
-            .await;
+        let (read_resp, payload) = client.read_extent(extent_id, 1, EpochId::new(1)).await;
         assert!(read_resp.success, "read {i} failed: {:?}", read_resp.error);
         assert_eq!(payload.unwrap(), data, "data mismatch at operation {i}");
 
@@ -948,9 +922,7 @@ async fn test_session_multiple_operations() {
 
     // Final verification: read all extents back one more time
     for (i, (extent_id, expected)) in written_extents.iter().enumerate() {
-        let (resp, payload) = client
-            .read_extent(*extent_id, 1, EpochId::new(1))
-            .await;
+        let (resp, payload) = client.read_extent(*extent_id, 1, EpochId::new(1)).await;
         assert!(resp.success, "final read {i} failed: {:?}", resp.error);
         assert_eq!(payload.as_deref(), Some(expected.as_slice()));
     }
@@ -973,15 +945,15 @@ async fn test_write_various_sizes() {
     for &size in &sizes {
         let data = vec![0xFFu8; size];
         let extent_id = ExtentId::generate();
-        let resp = client
-            .write_extent(extent_id, &data, EpochId::new(1))
-            .await;
-        assert!(resp.success, "write of {size} bytes failed: {:?}", resp.error);
+        let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
+        assert!(
+            resp.success,
+            "write of {size} bytes failed: {:?}",
+            resp.error
+        );
 
         // Read back to verify
-        let (read_resp, payload) = client
-            .read_extent(extent_id, 1, EpochId::new(1))
-            .await;
+        let (read_resp, payload) = client.read_extent(extent_id, 1, EpochId::new(1)).await;
         assert!(read_resp.success);
         assert_eq!(payload.unwrap().len(), size);
     }
@@ -1022,17 +994,13 @@ async fn test_multiple_clients_same_extent() {
 
     let mut client1 = TestClient::connect(server.addr).await;
     client1.handshake().await;
-    let resp = client1
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let resp = client1.write_extent(extent_id, data, EpochId::new(1)).await;
     assert!(resp.success);
 
     // Client 2 reads the same extent
     let mut client2 = TestClient::connect(server.addr).await;
     client2.handshake().await;
-    let (resp, payload) = client2
-        .read_extent(extent_id, 1, EpochId::new(1))
-        .await;
+    let (resp, payload) = client2.read_extent(extent_id, 1, EpochId::new(1)).await;
     assert!(resp.success);
     assert_eq!(payload.unwrap(), data);
 
@@ -1084,7 +1052,11 @@ async fn test_write_then_read_different_clients() {
 
     for (i, (&eid, expected)) in extent_ids.iter().zip(expected_data.iter()).enumerate() {
         let (resp, payload) = reader.read_extent(eid, 1, EpochId::new(1)).await;
-        assert!(resp.success, "cross-client read {i} failed: {:?}", resp.error);
+        assert!(
+            resp.success,
+            "cross-client read {i} failed: {:?}",
+            resp.error
+        );
         assert_eq!(payload.unwrap(), *expected);
     }
 
@@ -1101,15 +1073,11 @@ async fn test_checksum_integrity() {
     let extent_id = ExtentId::generate();
     let expected_checksum = compute_sha256(data);
 
-    let write_resp = client
-        .write_extent(extent_id, data, EpochId::new(1))
-        .await;
+    let write_resp = client.write_extent(extent_id, data, EpochId::new(1)).await;
     assert!(write_resp.success);
     assert_eq!(write_resp.checksum, expected_checksum);
 
-    let (read_resp, _) = client
-        .read_extent(extent_id, 1, EpochId::new(1))
-        .await;
+    let (read_resp, _) = client.read_extent(extent_id, 1, EpochId::new(1)).await;
     assert!(read_resp.success);
     assert_eq!(read_resp.checksum, expected_checksum);
 
@@ -1169,14 +1137,10 @@ async fn test_binary_payload_roundtrip() {
     let data: Vec<u8> = (0..=255).collect();
     let extent_id = ExtentId::generate();
 
-    let resp = client
-        .write_extent(extent_id, &data, EpochId::new(1))
-        .await;
+    let resp = client.write_extent(extent_id, &data, EpochId::new(1)).await;
     assert!(resp.success);
 
-    let (resp, payload) = client
-        .read_extent(extent_id, 1, EpochId::new(1))
-        .await;
+    let (resp, payload) = client.read_extent(extent_id, 1, EpochId::new(1)).await;
     assert!(resp.success);
     assert_eq!(payload.unwrap(), data);
 
@@ -1198,19 +1162,16 @@ async fn test_concurrent_connections_write_and_verify() {
 
                 let mut pairs = Vec::new();
                 for op_idx in 0..ops_per_client {
-                    let data =
-                        format!("client-{client_idx}-op-{op_idx}").into_bytes();
+                    let data = format!("client-{client_idx}-op-{op_idx}").into_bytes();
                     let eid = ExtentId::generate();
-                    let resp =
-                        client.write_extent(eid, &data, EpochId::new(1)).await;
+                    let resp = client.write_extent(eid, &data, EpochId::new(1)).await;
                     assert!(resp.success);
                     pairs.push((eid, data));
                 }
 
                 // Verify all writes from this client
                 for (eid, expected) in &pairs {
-                    let (resp, payload) =
-                        client.read_extent(*eid, 1, EpochId::new(1)).await;
+                    let (resp, payload) = client.read_extent(*eid, 1, EpochId::new(1)).await;
                     assert!(resp.success);
                     assert_eq!(payload.unwrap(), *expected);
                 }

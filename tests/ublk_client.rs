@@ -8,8 +8,8 @@ use blockyard_test_harness::mock_metadata::TestMetadataClient;
 use blockyard_test_harness::pipeline_testutil::setup_test_pipeline;
 use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
 use blockyard_ublk::{
-    ClientSession, MetadataCache, StaleEpochHandler, WriteOutcome, WriteRequest, WriteWatermark,
-    WritePipeline,
+    ClientSession, MetadataCache, StaleEpochHandler, WriteOutcome, WritePipeline, WriteRequest,
+    WriteWatermark,
 };
 use bytes::Bytes;
 

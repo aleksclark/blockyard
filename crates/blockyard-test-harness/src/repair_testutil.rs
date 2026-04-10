@@ -108,11 +108,8 @@ impl RepairExtentWriter for TestRepairWriter {
         let committed_path = committed_extent_path(store.mount_path(), extent_id, version);
         if committed_path.exists() {
             std::fs::remove_file(&committed_path).map_err(|e| format!("{e}"))?;
-            let meta_path = blockyard_storage::extent::extent_meta_path(
-                store.mount_path(),
-                extent_id,
-                version,
-            );
+            let meta_path =
+                blockyard_storage::extent::extent_meta_path(store.mount_path(), extent_id, version);
             if meta_path.exists() {
                 let _ = std::fs::remove_file(&meta_path);
             }
@@ -212,12 +209,14 @@ impl blockyard_storage::background::scrub::ExtentReader for TestExtentReader {
         self.entries
             .iter()
             .filter(|(d, _, _, _)| *d == disk_id)
-            .map(|(d, e, v, c)| blockyard_storage::background::scrub::ScrubExtentEntry {
-                extent_id: *e,
-                disk_id: *d,
-                expected_checksum: c.clone(),
-                version: *v,
-            })
+            .map(
+                |(d, e, v, c)| blockyard_storage::background::scrub::ScrubExtentEntry {
+                    extent_id: *e,
+                    disk_id: *d,
+                    expected_checksum: c.clone(),
+                    version: *v,
+                },
+            )
             .collect()
     }
 

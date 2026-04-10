@@ -4,12 +4,12 @@
 use std::sync::Arc;
 
 use blockyard_common::{DiskId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
-use blockyard_storage::background::drain::{DrainConfig, DrainExtentEntry, DrainInventory, DrainWorker};
+use blockyard_storage::background::drain::{
+    DrainConfig, DrainExtentEntry, DrainInventory, DrainWorker,
+};
 use blockyard_storage::background::rate_limit::TokenBucket;
 use blockyard_storage::background::repair::{RepairConfig, RepairType, RepairWorker};
-use blockyard_storage::background::scrub::{
-    CorruptionNotification, ScrubConfig, ScrubWorker,
-};
+use blockyard_storage::background::scrub::{CorruptionNotification, ScrubConfig, ScrubWorker};
 use blockyard_storage::extent::{committed_extent_path, compute_checksum};
 use blockyard_storage::{ExtentStore, StorageClass};
 use blockyard_test_harness::mock_datanode::{
@@ -103,7 +103,10 @@ async fn test_write_scrub_corrupt_repair_chain() {
         0,
         "should find 0 errors on clean data"
     );
-    assert!(rx.try_recv().is_err(), "no corruption notifications expected");
+    assert!(
+        rx.try_recv().is_err(),
+        "no corruption notifications expected"
+    );
 
     let disk1_entries: Vec<_> = all_entries
         .iter()
@@ -125,13 +128,20 @@ async fn test_write_scrub_corrupt_repair_chain() {
     let (tx2, mut rx2) = mpsc::channel::<CorruptionNotification>(100);
     let results2 = scrub.scrub_pass(&reader, &limiter, &tx2).await;
     let total_checksum_errors: u64 = results2.iter().map(|r| r.checksum_errors).sum();
-    assert_eq!(total_checksum_errors, 3, "should detect 3 corrupted extents");
+    assert_eq!(
+        total_checksum_errors, 3,
+        "should detect 3 corrupted extents"
+    );
 
     let mut notifications = Vec::new();
     while let Ok(n) = rx2.try_recv() {
         notifications.push(n);
     }
-    assert_eq!(notifications.len(), 3, "should have 3 corruption notifications");
+    assert_eq!(
+        notifications.len(),
+        3,
+        "should have 3 corruption notifications"
+    );
     for n in &notifications {
         assert!(
             corrupted_eids.contains(&n.extent_id),
@@ -240,7 +250,11 @@ async fn test_write_scrub_corrupt_repair_chain() {
         .await;
     assert_eq!(outcomes.len(), 3);
     for outcome in &outcomes {
-        assert!(outcome.success, "repair should succeed: {:?}", outcome.error);
+        assert!(
+            outcome.success,
+            "repair should succeed: {:?}",
+            outcome.error
+        );
     }
 
     let verify_store = ExtentStore::new(tmp1.path().to_path_buf(), disk1);
@@ -273,7 +287,10 @@ async fn test_write_scrub_corrupt_repair_chain() {
         .iter()
         .map(|r| r.checksum_errors + r.read_errors + r.metadata_errors)
         .sum();
-    assert_eq!(final_errors, 0, "final scrub should show 0 errors after repair");
+    assert_eq!(
+        final_errors, 0,
+        "final scrub should show 0 errors after repair"
+    );
 }
 
 // ===========================================================================
@@ -376,16 +393,15 @@ async fn test_metadata_commit_then_extent_write() {
     let new_leader = &cluster.services[new_leader_idx];
 
     let mapping = new_leader.lookup_by_extent_version(1);
-    assert!(
-        mapping.is_some(),
-        "mapping must survive leader failover"
-    );
+    assert!(mapping.is_some(), "mapping must survive leader failover");
     assert_eq!(mapping.unwrap().extent_id, extent_id);
 
     let vol = new_leader.get_volume(&vol_id);
     assert!(vol.is_some(), "volume must survive leader failover");
 
-    let (final_data, final_checksum) = store.read_extent(extent_id, 1).expect("read after failover");
+    let (final_data, final_checksum) = store
+        .read_extent(extent_id, 1)
+        .expect("read after failover");
     assert_eq!(final_data, data);
     assert_eq!(final_checksum, checksum);
 
@@ -484,7 +500,11 @@ async fn test_drain_relocates_real_extents() {
         .await;
     assert_eq!(outcomes.len(), 5);
     for outcome in &outcomes {
-        assert!(outcome.success, "drain repair should succeed: {:?}", outcome.error);
+        assert!(
+            outcome.success,
+            "drain repair should succeed: {:?}",
+            outcome.error
+        );
     }
 
     for (eid, ver, original_checksum, original_data) in &written_extents {
@@ -492,7 +512,10 @@ async fn test_drain_relocates_real_extents() {
             .read_back(disk2, *eid, *ver)
             .expect("read drained extent from disk2");
         assert_eq!(&data, original_data, "data should match original");
-        assert_eq!(&checksum, original_checksum, "checksum should match original");
+        assert_eq!(
+            &checksum, original_checksum,
+            "checksum should match original"
+        );
     }
 }
 
@@ -581,8 +604,7 @@ async fn test_concurrent_writes_and_scrub() {
                     extent_id: ExtentId,
                     version: u64,
                 ) -> Result<(Vec<u8>, String), String> {
-                    let path =
-                        committed_extent_path(&self.mount_path, extent_id, version);
+                    let path = committed_extent_path(&self.mount_path, extent_id, version);
                     let data = std::fs::read(&path).map_err(|e| format!("{e}"))?;
                     let cs = compute_checksum(&data);
                     Ok((data, cs))
@@ -635,7 +657,11 @@ async fn test_concurrent_writes_and_scrub() {
 
     let final_store = ExtentStore::new(mount_path, disk_id);
     let final_entries = checksums.lock().clone();
-    assert_eq!(final_entries.len(), 100, "all 100 extents should be committed");
+    assert_eq!(
+        final_entries.len(),
+        100,
+        "all 100 extents should be committed"
+    );
 
     for (i, (eid, ver, expected_checksum)) in final_entries.iter().enumerate() {
         let (data, actual_checksum) = final_store

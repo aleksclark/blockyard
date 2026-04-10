@@ -11,12 +11,13 @@ use blockyard_common::metrics::{
     set_metadata_quorum_health, set_repair_backlog_size, set_scrub_last_completed,
 };
 use blockyard_common::{
-    DiskId, DiskState, EpochId, ExtentId, InMemoryRecorder, Labels, NoopRecorder, NodeId,
-    OperationId, ProtectionPolicy, SessionId, VolumeId, ALL_METRIC_NAMES,
-    DISK_STATE_TRANSITION_TOTAL, METADATA_COMMIT_LATENCY_SECONDS, METADATA_QUORUM_HEALTH,
-    REPAIR_BACKLOG_SIZE, REPAIR_COMPLETIONS_TOTAL, SCRUB_FINDINGS_TOTAL,
-    SCRUB_LAST_COMPLETED_TIMESTAMP, VOLUME_IO_FAILURE_TOTAL, VOLUME_IO_SUCCESS_TOTAL,
+    ALL_METRIC_NAMES, DISK_STATE_TRANSITION_TOTAL, DiskId, DiskState, EpochId, ExtentId,
+    InMemoryRecorder, Labels, METADATA_COMMIT_LATENCY_SECONDS, METADATA_QUORUM_HEALTH, NodeId,
+    NoopRecorder, OperationId, ProtectionPolicy, REPAIR_BACKLOG_SIZE, REPAIR_COMPLETIONS_TOTAL,
+    SCRUB_FINDINGS_TOTAL, SCRUB_LAST_COMPLETED_TIMESTAMP, SessionId, VOLUME_IO_FAILURE_TOTAL,
+    VOLUME_IO_SUCCESS_TOTAL, VolumeId,
 };
+use blockyard_storage::background::TokenBucket;
 use blockyard_storage::background::repair::{
     EcReconstructor, FragmentReader, RepairConfig, RepairExtentReader, RepairExtentWriter,
     RepairRequest, RepairType, RepairWorker,
@@ -24,15 +25,13 @@ use blockyard_storage::background::repair::{
 use blockyard_storage::background::scrub::{
     ExtentReader, ScrubConfig, ScrubExtentEntry, ScrubWorker,
 };
-use blockyard_storage::background::TokenBucket;
+use blockyard_test_harness::mock_metadata::TestMetadataClient;
+use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, find_leader};
 use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
 use blockyard_ublk::traits::WriteAckError;
 use blockyard_ublk::{
-    ClientSession, MetadataCache, StaleEpochHandler,
-    WritePipeline, WriteRequest, WriteWatermark,
+    ClientSession, MetadataCache, StaleEpochHandler, WritePipeline, WriteRequest, WriteWatermark,
 };
-use blockyard_test_harness::mock_metadata::TestMetadataClient;
-use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, find_leader};
 use bytes::Bytes;
 use tokio::sync::mpsc;
 
@@ -385,8 +384,7 @@ async fn test_scrub_metrics_recorded() {
     let now_ts = 1700000000.0;
     set_scrub_last_completed(&recorder, node_id_str, &disk_id_str, now_ts);
 
-    let scrub_labels =
-        Labels::from_pairs(&[("node_id", node_id_str), ("disk_id", &disk_id_str)]);
+    let scrub_labels = Labels::from_pairs(&[("node_id", node_id_str), ("disk_id", &disk_id_str)]);
     assert_eq!(
         recorder.counter(SCRUB_FINDINGS_TOTAL, &scrub_labels),
         total_findings,

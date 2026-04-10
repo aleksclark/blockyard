@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use blockyard_common::{DiskId, ExtentId};
-use blockyard_storage::background::drain::{DrainConfig, DrainExtentEntry, DrainInventory, DrainWorker};
+use blockyard_storage::background::drain::{
+    DrainConfig, DrainExtentEntry, DrainInventory, DrainWorker,
+};
 use blockyard_storage::background::rate_limit::TokenBucket;
 use blockyard_storage::background::rebalance::{
     DiskUtilization, RebalanceConfig, RebalanceInventory, RebalanceWorker,
@@ -170,7 +172,10 @@ async fn test_add_node_rebalance_data_integrity() {
 
     let plan = worker.generate_plan(&inventory);
 
-    assert!(plan.needed, "rebalance should be needed with 80%/75%/0% disks");
+    assert!(
+        plan.needed,
+        "rebalance should be needed with 80%/75%/0% disks"
+    );
     assert!(!plan.moves.is_empty(), "plan should contain moves");
     assert!(
         plan.max_imbalance > 0.1,
@@ -178,7 +183,10 @@ async fn test_add_node_rebalance_data_integrity() {
     );
 
     for mv in &plan.moves {
-        assert_eq!(mv.target_disk, disk_new, "all moves should target the new empty disk");
+        assert_eq!(
+            mv.target_disk, disk_new,
+            "all moves should target the new empty disk"
+        );
         assert!(
             mv.source_disk == disk_high_1 || mv.source_disk == disk_high_2,
             "moves should come from over-utilized disks"
@@ -215,7 +223,13 @@ async fn test_add_node_rebalance_data_integrity() {
             let data = vec![0xABu8; 64];
             let (_, checksum) = store.stage_extent(mv.extent_id, 1, &data).expect("stage");
             store
-                .commit_extent(mv.extent_id, 1, &checksum, data.len() as u64, StorageClass::Default)
+                .commit_extent(
+                    mv.extent_id,
+                    1,
+                    &checksum,
+                    data.len() as u64,
+                    StorageClass::Default,
+                )
                 .expect("commit");
         }
     }
@@ -227,7 +241,13 @@ async fn test_add_node_rebalance_data_integrity() {
     writer.add_store(disk_new, target_store, target_tmpdir);
 
     let outcomes = repair_worker
-        .process_all(&reader, &StubFragmentReader, &writer, &StubEcReconstructor, &limiter)
+        .process_all(
+            &reader,
+            &StubFragmentReader,
+            &writer,
+            &StubEcReconstructor,
+            &limiter,
+        )
         .await;
 
     assert_eq!(outcomes.len(), plan.moves.len());
@@ -325,7 +345,13 @@ async fn test_remove_node_drain_no_data_loss() {
     writer.add_store(target_disk, target_store, target_tmpdir);
 
     let outcomes = repair_worker
-        .process_all(&reader, &StubFragmentReader, &writer, &StubEcReconstructor, &limiter)
+        .process_all(
+            &reader,
+            &StubFragmentReader,
+            &writer,
+            &StubEcReconstructor,
+            &limiter,
+        )
         .await;
 
     assert_eq!(outcomes.len(), 5);

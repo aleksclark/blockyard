@@ -4,8 +4,8 @@ use std::sync::Arc;
 use blockyard_common::{EpochId, ExtentId, NodeId, ProtectionPolicy, VolumeId};
 use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
 use blockyard_ublk::{
-    ClientSession, MetadataCache, MetadataClient, StaleEpochHandler, WritePipeline,
-    WriteWatermark, DataNodeClient,
+    ClientSession, DataNodeClient, MetadataCache, MetadataClient, StaleEpochHandler, WritePipeline,
+    WriteWatermark,
 };
 
 pub struct TestPipelineSetup<D: DataNodeClient, M: MetadataClient> {

@@ -146,11 +146,20 @@ async fn create_volume(
                 replica_nodes: vec![],
                 created_at: Utc::now(),
             };
-            (StatusCode::CREATED, Json(serde_json::to_value(&info).unwrap())).into_response()
+            (
+                StatusCode::CREATED,
+                Json(serde_json::to_value(&info).unwrap()),
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::to_value(&ApiError { error: e.to_string() }).unwrap()),
+            Json(
+                serde_json::to_value(&ApiError {
+                    error: e.to_string(),
+                })
+                .unwrap(),
+            ),
         )
             .into_response(),
     }
@@ -167,7 +176,7 @@ async fn delete_volume(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid volume ID"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -183,11 +192,7 @@ async fn delete_volume(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            (
-                status,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response()
+            (status, Json(serde_json::json!({"error": e.to_string()}))).into_response()
         }
     }
 }
@@ -220,7 +225,7 @@ async fn inspect_volume(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid volume ID"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -272,7 +277,7 @@ async fn inspect_node(
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": "invalid node ID"})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -353,7 +358,12 @@ async fn cluster_join(
     let metrics = raft.metrics().borrow().clone();
 
     let mut new_members = BTreeSet::new();
-    if let Some(membership) = &metrics.membership_config.membership().get_joint_config().first() {
+    if let Some(membership) = &metrics
+        .membership_config
+        .membership()
+        .get_joint_config()
+        .first()
+    {
         for &node_id in *membership {
             new_members.insert(node_id);
         }
@@ -402,7 +412,10 @@ mod tests {
     fn test_create_volume_request_default_protection() {
         let json = r#"{"name":"test","size_bytes":1024}"#;
         let parsed: CreateVolumeRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.protection, ProtectionPolicy::Replicated { replicas: 3 });
+        assert_eq!(
+            parsed.protection,
+            ProtectionPolicy::Replicated { replicas: 3 }
+        );
     }
 
     #[test]
@@ -452,7 +465,9 @@ mod tests {
 
     #[test]
     fn test_api_error_serde() {
-        let err = ApiError { error: "test error".into() };
+        let err = ApiError {
+            error: "test error".into(),
+        };
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("test error"));
     }

@@ -35,7 +35,9 @@ pub use response::MetadataResponse;
 pub use rpc::{RaftRpc, RaftRpcResponse};
 pub use server::{RaftRpcServer, RaftRpcServerHandle};
 pub use service::MetadataService;
-pub use state_machine::{ClusterNode, ExtentMapping, MetadataStateMachineData, VolumeMetadata};
+pub use state_machine::{
+    ClusterDisk, ClusterNode, ExtentMapping, MetadataStateMachineData, VolumeMetadata,
+};
 pub use store::{LogStore, StateMachineStore};
 pub use tcp_transport::{PeerRegistry, TcpNetworkFactory, TcpTransportConfig};
 pub use typ::TypeConfig;

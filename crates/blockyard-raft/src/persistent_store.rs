@@ -123,8 +123,7 @@ impl RaftLogStorage<TypeConfig> for PersistentLogStore {
         let purge_table = txn.open_table(PURGE_TABLE).map_err(read_io_err)?;
         let last_purged = match purge_table.get(()).map_err(read_io_err)? {
             Some(v) => {
-                let lid: LogId<u64> =
-                    serde_json::from_slice(v.value()).map_err(read_io_err)?;
+                let lid: LogId<u64> = serde_json::from_slice(v.value()).map_err(read_io_err)?;
                 Some(lid)
             }
             None => None,
@@ -152,8 +151,7 @@ impl RaftLogStorage<TypeConfig> for PersistentLogStore {
         let table = txn.open_table(VOTE_TABLE).map_err(read_io_err)?;
         match table.get(()).map_err(read_io_err)? {
             Some(v) => {
-                let vote: Vote<u64> =
-                    serde_json::from_slice(v.value()).map_err(read_io_err)?;
+                let vote: Vote<u64> = serde_json::from_slice(v.value()).map_err(read_io_err)?;
                 Ok(Some(vote))
             }
             None => Ok(None),
@@ -178,7 +176,9 @@ impl RaftLogStorage<TypeConfig> for PersistentLogStore {
             let mut table = txn.open_table(LOG_TABLE).map_err(io_err)?;
             for entry in entries {
                 let data = serde_json::to_vec(&entry).map_err(io_err)?;
-                table.insert(entry.log_id.index, data.as_slice()).map_err(io_err)?;
+                table
+                    .insert(entry.log_id.index, data.as_slice())
+                    .map_err(io_err)?;
             }
         }
         txn.commit().map_err(io_err)?;
@@ -339,9 +339,7 @@ impl RaftSnapshotBuilder<TypeConfig> for PersistentStateMachineStore {
 
         self.snapshot_idx
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let idx = self
-            .snapshot_idx
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let idx = self.snapshot_idx.load(std::sync::atomic::Ordering::Relaxed);
         let snapshot_id = if let Some(last) = last_applied {
             format!("{}-{}-{}", last.leader_id, last.index, idx)
         } else {
@@ -362,9 +360,7 @@ impl RaftSnapshotBuilder<TypeConfig> for PersistentStateMachineStore {
                 data: sm_json.clone(),
             })
             .map_err(io_err)?;
-            table
-                .insert((), snap_data.as_slice())
-                .map_err(io_err)?;
+            table.insert((), snap_data.as_slice()).map_err(io_err)?;
         }
         txn.commit().map_err(io_err)?;
 
@@ -468,9 +464,7 @@ impl RaftStateMachine<TypeConfig> for PersistentStateMachineStore {
                 data: raw,
             })
             .map_err(io_err)?;
-            table
-                .insert((), snap_data.as_slice())
-                .map_err(io_err)?;
+            table.insert((), snap_data.as_slice()).map_err(io_err)?;
         }
         txn.commit().map_err(io_err)?;
 
@@ -854,7 +848,12 @@ mod tests {
 
         let resps = sm.apply(entries).await.unwrap();
         assert_eq!(resps.len(), 2);
-        assert!(sm.data().get_volume_mappings(&vid).unwrap().contains_key(&0));
+        assert!(
+            sm.data()
+                .get_volume_mappings(&vid)
+                .unwrap()
+                .contains_key(&0)
+        );
     }
 
     #[tokio::test]

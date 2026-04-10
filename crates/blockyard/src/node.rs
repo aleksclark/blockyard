@@ -17,8 +17,8 @@ use blockyard_protocol::{
     WriteExtentResponse,
 };
 use blockyard_raft::{
-    MetadataService, PeerRegistry, PersistentLogStore, PersistentStateMachineStore,
-    RaftRpcServer, RaftRpcServerHandle, TcpNetworkFactory, TcpTransportConfig, TypeConfig,
+    MetadataService, PeerRegistry, PersistentLogStore, PersistentStateMachineStore, RaftRpcServer,
+    RaftRpcServerHandle, TcpNetworkFactory, TcpTransportConfig, TypeConfig,
 };
 use blockyard_storage::background::{BackgroundScheduler, SchedulerConfig};
 use blockyard_storage::{DataNodeService, DiskInventory, ExtentIndex, ExtentStore};
@@ -153,7 +153,10 @@ impl BlockyardNode {
         let (raft, raft_id, raft_rpc_handle) = if has_existing_state {
             // Recovery: node is restarting with existing raft state
             let existing_raft_id = sm_data.read().get_raft_id(&node_id).unwrap_or(1);
-            info!(raft_id = existing_raft_id, "recovering existing raft cluster state");
+            info!(
+                raft_id = existing_raft_id,
+                "recovering existing raft cluster state"
+            );
 
             // Populate peer registry from known cluster nodes
             {
@@ -169,7 +172,8 @@ impl BlockyardNode {
                 }
             }
 
-            let network = TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
+            let network =
+                TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
             let raft_config = openraft::Config {
                 election_timeout_min: config.raft.election_timeout_min_ms,
                 election_timeout_max: config.raft.election_timeout_max_ms,
@@ -200,7 +204,8 @@ impl BlockyardNode {
 
             peer_registry.register(raft_id, raft_addr);
 
-            let network = TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
+            let network =
+                TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
             let raft_config = openraft::Config {
                 election_timeout_min: config.raft.election_timeout_min_ms,
                 election_timeout_max: config.raft.election_timeout_max_ms,
@@ -255,7 +260,8 @@ impl BlockyardNode {
                 // But we use the seed directly as the gossip addr. The mgmt endpoint
                 // is at the default management port. We'll try the seed's IP with the
                 // default mgmt port.
-                let mgmt_addr = format!("http://{}:{}", seed.ip(), config.protocol.mgmt_addr.port());
+                let mgmt_addr =
+                    format!("http://{}:{}", seed.ip(), config.protocol.mgmt_addr.port());
                 let url = format!("{}/api/v1/cluster/join", mgmt_addr);
 
                 match client.post(&url).json(&join_req).send().await {
@@ -279,7 +285,8 @@ impl BlockyardNode {
                 anyhow::anyhow!("failed to join cluster: no seed node responded successfully")
             })?;
 
-            let network = TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
+            let network =
+                TcpNetworkFactory::new(peer_registry.clone(), TcpTransportConfig::default());
             let raft_config = openraft::Config {
                 election_timeout_min: config.raft.election_timeout_min_ms,
                 election_timeout_max: config.raft.election_timeout_max_ms,

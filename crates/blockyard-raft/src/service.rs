@@ -19,13 +19,15 @@ use parking_lot::RwLock;
 
 use blockyard_common::error::Error;
 use blockyard_common::{
-    EpochId, ExtentId, LeaseRequest, LeaseResponse, LeaseVersion, NodeId, OperationId,
+    DiskId, EpochId, ExtentId, LeaseRequest, LeaseResponse, LeaseVersion, NodeId, OperationId,
     ProtectionPolicy, SessionId, VolumeId, VolumeLease,
 };
 
 use crate::request::MetadataRequest;
 use crate::response::MetadataResponse;
-use crate::state_machine::{ClusterNode, ExtentMapping, MetadataStateMachineData, VolumeMetadata};
+use crate::state_machine::{
+    ClusterDisk, ClusterNode, ExtentMapping, MetadataStateMachineData, VolumeMetadata,
+};
 use crate::typ::TypeConfig;
 
 /// The metadata service: a strongly consistent replicated state machine
@@ -235,7 +237,10 @@ impl MetadataService {
 
     /// Query committed state by extent version (P3.6).
     pub fn lookup_by_extent_version(&self, version: u64) -> Option<ExtentMapping> {
-        self.sm_data.read().lookup_by_extent_version(version).cloned()
+        self.sm_data
+            .read()
+            .lookup_by_extent_version(version)
+            .cloned()
     }
 
     /// Get volume metadata (read from local committed state).
@@ -245,7 +250,12 @@ impl MetadataService {
 
     /// List all volumes.
     pub fn list_volumes(&self) -> Vec<VolumeMetadata> {
-        self.sm_data.read().list_volumes().into_iter().cloned().collect()
+        self.sm_data
+            .read()
+            .list_volumes()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get a cluster node.
@@ -255,7 +265,12 @@ impl MetadataService {
 
     /// List all cluster nodes.
     pub fn list_nodes(&self) -> Vec<ClusterNode> {
-        self.sm_data.read().list_nodes().into_iter().cloned().collect()
+        self.sm_data
+            .read()
+            .list_nodes()
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     /// Get the current placement epoch (P3.3).
@@ -276,9 +291,7 @@ impl MetadataService {
         match resp {
             MetadataResponse::NodeRegistered(raft_id) => Ok(raft_id),
             MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
-            _ => Err(Error::Raft(
-                "unexpected response from register_node".into(),
-            )),
+            _ => Err(Error::Raft("unexpected response from register_node".into())),
         }
     }
 
@@ -296,6 +309,57 @@ impl MetadataService {
     pub fn sm_data(&self) -> &Arc<RwLock<MetadataStateMachineData>> {
         &self.sm_data
     }
+
+    /// Register a disk in the cluster metadata via Raft consensus.
+    pub async fn register_disk(
+        &self,
+        disk_id: DiskId,
+        node_id: NodeId,
+        capacity_bytes: u64,
+    ) -> Result<(), Error> {
+        let resp = self
+            .commit(MetadataRequest::RegisterDisk {
+                disk_id,
+                node_id,
+                capacity_bytes,
+            })
+            .await?;
+        check_response(resp)
+    }
+
+    /// Update the used bytes for a registered disk via Raft consensus.
+    pub async fn update_disk_usage(&self, disk_id: DiskId, used_bytes: u64) -> Result<(), Error> {
+        let resp = self
+            .commit(MetadataRequest::UpdateDiskUsage {
+                disk_id,
+                used_bytes,
+            })
+            .await?;
+        check_response(resp)
+    }
+
+    /// Deregister a disk from the cluster metadata via Raft consensus.
+    pub async fn deregister_disk(&self, disk_id: DiskId) -> Result<(), Error> {
+        let resp = self
+            .commit(MetadataRequest::DeregisterDisk { disk_id })
+            .await?;
+        check_response(resp)
+    }
+
+    /// Get a registered cluster disk (local read, no Raft round-trip).
+    pub fn get_disk(&self, disk_id: &DiskId) -> Option<ClusterDisk> {
+        self.sm_data.read().get_cluster_disk(disk_id).cloned()
+    }
+
+    /// List all registered cluster disks (local read, no Raft round-trip).
+    pub fn list_disks(&self) -> Vec<ClusterDisk> {
+        self.sm_data
+            .read()
+            .list_cluster_disks()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
 }
 
 fn check_response(resp: MetadataResponse) -> Result<(), Error> {
@@ -303,7 +367,8 @@ fn check_response(resp: MetadataResponse) -> Result<(), Error> {
         MetadataResponse::Ok
         | MetadataResponse::Epoch(_)
         | MetadataResponse::Lease(_)
-        | MetadataResponse::NodeRegistered(_) => Ok(()),
+        | MetadataResponse::NodeRegistered(_)
+        | MetadataResponse::DiskRegistered => Ok(()),
         MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
     }
 }
@@ -336,5 +401,10 @@ mod tests {
     #[test]
     fn test_check_response_node_registered() {
         assert!(check_response(MetadataResponse::NodeRegistered(42)).is_ok());
+    }
+
+    #[test]
+    fn test_check_response_disk_registered() {
+        assert!(check_response(MetadataResponse::DiskRegistered).is_ok());
     }
 }

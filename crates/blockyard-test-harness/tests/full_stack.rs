@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use blockyard_common::{DiskId, EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
 use blockyard_protocol::messages::{
-    HandshakeRequest, ProtocolMessage, ReadExtentRequest, WriteExtentRequest,
-    WriteExtentResponse, ReadExtentResponse, CURRENT_PROTOCOL_VERSION,
+    CURRENT_PROTOCOL_VERSION, HandshakeRequest, ProtocolMessage, ReadExtentRequest,
+    ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
 };
 use blockyard_protocol::server::{DataPlaneHandler, DataPlaneServer};
 use blockyard_storage::extent::compute_checksum;
@@ -581,7 +581,11 @@ async fn test_full_stack_concurrent_writers() {
             let data = format!("concurrent-writer-{i}").into_bytes();
             let extent_id = ExtentId::generate();
             let resp = client.write_extent(extent_id, &data, epoch).await;
-            assert!(resp.success, "concurrent write {i} failed: {:?}", resp.error);
+            assert!(
+                resp.success,
+                "concurrent write {i} failed: {:?}",
+                resp.error
+            );
             (extent_id, data)
         }));
     }
@@ -749,11 +753,7 @@ async fn test_full_stack_write_read_many_sizes() {
         let data = vec![(size % 256) as u8; size];
         let extent_id = ExtentId::generate();
         let resp = client.write_extent(extent_id, &data, epoch).await;
-        assert!(
-            resp.success,
-            "write size={size} failed: {:?}",
-            resp.error
-        );
+        assert!(resp.success, "write size={size} failed: {:?}", resp.error);
         extents.push((extent_id, data));
     }
 
@@ -856,7 +856,11 @@ async fn test_full_stack_epoch_equal_succeeds() {
     let epoch = EpochId::new(3); // matches server epoch
 
     let resp = client.write_extent(extent_id, data, epoch).await;
-    assert!(resp.success, "write with matching epoch should succeed: {:?}", resp.error);
+    assert!(
+        resp.success,
+        "write with matching epoch should succeed: {:?}",
+        resp.error
+    );
 
     server.stop().await;
 }
@@ -873,7 +877,11 @@ async fn test_full_stack_future_epoch_succeeds() {
     let epoch = EpochId::new(10); // greater than server epoch=3
 
     let resp = client.write_extent(extent_id, data, epoch).await;
-    assert!(resp.success, "write with future epoch should succeed: {:?}", resp.error);
+    assert!(
+        resp.success,
+        "write with future epoch should succeed: {:?}",
+        resp.error
+    );
 
     server.stop().await;
 }

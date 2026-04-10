@@ -6,7 +6,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use blockyard_common::{
-    EpochId, ExtentId, LeaseRequest, NodeId, OperationId, ProtectionPolicy, VolumeId,
+    DiskId, EpochId, ExtentId, LeaseRequest, NodeId, OperationId, ProtectionPolicy, VolumeId,
 };
 
 /// A request to be applied to the metadata state machine via Raft consensus.
@@ -56,4 +56,17 @@ pub enum MetadataRequest {
     /// Register a node and assign it a raft u64 ID.
     /// Returns [`MetadataResponse::NodeRegistered`] with the assigned raft ID.
     RegisterNode { node_id: NodeId, addr: String },
+
+    /// Register a disk in the cluster metadata.
+    RegisterDisk {
+        disk_id: DiskId,
+        node_id: NodeId,
+        capacity_bytes: u64,
+    },
+
+    /// Update the used bytes for a registered disk.
+    UpdateDiskUsage { disk_id: DiskId, used_bytes: u64 },
+
+    /// Deregister a disk from the cluster metadata.
+    DeregisterDisk { disk_id: DiskId },
 }

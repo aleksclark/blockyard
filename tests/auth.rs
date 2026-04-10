@@ -42,7 +42,12 @@ fn test_shared_secret_auth_generate_validate() {
     tampered.signature = "deadbeefdeadbeef".to_string();
     let result = auth.validate_token(&tampered);
     assert!(result.is_err(), "tampered signature must be rejected");
-    assert!(result.unwrap_err().to_string().contains("invalid token signature"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid token signature")
+    );
 }
 
 // ===========================================================================
@@ -68,11 +73,7 @@ fn test_volume_acl_grants_denies() {
         &rw_identity.to_string(),
         VolumePermission::read_write(),
     );
-    acl.grant(
-        vol,
-        &ro_identity.to_string(),
-        VolumePermission::read_only(),
-    );
+    acl.grant(vol, &ro_identity.to_string(), VolumePermission::read_only());
 
     assert!(
         acl.check_read(&vol, &rw_identity),
@@ -126,11 +127,7 @@ fn test_volume_acl_revoke() {
     let session = SessionId::generate();
     let identity = PeerIdentity::Client(session);
 
-    acl.grant(
-        vol,
-        &identity.to_string(),
-        VolumePermission::read_write(),
-    );
+    acl.grant(vol, &identity.to_string(), VolumePermission::read_write());
     assert!(acl.check_read(&vol, &identity));
     assert!(acl.check_write(&vol, &identity));
 
@@ -146,7 +143,10 @@ fn test_volume_acl_revoke() {
     );
 
     let perms = acl.list_permissions(&vol);
-    assert!(perms.is_empty(), "permissions list should be empty after revoking the only entry");
+    assert!(
+        perms.is_empty(),
+        "permissions list should be empty after revoking the only entry"
+    );
 }
 
 // ===========================================================================
@@ -165,9 +165,7 @@ fn test_auth_with_service_context() {
 
     let token = auth.create_token(&identity, 300_000).unwrap();
 
-    let validated_identity = auth
-        .validate_token(&token)
-        .expect("token should be valid");
+    let validated_identity = auth.validate_token(&token).expect("token should be valid");
     assert_eq!(validated_identity, identity);
 
     acl.grant(

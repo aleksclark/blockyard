@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId};
+use blockyard_common::{
+    EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
+};
 use blockyard_test_harness::mock_datanode::{DiskBackedTestDataNode, verify_disk_data};
 use blockyard_test_harness::mock_metadata::TestMetadataClient;
 use blockyard_test_harness::pipeline_testutil::setup_test_pipeline;
@@ -293,8 +295,13 @@ async fn test_majority_ack_no_write_loss() {
         let extent_id = commit_req.extent_id;
         let version = commit_req.extent_version;
 
-        let readable_count =
-            verify_disk_data(&data_client, &[node1, node2, node3], extent_id, version, &data);
+        let readable_count = verify_disk_data(
+            &data_client,
+            &[node1, node2, node3],
+            extent_id,
+            version,
+            &data,
+        );
         assert!(
             readable_count >= 2,
             "at least majority (2 of 3) nodes should have data on disk, got {readable_count}",

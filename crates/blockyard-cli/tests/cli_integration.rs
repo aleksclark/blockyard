@@ -1,6 +1,6 @@
 use blockyard_cli::cli::{Cli, Command, OutputMode, VolumeCommand};
-use blockyard_cli::client::mock::MockClient;
 use blockyard_cli::client::BlockyardClient;
+use blockyard_cli::client::mock::MockClient;
 use blockyard_cli::commands::execute;
 
 use blockyard_common::{DiskState, NodeId, VolumeId};
@@ -122,16 +122,12 @@ async fn test_disk_list_with_status_filter() {
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed.len(), 2);
 
-    let healthy: Vec<&serde_json::Value> = parsed
-        .iter()
-        .filter(|d| d["state"] == "Healthy")
-        .collect();
+    let healthy: Vec<&serde_json::Value> =
+        parsed.iter().filter(|d| d["state"] == "Healthy").collect();
     assert_eq!(healthy.len(), 1);
 
-    let draining: Vec<&serde_json::Value> = parsed
-        .iter()
-        .filter(|d| d["state"] == "Draining")
-        .collect();
+    let draining: Vec<&serde_json::Value> =
+        parsed.iter().filter(|d| d["state"] == "Draining").collect();
     assert_eq!(draining.len(), 1);
 }
 
@@ -145,12 +141,9 @@ async fn test_node_inspect_output() {
     let nodes = client.node_list().await.unwrap();
     let node = &nodes[0];
 
-    let output = run_with(
-        &["byard", "node", "inspect", &node.id.to_string()],
-        &client,
-    )
-    .await
-    .unwrap();
+    let output = run_with(&["byard", "node", "inspect", &node.id.to_string()], &client)
+        .await
+        .unwrap();
 
     assert!(output.contains("Node:"));
     assert!(output.contains(&node.id.to_string()));
@@ -251,8 +244,7 @@ async fn test_json_vs_table_output_modes() {
         serde_json::from_str(&json_output);
     assert!(json_parsed.is_ok());
 
-    let table_parsed: serde_json::Result<serde_json::Value> =
-        serde_json::from_str(&table_output);
+    let table_parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&table_output);
     assert!(table_parsed.is_err());
 
     assert!(table_output.contains("NAME"));
@@ -263,9 +255,7 @@ async fn test_json_vs_table_output_modes() {
 async fn test_json_vs_table_node_list() {
     let client = MockClient::with_sample_data();
 
-    let table_output = run_with(&["byard", "node", "list"], &client)
-        .await
-        .unwrap();
+    let table_output = run_with(&["byard", "node", "list"], &client).await.unwrap();
     let json_output = run_with(&["byard", "-o", "json", "node", "list"], &client)
         .await
         .unwrap();
@@ -345,20 +335,56 @@ fn test_all_subcommands_parse() {
     }
 
     assert_parses!("volume list", "byard", "volume", "list");
-    assert_parses!("volume create", "byard", "volume", "create", "v", "--size", "1G");
+    assert_parses!(
+        "volume create",
+        "byard",
+        "volume",
+        "create",
+        "v",
+        "--size",
+        "1G"
+    );
     assert_parses!("volume inspect", "byard", "volume", "inspect", &vol_id);
-    assert_parses!("volume delete", "byard", "volume", "delete", &vol_id, "--force");
+    assert_parses!(
+        "volume delete",
+        "byard",
+        "volume",
+        "delete",
+        &vol_id,
+        "--force"
+    );
     assert_parses!("disk list", "byard", "disk", "list");
     assert_parses!("disk inspect", "byard", "disk", "inspect", &disk_id);
     assert_parses!("disk drain", "byard", "disk", "drain", &disk_id);
-    assert_parses!("disk remove", "byard", "disk", "remove", &disk_id, "--force");
+    assert_parses!(
+        "disk remove",
+        "byard",
+        "disk",
+        "remove",
+        &disk_id,
+        "--force"
+    );
     assert_parses!("node list", "byard", "node", "list");
     assert_parses!("node inspect", "byard", "node", "inspect", &node_id);
-    assert_parses!("node decommission", "byard", "node", "decommission", &node_id, "--force");
+    assert_parses!(
+        "node decommission",
+        "byard",
+        "node",
+        "decommission",
+        &node_id,
+        "--force"
+    );
     assert_parses!("cluster", "byard", "cluster");
     assert_parses!("cluster status", "byard", "cluster", "status");
     assert_parses!("mount", "byard", "mount", &vol_id);
-    assert_parses!("mount with device", "byard", "mount", &vol_id, "--device", "/dev/ublk0");
+    assert_parses!(
+        "mount with device",
+        "byard",
+        "mount",
+        &vol_id,
+        "--device",
+        "/dev/ublk0"
+    );
     assert_parses!("unmount", "byard", "unmount", &vol_id);
 }
 
@@ -409,7 +435,14 @@ async fn test_node_inspect_json_output() {
     let node = &nodes[0];
 
     let output = run_with(
-        &["byard", "-o", "json", "node", "inspect", &node.id.to_string()],
+        &[
+            "byard",
+            "-o",
+            "json",
+            "node",
+            "inspect",
+            &node.id.to_string(),
+        ],
         &client,
     )
     .await
