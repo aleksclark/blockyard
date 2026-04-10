@@ -169,15 +169,18 @@ impl<D: DataNodeClient, M: MetadataClient> ClusterBlockHandler<D, M> {
             .metadata_cache
             .find_extent_for_range(&self.volume_config.volume_id, &block_range);
 
-        let (_block_start, extent_mapping) = mapping.ok_or_else(|| {
-            Error::Storage(format!(
-                "no extent mapping for blocks {}..{}",
-                block_range.start, block_range.end
-            ))
-        })?;
+        // For unmapped regions (no extents allocated yet), return zeros.
+        // Block devices present as sparse: unwritten blocks read back as zero.
+        let Some((_block_start, extent_mapping)) = mapping else {
+            let length = request.length_bytes as usize;
+            return Ok(Some(Bytes::from(vec![0u8; length])));
+        };
 
         if extent_mapping.replica_locations.is_empty() {
-            return Err(Error::Storage("no replica locations for extent".into()));
+            // Extent exists but has no replicas — return zeros rather than
+            // failing with EIO, since the data may not have been written yet.
+            let length = request.length_bytes as usize;
+            return Ok(Some(Bytes::from(vec![0u8; length])));
         }
 
         let node_id = extent_mapping.replica_locations[0];
@@ -639,13 +642,10 @@ mod tests {
             tag: 10,
         };
         let result = handler.handle_io(req).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no extent mapping")
-        );
+        // Unmapped reads return zeros (sparse volume behavior).
+        let data = result.unwrap().unwrap();
+        assert_eq!(data.len(), 4096);
+        assert!(data.iter().all(|&b| b == 0));
     }
 
     #[tokio::test]
@@ -819,13 +819,10 @@ mod tests {
             tag: 14,
         };
         let result = handler.handle_io(req).await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("no replica locations")
-        );
+        // Empty replica locations now return zeros (sparse behavior).
+        let data = result.unwrap().unwrap();
+        assert_eq!(data.len(), 4096);
+        assert!(data.iter().all(|&b| b == 0));
     }
 
     #[tokio::test]

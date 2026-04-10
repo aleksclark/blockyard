@@ -289,7 +289,10 @@ impl<H: BlockHandler> UblkDevice<H> {
 
                     let queue = UblkQueue::new(qid as u16, dev)
                         .unwrap()
-                        .submit_fetch_commands(Some(&bufs));
+                        .submit_fetch_commands_unified(
+                            libublk::io::BufDescList::Slices(Some(&bufs)),
+                        )
+                        .expect("submit_fetch_commands_unified");
                     queue.wait_and_handle_io(io_handler);
                 };
 
