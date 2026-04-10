@@ -1,0 +1,416 @@
+//! Management REST API — axum-based HTTP server for cluster operations.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use blockyard_common::{NodeId, ProtectionPolicy, VolumeId};
+use blockyard_raft::MetadataService;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
+#[derive(Clone)]
+struct AppState {
+    metadata: MetadataService,
+    #[allow(dead_code)]
+    node_id: NodeId,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CreateVolumeRequest {
+    name: String,
+    size_bytes: u64,
+    #[serde(default = "default_protection")]
+    protection: ProtectionPolicy,
+}
+
+fn default_protection() -> ProtectionPolicy {
+    ProtectionPolicy::Replicated { replicas: 3 }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum VolumeState {
+    Healthy,
+    Degraded,
+    Rebuilding,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VolumeInfo {
+    id: VolumeId,
+    name: String,
+    size_bytes: u64,
+    protection: ProtectionPolicy,
+    state: VolumeState,
+    replica_nodes: Vec<NodeId>,
+    created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeInfo {
+    id: NodeId,
+    address: String,
+    state: String,
+    disk_count: u32,
+    volume_count: u32,
+    uptime_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClusterStatus {
+    node_count: u32,
+    nodes_online: u32,
+    volume_count: u32,
+    disk_count: u32,
+    placement_epoch: u64,
+    quorum_health: String,
+    total_capacity_bytes: u64,
+    used_capacity_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DiskInfo {
+    id: String,
+    node_id: NodeId,
+    path: String,
+    state: String,
+    total_bytes: u64,
+    used_bytes: u64,
+    extent_count: u64,
+    error_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiError {
+    error: String,
+}
+
+pub async fn start_management_api(
+    addr: SocketAddr,
+    metadata: MetadataService,
+    node_id: NodeId,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    let state = AppState { metadata, node_id };
+
+    let app = Router::new()
+        .route("/api/v1/volumes", post(create_volume))
+        .route("/api/v1/volumes", get(list_volumes))
+        .route("/api/v1/volumes/{id}", get(inspect_volume))
+        .route("/api/v1/volumes/{id}", delete(delete_volume))
+        .route("/api/v1/nodes", get(list_nodes))
+        .route("/api/v1/nodes/{id}", get(inspect_node))
+        .route("/api/v1/cluster/status", get(cluster_status))
+        .route("/api/v1/disks", get(list_disks))
+        .with_state(Arc::new(state));
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    info!(%addr, "management API listening");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn create_volume(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateVolumeRequest>,
+) -> impl IntoResponse {
+    let volume_id = VolumeId::generate();
+    match state
+        .metadata
+        .create_volume(volume_id, req.size_bytes, req.protection)
+        .await
+    {
+        Ok(()) => {
+            let info = VolumeInfo {
+                id: volume_id,
+                name: req.name,
+                size_bytes: req.size_bytes,
+                protection: req.protection,
+                state: VolumeState::Healthy,
+                replica_nodes: vec![],
+                created_at: Utc::now(),
+            };
+            (StatusCode::CREATED, Json(serde_json::to_value(&info).unwrap())).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::to_value(&ApiError { error: e.to_string() }).unwrap()),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let volume_id: VolumeId = match id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid volume ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    match state.metadata.delete_volume(volume_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"deleted": volume_id.to_string()})),
+        )
+            .into_response(),
+        Err(e) => {
+            let status = if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let volumes = state.metadata.list_volumes();
+    let infos: Vec<VolumeInfo> = volumes
+        .into_iter()
+        .map(|v| VolumeInfo {
+            id: v.volume_id,
+            name: String::new(),
+            size_bytes: v.size_bytes,
+            protection: v.protection,
+            state: VolumeState::Healthy,
+            replica_nodes: vec![],
+            created_at: Utc::now(),
+        })
+        .collect();
+    Json(serde_json::to_value(&infos).unwrap())
+}
+
+async fn inspect_volume(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let volume_id: VolumeId = match id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid volume ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    match state.metadata.get_volume(&volume_id) {
+        Some(v) => {
+            let info = VolumeInfo {
+                id: v.volume_id,
+                name: String::new(),
+                size_bytes: v.size_bytes,
+                protection: v.protection,
+                state: VolumeState::Healthy,
+                replica_nodes: vec![],
+                created_at: Utc::now(),
+            };
+            Json(serde_json::to_value(&info).unwrap()).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("volume {} not found", volume_id)})),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_nodes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let nodes = state.metadata.list_nodes();
+    let infos: Vec<NodeInfo> = nodes
+        .into_iter()
+        .map(|n| NodeInfo {
+            id: n.node_id,
+            address: n.addr.clone(),
+            state: "online".into(),
+            disk_count: 0,
+            volume_count: 0,
+            uptime_seconds: 0,
+        })
+        .collect();
+    Json(serde_json::to_value(&infos).unwrap())
+}
+
+async fn inspect_node(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let node_id: NodeId = match id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid node ID"})),
+            )
+                .into_response()
+        }
+    };
+
+    match state.metadata.get_node(&node_id) {
+        Some(n) => {
+            let info = NodeInfo {
+                id: n.node_id,
+                address: n.addr.clone(),
+                state: "online".into(),
+                disk_count: 0,
+                volume_count: 0,
+                uptime_seconds: 0,
+            };
+            Json(serde_json::to_value(&info).unwrap()).into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("node {} not found", node_id)})),
+        )
+            .into_response(),
+    }
+}
+
+async fn cluster_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let nodes = state.metadata.list_nodes();
+    let volumes = state.metadata.list_volumes();
+    let epoch = state.metadata.current_epoch();
+
+    let status = ClusterStatus {
+        node_count: nodes.len() as u32,
+        nodes_online: nodes.len() as u32,
+        volume_count: volumes.len() as u32,
+        disk_count: 0,
+        placement_epoch: epoch.as_u64(),
+        quorum_health: "healthy".into(),
+        total_capacity_bytes: 0,
+        used_capacity_bytes: 0,
+    };
+    Json(serde_json::to_value(&status).unwrap())
+}
+
+async fn list_disks(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let disks: Vec<DiskInfo> = vec![];
+    Json(serde_json::to_value(&disks).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_protection() {
+        let p = default_protection();
+        assert_eq!(p, ProtectionPolicy::Replicated { replicas: 3 });
+    }
+
+    #[test]
+    fn test_create_volume_request_serde() {
+        let req = CreateVolumeRequest {
+            name: "test".into(),
+            size_bytes: 1024,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: CreateVolumeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.size_bytes, 1024);
+    }
+
+    #[test]
+    fn test_create_volume_request_default_protection() {
+        let json = r#"{"name":"test","size_bytes":1024}"#;
+        let parsed: CreateVolumeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.protection, ProtectionPolicy::Replicated { replicas: 3 });
+    }
+
+    #[test]
+    fn test_volume_info_serde() {
+        let info = VolumeInfo {
+            id: VolumeId::generate(),
+            name: "vol".into(),
+            size_bytes: 1024,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+            state: VolumeState::Healthy,
+            replica_nodes: vec![],
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("vol"));
+    }
+
+    #[test]
+    fn test_node_info_serde() {
+        let info = NodeInfo {
+            id: NodeId::generate(),
+            address: "10.0.0.1:9800".into(),
+            state: "online".into(),
+            disk_count: 4,
+            volume_count: 10,
+            uptime_seconds: 86400,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("10.0.0.1:9800"));
+    }
+
+    #[test]
+    fn test_cluster_status_serde() {
+        let status = ClusterStatus {
+            node_count: 3,
+            nodes_online: 3,
+            volume_count: 1,
+            disk_count: 6,
+            placement_epoch: 1,
+            quorum_health: "healthy".into(),
+            total_capacity_bytes: 1000,
+            used_capacity_bytes: 500,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("healthy"));
+    }
+
+    #[test]
+    fn test_api_error_serde() {
+        let err = ApiError { error: "test error".into() };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("test error"));
+    }
+
+    #[test]
+    fn test_disk_info_serde() {
+        let info = DiskInfo {
+            id: "disk-1".into(),
+            node_id: NodeId::generate(),
+            path: "/dev/sda".into(),
+            state: "healthy".into(),
+            total_bytes: 1000,
+            used_bytes: 500,
+            extent_count: 42,
+            error_count: 0,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("/dev/sda"));
+    }
+}

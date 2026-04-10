@@ -2,6 +2,7 @@
 //!
 //! Initializes tracing, loads configuration, and starts the node process.
 
+mod api;
 mod node;
 
 use std::path::PathBuf;
@@ -62,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     config.validate()?;
 
     let listen_addr = config.listen_addr;
+    let mgmt_addr = config.protocol.mgmt_addr;
     let blockyard_node = BlockyardNode::start(config).await?;
     let node_id = blockyard_node.node_id();
     let shutdown_token = blockyard_node.shutdown_token();
@@ -75,7 +77,16 @@ async fn main() -> anyhow::Result<()> {
         server.run(server_shutdown).await;
     });
 
-    tracing::info!(%node_id, %listen_addr, "blockyard node is ready");
+    tracing::info!(%node_id, %listen_addr, %mgmt_addr, "blockyard node is ready");
+
+    // Start management API
+    let mgmt_metadata = blockyard_node.metadata().clone();
+    let mgmt_shutdown = shutdown_token.clone();
+    let mgmt_handle = tokio::spawn(async move {
+        if let Err(e) = api::start_management_api(mgmt_addr, mgmt_metadata, node_id, mgmt_shutdown).await {
+            tracing::error!(error = %e, "management API failed");
+        }
+    });
 
     // Wait for ctrl-c
     tokio::signal::ctrl_c().await?;
@@ -83,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
 
     blockyard_node.shutdown().await?;
     server_handle.await?;
+    mgmt_handle.abort();
 
     tracing::info!("blockyard node stopped");
     Ok(())

@@ -6,6 +6,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use blockyard_cli::cli::Cli;
+use blockyard_cli::commands::execute;
+use blockyard_cli::http_client::HttpClient;
 
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
@@ -20,11 +22,15 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::debug!(?cli, "parsed CLI arguments");
 
-    eprintln!(
-        "byard: not yet connected to a cluster (endpoint: {})",
-        cli.endpoint
-    );
-    eprintln!("byard: this build only supports --help and argument validation");
-
-    std::process::exit(1);
+    let client = HttpClient::new(&cli.endpoint);
+    match execute(&cli, &client).await {
+        Ok(output) => {
+            println!("{output}");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("byard: {e:#}");
+            std::process::exit(1);
+        }
+    }
 }

@@ -39,7 +39,7 @@ fn test_volume_create_parse() {
     ]);
 
     assert_eq!(cli.output, OutputMode::Table);
-    assert_eq!(cli.endpoint, "http://127.0.0.1:9800");
+    assert_eq!(cli.endpoint, "http://127.0.0.1:9801");
 
     match &cli.command {
         Command::Volume(VolumeCommand::Create(args)) => {

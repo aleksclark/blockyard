@@ -11,6 +11,10 @@ description = "Blockyard distributed block storage — main node process"
 name = "blockyard"
 path = "src/main.rs"
 
+[lib]
+name = "blockyard_node"
+path = "src/lib.rs"
+
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
 blockyard-protocol = { path = "../blockyard-protocol" }
@@ -20,8 +24,11 @@ anyhow.workspace = true
 clap.workspace = true
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+axum.workspace = true
+chrono.workspace = true

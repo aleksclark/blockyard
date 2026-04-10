@@ -30,7 +30,7 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        default_value = "http://127.0.0.1:9800",
+        default_value = "http://127.0.0.1:9801",
         help = "Cluster endpoint URL"
     )]
     pub endpoint: String,
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn test_cli_default_endpoint() {
         let args = Cli::parse_from(["byard", "volume", "list"]);
-        assert_eq!(args.endpoint, "http://127.0.0.1:9800");
+        assert_eq!(args.endpoint, "http://127.0.0.1:9801");
     }
 
     #[test]
@@ -475,11 +475,11 @@ mod tests {
         let args = Cli::parse_from([
             "byard",
             "--endpoint",
-            "http://10.0.0.1:9800",
+            "http://10.0.0.1:9801",
             "volume",
             "list",
         ]);
-        assert_eq!(args.endpoint, "http://10.0.0.1:9800");
+        assert_eq!(args.endpoint, "http://10.0.0.1:9801");
     }
 
     #[test]

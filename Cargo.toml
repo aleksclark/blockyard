@@ -48,6 +48,9 @@ clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
+axum = "0.8"
+tower = "0.5"
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 blockyard-common = { path = "crates/blockyard-common" }
