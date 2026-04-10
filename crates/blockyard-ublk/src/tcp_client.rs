@@ -442,10 +442,13 @@ mod tests {
         handler: Arc<H>,
     ) -> (SocketAddr, CancellationToken) {
         let node_id = NodeId::generate();
-        let server =
-            blockyard_protocol::DataPlaneServer::bind("127.0.0.1:0".parse().unwrap(), handler, node_id)
-                .await
-                .unwrap();
+        let server = blockyard_protocol::DataPlaneServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            node_id,
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr().unwrap();
         let shutdown = CancellationToken::new();
         let shutdown2 = shutdown.clone();
@@ -650,9 +653,7 @@ mod tests {
         assert!(!ack.success);
         assert_eq!(
             ack.error,
-            Some(WriteAckError::InternalError(
-                "something went wrong".into()
-            ))
+            Some(WriteAckError::InternalError("something went wrong".into()))
         );
 
         shutdown.cancel();
@@ -950,19 +951,13 @@ mod tests {
         };
         let ack = convert_write_response(node_id, resp);
         assert!(!ack.success);
-        assert_eq!(
-            ack.error,
-            Some(WriteAckError::InternalError(String::new()))
-        );
+        assert_eq!(ack.error, Some(WriteAckError::InternalError(String::new())));
     }
 
     #[test]
     fn test_tcp_connection_debug() {
         // Just verify the Debug impl doesn't panic
-        let debug_str = format!(
-            "{:?}",
-            TcpDataNodeClient::new()
-        );
+        let debug_str = format!("{:?}", TcpDataNodeClient::new());
         assert!(debug_str.contains("TcpDataNodeClient"));
     }
 

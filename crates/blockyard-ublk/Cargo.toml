@@ -7,10 +7,16 @@ license.workspace = true
 repository.workspace = true
 description = "Blockyard distributed block storage — UBLK client, session management, and write pipeline"
 
+[features]
+default = []
+ublk-kernel = ["libublk"]
+
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
+blockyard-client = { path = "../blockyard-client" }
 blockyard-protocol = { path = "../blockyard-protocol" }
 bytes.workspace = true
+libublk = { version = "0.4", optional = true }
 parking_lot.workspace = true
 reqwest.workspace = true
 serde.workspace = true
