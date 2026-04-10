@@ -18,6 +18,7 @@
 //! - [`quorum_health`] — Metadata quorum unavailable handling (P5.5, §4.9.1)
 
 pub mod ambiguous_write;
+pub mod block_handler;
 pub mod crash_recovery;
 pub mod ec_write_pipeline;
 pub mod freshness;
@@ -34,6 +35,7 @@ pub mod watermark;
 pub mod write_pipeline;
 
 pub use ambiguous_write::{AmbiguousWriteOutcome, AmbiguousWriteResolver};
+pub use block_handler::{ClusterBlockHandler, VolumeConfig};
 pub use crash_recovery::{CrashRecoveryResolver, RecoveryResult};
 pub use ec_write_pipeline::{
     CoalescingBuffer, CoalescingConfig, EcFragmentPlacement, EcWritePipeline, EncodedStripe,
