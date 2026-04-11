@@ -1359,8 +1359,8 @@ mod tests {
     // InMemoryEcDataNode — stores fragment data keyed by (node_id, extent_id, version).
     // -----------------------------------------------------------------------
 
-    use std::collections::HashMap;
     use parking_lot::Mutex as ParkingMutex;
+    use std::collections::HashMap;
 
     struct InMemoryEcDataNode {
         store: ParkingMutex<HashMap<(NodeId, ExtentId, u64), Vec<u8>>>,
@@ -1435,19 +1435,13 @@ mod tests {
     }
 
     impl MetadataClient for InMemoryEcMetadata {
-        async fn refresh_metadata(
-            &self,
-            cache: &MetadataCache,
-        ) -> Result<EpochId, Error> {
+        async fn refresh_metadata(&self, cache: &MetadataCache) -> Result<EpochId, Error> {
             let new_epoch = EpochId::new(self.epoch.as_u64() + 1);
             cache.set_epoch(new_epoch);
             Ok(new_epoch)
         }
 
-        async fn commit_extent_mapping(
-            &self,
-            request: CommitRequest,
-        ) -> Result<EpochId, Error> {
+        async fn commit_extent_mapping(&self, request: CommitRequest) -> Result<EpochId, Error> {
             self.committed.lock().push(request);
             Ok(self.epoch)
         }
@@ -1545,7 +1539,8 @@ mod tests {
         assert!(matches!(result, WriteOutcome::Committed { .. }));
 
         let commit = metadata_client.last_commit().expect("should have a commit");
-        let fragments = data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
+        let fragments =
+            data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
         assert_eq!(
             fragments.len(),
             num_nodes,
@@ -1554,12 +1549,16 @@ mod tests {
 
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
         for (nid, frag_data) in &fragments {
-            let idx = node_ids.iter().position(|n| n == nid).expect("node should be in list");
+            let idx = node_ids
+                .iter()
+                .position(|n| n == nid)
+                .expect("node should be in list");
             shards[idx] = Some(frag_data.clone());
         }
 
         let rs = ReedSolomon::new(k as usize, m as usize).unwrap();
-        rs.reconstruct(&mut shards).expect("reconstruction must succeed");
+        rs.reconstruct(&mut shards)
+            .expect("reconstruction must succeed");
 
         let mut reconstructed = Vec::new();
         for shard in shards.iter().take(k as usize) {
@@ -1619,17 +1618,22 @@ mod tests {
         assert!(matches!(result, WriteOutcome::Committed { .. }));
 
         let commit = metadata_client.last_commit().expect("should have a commit");
-        let fragments = data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
+        let fragments =
+            data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
         assert_eq!(fragments.len(), num_nodes);
 
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
         for (nid, frag_data) in &fragments {
-            let idx = node_ids.iter().position(|n| n == nid).expect("node should be in list");
+            let idx = node_ids
+                .iter()
+                .position(|n| n == nid)
+                .expect("node should be in list");
             shards[idx] = Some(frag_data.clone());
         }
 
         let rs = ReedSolomon::new(k as usize, m as usize).unwrap();
-        rs.reconstruct(&mut shards).expect("reconstruction must succeed");
+        rs.reconstruct(&mut shards)
+            .expect("reconstruction must succeed");
 
         let mut reconstructed = Vec::new();
         for shard in shards.iter().take(k as usize) {

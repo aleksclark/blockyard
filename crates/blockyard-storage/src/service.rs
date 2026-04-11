@@ -82,18 +82,33 @@ impl DurableOpLog {
             .create(true)
             .append(true)
             .open(&path)?;
-        Ok((Self { dir, file: Mutex::new(Some(file)) }, map))
+        Ok((
+            Self {
+                dir,
+                file: Mutex::new(Some(file)),
+            },
+            map,
+        ))
     }
 
     fn append(&self, record: &OperationRecord) {
         let mut guard = self.file.lock();
         if let Some(ref mut file) = *guard {
-            if let Ok(json) = serde_json::to_string(record) {
+            let result = (|| -> std::io::Result<()> {
+                let json = serde_json::to_string(record)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 let mut line = json;
                 line.push('\n');
-                if file.write_all(line.as_bytes()).is_ok() {
-                    let _ = file.flush();
-                }
+                file.write_all(line.as_bytes())?;
+                file.sync_all()?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                warn!(
+                    operation_id = %record.operation_id,
+                    error = %e,
+                    "failed to persist operation to durable log"
+                );
             }
             self.maybe_rotate(file);
         }
@@ -1749,7 +1764,12 @@ mod tests {
         assert!(!resp.success, "should fail when only disk has bad regions");
     }
 
-    fn setup_service_with_oplog() -> (tempfile::TempDir, tempfile::TempDir, DataNodeService, DiskId) {
+    fn setup_service_with_oplog() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DataNodeService,
+        DiskId,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_path_buf();
         std::fs::write(path.join(".blockyard_xfs_ok"), "").unwrap();
@@ -1792,13 +1812,9 @@ mod tests {
             let ids = inventory.discover_disks(&[path.clone()], false).unwrap();
             let disk_id = ids[0];
             let index = ExtentIndex::new();
-            let service = DataNodeService::with_oplog(
-                inventory,
-                index,
-                EpochId::new(1),
-                oplog_path.clone(),
-            )
-            .unwrap();
+            let service =
+                DataNodeService::with_oplog(inventory, index, EpochId::new(1), oplog_path.clone())
+                    .unwrap();
             let store = ExtentStore::new(path.clone(), disk_id);
             store.init_directories().unwrap();
             service.register_store(disk_id, store);
@@ -1824,13 +1840,8 @@ mod tests {
             let ids = inventory.discover_disks(&[path.clone()], false).unwrap();
             let disk_id = ids[0];
             let index = ExtentIndex::new();
-            let service = DataNodeService::with_oplog(
-                inventory,
-                index,
-                EpochId::new(1),
-                oplog_path,
-            )
-            .unwrap();
+            let service =
+                DataNodeService::with_oplog(inventory, index, EpochId::new(1), oplog_path).unwrap();
             let store = ExtentStore::new(path, disk_id);
             store.init_directories().unwrap();
             service.register_store(disk_id, store);

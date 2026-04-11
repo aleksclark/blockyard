@@ -187,7 +187,9 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
 
         if num_blocks <= 1 {
             // Single-block read — fast path
-            return self.read_single_block(&request, block_range.start, block_size).await;
+            return self
+                .read_single_block(&request, block_range.start, block_size)
+                .await;
         }
 
         // Multi-block read: stitch together data from individual extents
@@ -223,8 +225,7 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
             return Ok(Some(Bytes::from(vec![0u8; length])));
         }
 
-        let offset_within_extent =
-            request.offset_bytes - (_block_start * block_size);
+        let offset_within_extent = request.offset_bytes - (_block_start * block_size);
         let length = request.length_bytes as u64;
 
         self.read_from_replicas(&extent_mapping, offset_within_extent, length)
@@ -268,7 +269,6 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
         offset: u64,
         length: u64,
     ) -> Result<Option<Bytes>, Error> {
-
         let mut last_error = None;
         for &node_id in &extent_mapping.replica_locations {
             let node_addr = self.metadata_cache.get_node(&node_id);
@@ -1040,7 +1040,9 @@ mod tests {
         let result = handler.handle_io(req).await;
         assert!(result.is_ok());
         assert!(
-            handler.watermark().is_fresh(handler.metadata_cache().current_epoch()),
+            handler
+                .watermark()
+                .is_fresh(handler.metadata_cache().current_epoch()),
             "metadata should have been refreshed to meet watermark"
         );
     }
@@ -1049,8 +1051,8 @@ mod tests {
     // InMemoryDataNode — stores data so writes are connected to reads.
     // -----------------------------------------------------------------------
 
-    use std::collections::HashMap;
     use parking_lot::Mutex;
+    use std::collections::HashMap;
 
     struct InMemoryDataNode {
         store: Mutex<HashMap<(ExtentId, u64), Vec<u8>>>,
@@ -1100,12 +1102,12 @@ mod tests {
             length: u64,
         ) -> Result<DataNodeReadResult, ReadError> {
             let store = self.store.lock();
-            let data = store
-                .get(&(extent_id, extent_version))
-                .ok_or_else(|| ReadError::DataNodeReadFailed {
+            let data = store.get(&(extent_id, extent_version)).ok_or_else(|| {
+                ReadError::DataNodeReadFailed {
                     node_id: _node_id,
                     reason: format!("extent {extent_id} v{extent_version} not found"),
-                })?;
+                }
+            })?;
             let start = offset as usize;
             let end = std::cmp::min(start + length as usize, data.len());
             let slice = data[start..end].to_vec();
@@ -1125,8 +1127,7 @@ mod tests {
 
     struct InMemoryMetadata {
         epoch: EpochId,
-        committed_ops:
-            Mutex<HashMap<OperationId, crate::traits::CommittedMapping>>,
+        committed_ops: Mutex<HashMap<OperationId, crate::traits::CommittedMapping>>,
     }
 
     impl InMemoryMetadata {
@@ -1310,7 +1311,11 @@ mod tests {
         };
         let result = handler.handle_io(read_req).await.unwrap().unwrap();
         assert_eq!(result.len(), 4096);
-        assert_eq!(&result[..], &pattern[..], "read data must match written data byte-for-byte");
+        assert_eq!(
+            &result[..],
+            &pattern[..],
+            "read data must match written data byte-for-byte"
+        );
     }
 
     #[tokio::test]
@@ -1320,7 +1325,9 @@ mod tests {
 
         let mut patterns = Vec::new();
         for block in 0u64..5 {
-            let pattern: Vec<u8> = (0..4096).map(|i| ((block as usize * 37 + i) % 256) as u8).collect();
+            let pattern: Vec<u8> = (0..4096)
+                .map(|i| ((block as usize * 37 + i) % 256) as u8)
+                .collect();
             let write_req = IoRequest {
                 operation: IoOperation::Write,
                 offset_bytes: block * 4096,
@@ -1343,7 +1350,8 @@ mod tests {
             let result = handler.handle_io(read_req).await.unwrap().unwrap();
             assert_eq!(result.len(), 4096);
             assert_eq!(
-                &result[..], &expected[..],
+                &result[..],
+                &expected[..],
                 "block {block} data must match written data"
             );
         }
@@ -1383,7 +1391,8 @@ mod tests {
         };
         let result = handler.handle_io(read_req).await.unwrap().unwrap();
         assert_eq!(
-            &result[..], &pattern_v2[..],
+            &result[..],
+            &pattern_v2[..],
             "overwritten block must return latest data"
         );
     }
@@ -1414,7 +1423,9 @@ mod tests {
 
         let sizes: &[u32] = &[512, 1024, 4096, 8192, 16384];
         for (i, &size) in sizes.iter().enumerate() {
-            let pattern: Vec<u8> = (0..size as usize).map(|j| ((i * 41 + j) % 256) as u8).collect();
+            let pattern: Vec<u8> = (0..size as usize)
+                .map(|j| ((i * 41 + j) % 256) as u8)
+                .collect();
             let offset = i as u64 * 16384;
             let write_req = IoRequest {
                 operation: IoOperation::Write,
@@ -1438,10 +1449,7 @@ mod tests {
                 size as usize,
                 "size={size}: read length must match"
             );
-            assert_eq!(
-                &result[..], &pattern[..],
-                "size={size}: data must match"
-            );
+            assert_eq!(&result[..], &pattern[..], "size={size}: data must match");
         }
     }
 
@@ -1477,7 +1485,8 @@ mod tests {
             let result = handler.handle_io(read_req).await.unwrap().unwrap();
             assert_eq!(result.len(), 4096);
             assert_eq!(
-                &result[..], &expected[..],
+                &result[..],
+                &expected[..],
                 "block {block}: data must match written pattern"
             );
         }

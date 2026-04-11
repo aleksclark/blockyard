@@ -1164,7 +1164,8 @@ mod tests {
         let handler = make_test_handler();
         let node_id = NodeId::generate();
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let auth: Arc<dyn AuthProvider> = Arc::new(SharedSecretAuth::new("test-server-secret").unwrap());
+        let auth: Arc<dyn AuthProvider> =
+            Arc::new(SharedSecretAuth::new("test-server-secret").unwrap());
         let server = DataPlaneServer::bind_with_auth(addr, handler, node_id, auth)
             .await
             .unwrap();
@@ -1188,7 +1189,10 @@ mod tests {
         client_write_frame(&mut stream, &req_bytes).await;
         let resp_bytes = client_read_frame(&mut stream).await;
         let resp: HandshakeResponse = serde_json::from_slice(&resp_bytes).unwrap();
-        assert!(!resp.accepted, "handshake should be rejected without auth token");
+        assert!(
+            !resp.accepted,
+            "handshake should be rejected without auth token"
+        );
         assert!(!resp.authenticated);
         assert!(resp.message.unwrap().contains("no token"));
 
@@ -1231,7 +1235,10 @@ mod tests {
         client_write_frame(&mut stream, &req_bytes).await;
         let resp_bytes = client_read_frame(&mut stream).await;
         let resp: HandshakeResponse = serde_json::from_slice(&resp_bytes).unwrap();
-        assert!(resp.accepted, "handshake should be accepted with valid token");
+        assert!(
+            resp.accepted,
+            "handshake should be accepted with valid token"
+        );
         assert!(resp.authenticated);
 
         shutdown.cancel();

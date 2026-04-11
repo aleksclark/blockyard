@@ -790,8 +790,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_data_length_matches_length_bytes() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct CaptureHandler {
             captured_len: StdArc<AtomicUsize>,

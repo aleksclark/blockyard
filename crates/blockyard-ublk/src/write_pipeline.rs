@@ -20,24 +20,28 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use bytes::Bytes;
 
 /// Global atomic counter for generating unique extent versions.
-/// Initialized from current timestamp (microseconds) to avoid collisions
-/// across process restarts. Subsequent calls increment monotonically.
-pub static EXTENT_VERSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Initialized exactly once from the wall-clock timestamp (microseconds)
+/// via `OnceLock` to avoid collisions across process restarts.
+/// Subsequent calls increment monotonically via `fetch_add`.
+static EXTENT_VERSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// One-time initializer that seeds `EXTENT_VERSION_COUNTER` from wall-clock
+/// time. Using `OnceLock` guarantees exactly one initialization even under
+/// concurrent first-callers, eliminating the race that existed when the
+/// `prev == 0` check competed with `fetch_add`.
+static VERSION_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Get the next unique extent version, initializing from wall-clock time
 /// on first use to prevent version collisions after restart.
 pub fn next_extent_version() -> u64 {
-    let prev = EXTENT_VERSION_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
-    if prev == 0 {
+    VERSION_INIT.get_or_init(|| {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64;
-        EXTENT_VERSION_COUNTER.store(ts + 1, AtomicOrdering::Relaxed);
-        ts
-    } else {
-        prev
-    }
+        EXTENT_VERSION_COUNTER.store(ts, AtomicOrdering::Release);
+    });
+    EXTENT_VERSION_COUNTER.fetch_add(1, AtomicOrdering::Relaxed)
 }
 
 use blockyard_common::error::Error;
@@ -958,7 +962,10 @@ mod tests {
         let v1 = next_extent_version();
         let v2 = next_extent_version();
 
-        assert!(v1 > 1_000_000, "version should be timestamp-based (microseconds), got {v1}");
+        assert!(
+            v1 > 1_000_000,
+            "version should be timestamp-based (microseconds), got {v1}"
+        );
         assert!(v2 > v1, "versions must be monotonically increasing");
     }
 
@@ -1286,17 +1293,11 @@ mod tests {
             committed: parking_lot::Mutex<Option<CommittedMapping>>,
         }
         impl MetadataClient for LookupAwareMetadata {
-            async fn refresh_metadata(
-                &self,
-                cache: &MetadataCache,
-            ) -> Result<EpochId, Error> {
+            async fn refresh_metadata(&self, cache: &MetadataCache) -> Result<EpochId, Error> {
                 cache.set_epoch(self.commit_epoch);
                 Ok(self.commit_epoch)
             }
-            async fn commit_extent_mapping(
-                &self,
-                req: CommitRequest,
-            ) -> Result<EpochId, Error> {
+            async fn commit_extent_mapping(&self, req: CommitRequest) -> Result<EpochId, Error> {
                 *self.committed.lock() = Some(CommittedMapping {
                     extent_id: req.extent_id,
                     extent_version: req.extent_version,
@@ -1399,8 +1400,8 @@ mod tests {
     // InMemoryDataNode — stores data for roundtrip verification.
     // -----------------------------------------------------------------------
 
-    use std::collections::HashMap;
     use parking_lot::Mutex;
+    use std::collections::HashMap;
 
     struct InMemoryPipelineDataNode {
         store: Mutex<HashMap<(ExtentId, u64), Vec<u8>>>,
@@ -1479,10 +1480,7 @@ mod tests {
             Ok(new_epoch)
         }
 
-        async fn commit_extent_mapping(
-            &self,
-            request: CommitRequest,
-        ) -> Result<EpochId, Error> {
+        async fn commit_extent_mapping(&self, request: CommitRequest) -> Result<EpochId, Error> {
             self.committed.lock().push(request);
             Ok(self.epoch)
         }

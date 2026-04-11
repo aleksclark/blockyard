@@ -1025,7 +1025,10 @@ mod tests {
             .unwrap();
 
         let meta_path = extent_meta_path(store.mount_path(), eid, 1);
-        assert!(meta_path.exists(), "metadata sidecar must exist after commit");
+        assert!(
+            meta_path.exists(),
+            "metadata sidecar must exist after commit"
+        );
 
         let meta_json = fs::read_to_string(&meta_path).unwrap();
         let meta: ExtentMeta = serde_json::from_str(&meta_json).unwrap();

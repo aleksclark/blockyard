@@ -441,10 +441,7 @@ fn read_or_assign_disk_id(
         Ok(metadata.disk_id)
     } else {
         let disk_id = DiskId::generate();
-        let metadata = DiskMetadata {
-            disk_id,
-            node_id,
-        };
+        let metadata = DiskMetadata { disk_id, node_id };
 
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| {
             StorageError::DiskIdentity(format!("failed to serialize disk metadata: {e}"))
@@ -831,7 +828,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path();
         let result = validate_xfs(path);
-        assert!(result.is_err(), "should reject directory without XFS or marker");
+        assert!(
+            result.is_err(),
+            "should reject directory without XFS or marker"
+        );
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("XFS") || err.contains("xfs"),
@@ -860,7 +860,10 @@ mod tests {
         unsafe { std::env::set_var("BLOCKYARD_SKIP_XFS_CHECK", "0") };
         let result = validate_xfs(path);
         unsafe { std::env::remove_var("BLOCKYARD_SKIP_XFS_CHECK") };
-        assert!(result.is_err(), "env var value '0' should not skip validation");
+        assert!(
+            result.is_err(),
+            "env var value '0' should not skip validation"
+        );
     }
 
     #[test]
@@ -897,8 +900,7 @@ mod tests {
         let nid = blockyard_common::NodeId::generate();
         let _id = read_or_assign_disk_id(dir.path(), Some(nid)).unwrap();
 
-        let contents =
-            std::fs::read_to_string(dir.path().join(DISK_ID_FILENAME)).unwrap();
+        let contents = std::fs::read_to_string(dir.path().join(DISK_ID_FILENAME)).unwrap();
         let meta: DiskMetadata = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(meta.node_id, Some(nid));
     }
@@ -913,8 +915,7 @@ mod tests {
             .unwrap();
         assert_eq!(ids.len(), 1);
 
-        let contents =
-            std::fs::read_to_string(path.join(DISK_ID_FILENAME)).unwrap();
+        let contents = std::fs::read_to_string(path.join(DISK_ID_FILENAME)).unwrap();
         let meta: DiskMetadata = serde_json::from_str(contents.trim()).unwrap();
         assert_eq!(meta.node_id, Some(nid));
     }
