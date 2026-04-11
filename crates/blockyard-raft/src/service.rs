@@ -360,6 +360,42 @@ impl MetadataService {
             .cloned()
             .collect()
     }
+
+    /// Cleanup expired leases via Raft consensus.
+    ///
+    /// Returns the number of leases removed.
+    pub async fn cleanup_expired_leases(&self, now_ms: u64) -> Result<usize, Error> {
+        let resp = self
+            .commit(MetadataRequest::CleanupExpiredLeases { now_ms })
+            .await?;
+        match resp {
+            MetadataResponse::LeasesCleanedUp(count) => Ok(count),
+            MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
+            _ => Err(Error::Raft(
+                "unexpected response from cleanup_expired_leases".into(),
+            )),
+        }
+    }
+
+    /// List all leases (including expired ones, local read).
+    pub fn list_all_leases(&self) -> Vec<VolumeLease> {
+        self.sm_data
+            .read()
+            .list_all_leases()
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// List only active (non-expired) leases (local read).
+    pub fn list_active_leases(&self, now_ms: u64) -> Vec<VolumeLease> {
+        self.sm_data
+            .read()
+            .list_active_leases(now_ms)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
 }
 
 fn check_response(resp: MetadataResponse) -> Result<(), Error> {
@@ -368,7 +404,8 @@ fn check_response(resp: MetadataResponse) -> Result<(), Error> {
         | MetadataResponse::Epoch(_)
         | MetadataResponse::Lease(_)
         | MetadataResponse::NodeRegistered(_)
-        | MetadataResponse::DiskRegistered => Ok(()),
+        | MetadataResponse::DiskRegistered
+        | MetadataResponse::LeasesCleanedUp(_) => Ok(()),
         MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
     }
 }
@@ -406,5 +443,10 @@ mod tests {
     #[test]
     fn test_check_response_disk_registered() {
         assert!(check_response(MetadataResponse::DiskRegistered).is_ok());
+    }
+
+    #[test]
+    fn test_check_response_leases_cleaned_up() {
+        assert!(check_response(MetadataResponse::LeasesCleanedUp(3)).is_ok());
     }
 }

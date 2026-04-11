@@ -399,6 +399,7 @@ dependencies = [
  "blockyard-storage",
  "chrono",
  "clap",
+ "nix",
  "openraft",
  "parking_lot 0.12.5",
  "reqwest",

@@ -124,6 +124,7 @@ pub async fn start_management_api(
             get(list_extent_mappings),
         )
         .route("/api/v1/operations/{id}", get(lookup_operation))
+        .route("/api/v1/leases", get(list_leases))
         .route("/api/v1/leases/acquire", post(acquire_lease))
         .route("/api/v1/leases/renew", post(renew_lease))
         .route("/api/v1/leases/release", post(release_lease))
@@ -319,24 +320,41 @@ async fn inspect_node(
 async fn cluster_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let nodes = state.metadata.list_nodes();
     let volumes = state.metadata.list_volumes();
+    let disks = state.metadata.list_disks();
     let epoch = state.metadata.current_epoch();
+
+    let total_capacity_bytes: u64 = disks.iter().map(|d| d.capacity_bytes).sum();
+    let used_capacity_bytes: u64 = disks.iter().map(|d| d.used_bytes).sum();
 
     let status = ClusterStatus {
         node_count: nodes.len() as u32,
         nodes_online: nodes.len() as u32,
         volume_count: volumes.len() as u32,
-        disk_count: 0,
+        disk_count: disks.len() as u32,
         placement_epoch: epoch.as_u64(),
         quorum_health: "healthy".into(),
-        total_capacity_bytes: 0,
-        used_capacity_bytes: 0,
+        total_capacity_bytes,
+        used_capacity_bytes,
     };
     Json(serde_json::to_value(&status).unwrap())
 }
 
-async fn list_disks(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    let disks: Vec<DiskInfo> = vec![];
-    Json(serde_json::to_value(&disks).unwrap())
+async fn list_disks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cluster_disks = state.metadata.list_disks();
+    let infos: Vec<DiskInfo> = cluster_disks
+        .into_iter()
+        .map(|d| DiskInfo {
+            id: d.disk_id.to_string(),
+            node_id: d.node_id,
+            path: String::new(),
+            state: format!("{}", d.state),
+            total_bytes: d.capacity_bytes,
+            used_bytes: d.used_bytes,
+            extent_count: 0,
+            error_count: 0,
+        })
+        .collect();
+    Json(serde_json::to_value(&infos).unwrap())
 }
 
 /// POST /api/v1/cluster/join
@@ -616,6 +634,18 @@ async fn lookup_operation(
             Json(serde_json::to_value(&resp).unwrap()).into_response()
         }
     }
+}
+
+/// GET /api/v1/leases
+///
+/// List active (non-expired) leases.
+async fn list_leases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let leases = state.metadata.list_active_leases(now_ms);
+    Json(serde_json::to_value(&leases).unwrap())
 }
 
 /// POST /api/v1/leases/acquire

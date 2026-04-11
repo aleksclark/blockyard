@@ -362,6 +362,11 @@ impl MetadataStateMachineData {
                     MetadataResponse::error(format!("disk {disk_id} not found"))
                 }
             }
+
+            MetadataRequest::CleanupExpiredLeases { now_ms } => {
+                let removed = self.cleanup_expired_leases(*now_ms);
+                MetadataResponse::LeasesCleanedUp(removed)
+            }
         }
     }
 
@@ -437,6 +442,28 @@ impl MetadataStateMachineData {
     /// List all registered cluster disks.
     pub fn list_cluster_disks(&self) -> Vec<&ClusterDisk> {
         self.cluster_disks.values().collect()
+    }
+
+    /// Remove all expired leases from the state machine.
+    ///
+    /// Returns the number of leases that were removed.
+    pub fn cleanup_expired_leases(&mut self, now_ms: u64) -> usize {
+        let before = self.leases.len();
+        self.leases.retain(|_, lease| !lease.is_expired(now_ms));
+        before - self.leases.len()
+    }
+
+    /// List all leases (including expired ones).
+    pub fn list_all_leases(&self) -> Vec<&VolumeLease> {
+        self.leases.values().collect()
+    }
+
+    /// List only active (non-expired) leases.
+    pub fn list_active_leases(&self, now_ms: u64) -> Vec<&VolumeLease> {
+        self.leases
+            .values()
+            .filter(|lease| !lease.is_expired(now_ms))
+            .collect()
     }
 
     /// Apply a lease request to the state machine (P6.1).
@@ -2123,6 +2150,200 @@ mod tests {
     #[test]
     fn test_disk_registered_response() {
         let resp = MetadataResponse::DiskRegistered;
+        assert!(!resp.is_error());
+    }
+
+    #[test]
+    fn test_cleanup_expired_leases_removes_expired() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid1 = make_volume_id();
+        let vid2 = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid1);
+        create_volume(&mut sm, vid2);
+
+        // Acquire two leases at time 1000 with 30s TTL
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid1,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid2,
+            session_id: sid2,
+            now_ms: 1000,
+            ttl_ms: 60_000,
+        }));
+
+        assert_eq!(sm.leases.len(), 2);
+
+        // Cleanup at time 32_000: vid1's lease (expires at 31_000) should be removed
+        let removed = sm.cleanup_expired_leases(32_000);
+        assert_eq!(removed, 1);
+        assert!(sm.get_lease(&vid1).is_none());
+        assert!(sm.get_lease(&vid2).is_some());
+    }
+
+    #[test]
+    fn test_cleanup_expired_leases_none_expired() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let removed = sm.cleanup_expired_leases(5000);
+        assert_eq!(removed, 0);
+        assert_eq!(sm.leases.len(), 1);
+    }
+
+    #[test]
+    fn test_cleanup_expired_leases_all_expired() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let removed = sm.cleanup_expired_leases(100_000);
+        assert_eq!(removed, 1);
+        assert!(sm.leases.is_empty());
+    }
+
+    #[test]
+    fn test_cleanup_expired_leases_via_request() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid = make_session_id();
+        create_volume(&mut sm, vid);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let resp = sm.apply_request(&MetadataRequest::CleanupExpiredLeases { now_ms: 50_000 });
+        match resp {
+            MetadataResponse::LeasesCleanedUp(count) => assert_eq!(count, 1),
+            other => panic!("expected LeasesCleanedUp, got {other:?}"),
+        }
+        assert!(sm.leases.is_empty());
+    }
+
+    #[test]
+    fn test_list_all_leases() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid1 = make_volume_id();
+        let vid2 = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid1);
+        create_volume(&mut sm, vid2);
+
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid1,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid2,
+            session_id: sid2,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+
+        let all = sm.list_all_leases();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_list_active_leases_filters_expired() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid1 = make_volume_id();
+        let vid2 = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid1);
+        create_volume(&mut sm, vid2);
+
+        // vid1 lease expires at 31_000
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid1,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 30_000,
+        }));
+        // vid2 lease expires at 61_000
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid2,
+            session_id: sid2,
+            now_ms: 1000,
+            ttl_ms: 60_000,
+        }));
+
+        // At time 35_000, vid1 is expired, vid2 is active
+        let active = sm.list_active_leases(35_000);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].volume_id, vid2);
+
+        // All leases still in the map
+        let all = sm.list_all_leases();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn test_lease_expiry_allows_reacquire_new_session() {
+        let mut sm = MetadataStateMachineData::new();
+        let vid = make_volume_id();
+        let sid1 = make_session_id();
+        let sid2 = make_session_id();
+        create_volume(&mut sm, vid);
+
+        // Acquire with session 1
+        sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid1,
+            now_ms: 1000,
+            ttl_ms: 10_000,
+        }));
+
+        // Wait for expiry, new session can acquire
+        let resp = sm.apply_request(&MetadataRequest::Lease(LeaseRequest::Acquire {
+            volume_id: vid,
+            session_id: sid2,
+            now_ms: 11_001,
+            ttl_ms: 10_000,
+        }));
+
+        match resp {
+            MetadataResponse::Lease(LeaseResponse::Granted { .. }) => {}
+            other => panic!("expected Granted, got {other:?}"),
+        }
+
+        let lease = sm.get_lease(&vid).unwrap();
+        assert!(lease.is_held_by(sid2));
+    }
+
+    #[test]
+    fn test_leases_cleaned_up_response() {
+        let resp = MetadataResponse::LeasesCleanedUp(5);
         assert!(!resp.is_error());
     }
 }

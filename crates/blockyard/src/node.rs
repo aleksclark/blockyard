@@ -8,9 +8,10 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use blockyard_common::{EpochId, NodeConfig, NodeId};
+use blockyard_common::{DiskId, EpochId, NodeConfig, NodeId};
 use blockyard_gossip::GossipService;
 use blockyard_protocol::{
     DataPlaneHandler, ReadExtentRequest, ReadExtentResponse, WriteExtentRequest,
@@ -69,6 +70,58 @@ pub fn raft_bind_addr(config: &NodeConfig) -> SocketAddr {
     })
 }
 
+/// Get the capacity of a filesystem at the given path.
+///
+/// Uses `nix::sys::statvfs` on Linux; returns 0 on non-Linux or errors.
+pub fn get_disk_capacity(path: &std::path::Path) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        match nix::sys::statvfs::statvfs(path) {
+            Ok(stat) => stat.blocks() * stat.fragment_size(),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "statvfs failed, reporting 0 capacity");
+                0
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        0
+    }
+}
+
+/// Get the used bytes on a filesystem at the given path.
+///
+/// Uses `nix::sys::statvfs` on Linux; returns 0 on non-Linux or errors.
+pub fn get_disk_used_bytes(path: &std::path::Path) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        match nix::sys::statvfs::statvfs(path) {
+            Ok(stat) => {
+                let total = stat.blocks() * stat.fragment_size();
+                let avail = stat.blocks_available() * stat.fragment_size();
+                total.saturating_sub(avail)
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "statvfs failed, reporting 0 used");
+                0
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        0
+    }
+}
+
+/// Interval for periodic disk usage updates (60 seconds).
+const DISK_USAGE_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Interval for periodic expired lease cleanup (120 seconds).
+const LEASE_CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Response from the cluster join endpoint.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct JoinResponse {
@@ -111,6 +164,13 @@ impl BlockyardNode {
         let inventory = DiskInventory::new();
         let disk_ids = inventory.discover_disks(&config.storage.disk_paths, false)?;
         info!(disk_count = disk_ids.len(), "discovered disks");
+
+        // Collect disk mount paths before inventory is moved into DataNodeService
+        let mut disk_mount_paths: Vec<(DiskId, PathBuf)> = Vec::new();
+        for &disk_id in &disk_ids {
+            let mount_path = inventory.get_mount_path(disk_id)?;
+            disk_mount_paths.push((disk_id, mount_path));
+        }
 
         // Step 2: Create ExtentIndex
         let index = ExtentIndex::new();
@@ -332,6 +392,22 @@ impl BlockyardNode {
         // Step 8: Create MetadataService
         let metadata = MetadataService::new(raft, sm_data);
 
+        // Step 8b: Register discovered disks with cluster metadata
+        for (disk_id, mount_path) in &disk_mount_paths {
+            let capacity_bytes = get_disk_capacity(mount_path);
+            match metadata
+                .register_disk(*disk_id, node_id, capacity_bytes)
+                .await
+            {
+                Ok(()) => {
+                    info!(%disk_id, capacity_bytes, "registered disk with cluster");
+                }
+                Err(e) => {
+                    warn!(%disk_id, error = %e, "failed to register disk (may not be leader)");
+                }
+            }
+        }
+
         // Step 9: Start BackgroundScheduler
         let scheduler = BackgroundScheduler::new(SchedulerConfig::default());
 
@@ -383,6 +459,48 @@ impl BlockyardNode {
             warn!(error = %e, "gossip service failed to start, continuing without gossip");
         } else {
             info!("gossip service started");
+        }
+
+        // Step 11: Spawn periodic disk usage update task
+        {
+            let metadata_bg = metadata.clone();
+            let disk_paths = disk_mount_paths.clone();
+            let shutdown_bg = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(DISK_USAGE_UPDATE_INTERVAL) => {}
+                        _ = shutdown_bg.cancelled() => break,
+                    }
+                    for (disk_id, mount_path) in &disk_paths {
+                        let used_bytes = get_disk_used_bytes(mount_path);
+                        if let Err(e) = metadata_bg.update_disk_usage(*disk_id, used_bytes).await {
+                            tracing::debug!(%disk_id, error = %e, "failed to update disk usage (may not be leader)");
+                        }
+                    }
+                }
+            });
+        }
+
+        // Step 12: Spawn periodic expired lease cleanup task
+        {
+            let metadata_bg = metadata.clone();
+            let shutdown_bg = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(LEASE_CLEANUP_INTERVAL) => {}
+                        _ = shutdown_bg.cancelled() => break,
+                    }
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    if let Err(e) = metadata_bg.cleanup_expired_leases(now_ms).await {
+                        tracing::debug!(error = %e, "failed to cleanup expired leases (may not be leader)");
+                    }
+                }
+            });
         }
 
         info!(%node_id, raft_id, "blockyard node started");
@@ -709,6 +827,119 @@ mod tests {
         // Just ensure Debug is derived; can't easily construct without real disks.
         // This test ensures the struct compiles with Debug.
         let _: fn(&DataNodeHandler) -> String = |h| format!("{:?}", h);
+    }
+
+    #[test]
+    fn test_get_disk_capacity_returns_nonzero() {
+        // statvfs on a real path should return non-zero on linux
+        let capacity = get_disk_capacity(std::path::Path::new("/tmp"));
+        // On Linux, /tmp should have some capacity
+        #[cfg(target_os = "linux")]
+        assert!(capacity > 0);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(capacity, 0);
+    }
+
+    #[test]
+    fn test_get_disk_used_bytes_returns_reasonable() {
+        let used = get_disk_used_bytes(std::path::Path::new("/tmp"));
+        let capacity = get_disk_capacity(std::path::Path::new("/tmp"));
+        // Used should be <= capacity
+        assert!(used <= capacity);
+    }
+
+    #[test]
+    fn test_get_disk_capacity_nonexistent_path() {
+        let capacity = get_disk_capacity(std::path::Path::new("/nonexistent/path/12345"));
+        assert_eq!(capacity, 0);
+    }
+
+    #[test]
+    fn test_get_disk_used_bytes_nonexistent_path() {
+        let used = get_disk_used_bytes(std::path::Path::new("/nonexistent/path/12345"));
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn test_disk_usage_update_interval() {
+        assert_eq!(
+            DISK_USAGE_UPDATE_INTERVAL,
+            std::time::Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn test_lease_cleanup_interval() {
+        assert_eq!(LEASE_CLEANUP_INTERVAL, std::time::Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_disk_registration_state_machine() {
+        // Test that disk registration works at the state machine level
+        // (simulating what node.rs does at startup)
+        use blockyard_common::DiskId;
+        let mut sm = MetadataStateMachineData::new();
+        let node_id = NodeId::generate();
+        let disk_id = DiskId::generate();
+
+        let resp = sm.apply_request(&blockyard_raft::MetadataRequest::RegisterDisk {
+            disk_id,
+            node_id,
+            capacity_bytes: 1_000_000_000,
+        });
+        assert!(!resp.is_error());
+
+        let disk = sm.get_cluster_disk(&disk_id).unwrap();
+        assert_eq!(disk.node_id, node_id);
+        assert_eq!(disk.capacity_bytes, 1_000_000_000);
+        assert_eq!(disk.used_bytes, 0);
+
+        // Simulate usage update
+        let resp = sm.apply_request(&blockyard_raft::MetadataRequest::UpdateDiskUsage {
+            disk_id,
+            used_bytes: 500_000_000,
+        });
+        assert!(!resp.is_error());
+        let disk = sm.get_cluster_disk(&disk_id).unwrap();
+        assert_eq!(disk.used_bytes, 500_000_000);
+    }
+
+    #[test]
+    fn test_lease_cleanup_state_machine() {
+        // Test that lease cleanup works at the state machine level
+        // (simulating what the background task does)
+        use blockyard_common::{LeaseRequest, ProtectionPolicy, SessionId, VolumeId};
+        let mut sm = MetadataStateMachineData::new();
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+
+        sm.apply_request(&blockyard_raft::MetadataRequest::CreateVolume {
+            volume_id: vid,
+            size_bytes: 1024,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+        });
+
+        sm.apply_request(&blockyard_raft::MetadataRequest::Lease(
+            LeaseRequest::Acquire {
+                volume_id: vid,
+                session_id: sid,
+                now_ms: 1000,
+                ttl_ms: 10_000,
+            },
+        ));
+
+        assert!(sm.get_lease(&vid).is_some());
+
+        // Cleanup at a time past expiry
+        let resp = sm.apply_request(&blockyard_raft::MetadataRequest::CleanupExpiredLeases {
+            now_ms: 12_000,
+        });
+        match resp {
+            blockyard_raft::MetadataResponse::LeasesCleanedUp(count) => assert_eq!(count, 1),
+            other => panic!("expected LeasesCleanedUp, got {:?}", other),
+        }
+
+        assert!(sm.get_lease(&vid).is_none());
     }
 
     /// Helper to create a test NodeConfig.
