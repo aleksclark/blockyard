@@ -4,6 +4,8 @@
 //! stale-epoch rejection, checksum mismatch handling, and XFS error handling.
 
 use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 
 use blockyard_common::{
     DiskId, DiskState, EpochId, ExtentId, LeaseVersion, OperationId, PeerIdentity, SessionId,
@@ -12,15 +14,19 @@ use blockyard_common::{
 use blockyard_protocol::{
     ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::disk::DiskInventory;
 use crate::error::StorageError;
 use crate::extent::{ExtentIndex, ExtentStore, ExtentVersion, StorageClass};
 
+const OPLOG_FILENAME: &str = "oplog.jsonl";
+const MAX_OPLOG_FILE_SIZE: u64 = 10 * 1024 * 1024;
+
 /// Record of a completed write operation for dedup (P2.4, §5.5.5).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationRecord {
     pub operation_id: OperationId,
     pub extent_id: ExtentId,
@@ -37,11 +43,87 @@ pub struct CachedLease {
     pub lease_version: LeaseVersion,
 }
 
+/// Durable append-only operation log persisted to disk (§5.5 step 5, §6.2).
+///
+/// Each record is written as a single JSON line, fsynced before ack.
+/// On startup the file is replayed to rebuild the in-memory HashMap.
+/// Rotated when the file exceeds `MAX_OPLOG_FILE_SIZE`.
+#[derive(Debug)]
+struct DurableOpLog {
+    dir: PathBuf,
+    file: Mutex<Option<std::fs::File>>,
+}
+
+impl DurableOpLog {
+    fn open(dir: PathBuf) -> Result<(Self, HashMap<OperationId, OperationRecord>), StorageError> {
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(OPLOG_FILENAME);
+        let mut map = HashMap::new();
+
+        if path.exists() {
+            let file = std::fs::File::open(&path)?;
+            let reader = std::io::BufReader::new(file);
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(record) = serde_json::from_str::<OperationRecord>(&line) {
+                    map.insert(record.operation_id, record);
+                }
+            }
+            debug!(count = map.len(), "replayed operation log");
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok((Self { dir, file: Mutex::new(Some(file)) }, map))
+    }
+
+    fn append(&self, record: &OperationRecord) {
+        let mut guard = self.file.lock();
+        if let Some(ref mut file) = *guard {
+            if let Ok(json) = serde_json::to_string(record) {
+                let mut line = json;
+                line.push('\n');
+                if file.write_all(line.as_bytes()).is_ok() {
+                    let _ = file.flush();
+                }
+            }
+            self.maybe_rotate(file);
+        }
+    }
+
+    fn maybe_rotate(&self, file: &mut std::fs::File) {
+        use std::io::Seek;
+        if let Ok(pos) = file.stream_position() {
+            if pos > MAX_OPLOG_FILE_SIZE {
+                let path = self.dir.join(OPLOG_FILENAME);
+                let rotated = self.dir.join(format!("{OPLOG_FILENAME}.old"));
+                let _ = std::fs::rename(&path, &rotated);
+                if let Ok(new_file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    *file = new_file;
+                }
+            }
+        }
+    }
+}
+
 /// Data node service managing read/write operations.
 #[derive(Debug)]
 pub struct DataNodeService {
     current_epoch: RwLock<EpochId>,
     operation_log: RwLock<HashMap<OperationId, OperationRecord>>,
+    durable_oplog: Option<DurableOpLog>,
     stores: RwLock<HashMap<DiskId, ExtentStore>>,
     inventory: DiskInventory,
     index: ExtentIndex,
@@ -54,12 +136,39 @@ impl DataNodeService {
         Self {
             current_epoch: RwLock::new(epoch),
             operation_log: RwLock::new(HashMap::new()),
+            durable_oplog: None,
             stores: RwLock::new(HashMap::new()),
             inventory,
             index,
             lease_cache: RwLock::new(HashMap::new()),
             volume_acl: VolumeAcl::new(),
         }
+    }
+
+    /// Create a DataNodeService with a durable operation log at the given directory.
+    ///
+    /// On startup, replays the persisted log to rebuild the in-memory dedup map.
+    pub fn with_oplog(
+        inventory: DiskInventory,
+        index: ExtentIndex,
+        epoch: EpochId,
+        oplog_dir: PathBuf,
+    ) -> Result<Self, StorageError> {
+        let (durable, map) = DurableOpLog::open(oplog_dir)?;
+        let count = map.len();
+        if count > 0 {
+            info!(count, "recovered operation log entries");
+        }
+        Ok(Self {
+            current_epoch: RwLock::new(epoch),
+            operation_log: RwLock::new(map),
+            durable_oplog: Some(durable),
+            stores: RwLock::new(HashMap::new()),
+            inventory,
+            index,
+            lease_cache: RwLock::new(HashMap::new()),
+            volume_acl: VolumeAcl::new(),
+        })
     }
 
     /// Register an ExtentStore for a disk.
@@ -397,9 +506,13 @@ impl DataNodeService {
 
     /// Record a completed operation for dedup.
     ///
+    /// Persists to the durable log (if configured) then updates the in-memory map.
     /// Evicts the oldest entries when the log exceeds the maximum size (10,000)
     /// to prevent unbounded memory growth.
     fn record_operation(&self, record: OperationRecord) {
+        if let Some(ref oplog) = self.durable_oplog {
+            oplog.append(&record);
+        }
         const MAX_OPERATION_LOG_SIZE: usize = 10_000;
         let mut log = self.operation_log.write();
         log.insert(record.operation_id, record);
@@ -1629,5 +1742,134 @@ mod tests {
         let req = make_write_request(eid, 1, EpochId::new(1), None, &checksum, data.len() as u64);
         let resp = service.handle_write(&req, data);
         assert!(!resp.success, "should fail when only disk has bad regions");
+    }
+
+    fn setup_service_with_oplog() -> (tempfile::TempDir, tempfile::TempDir, DataNodeService, DiskId) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        std::fs::write(path.join(".blockyard_xfs_ok"), "").unwrap();
+
+        let oplog_dir = tempfile::tempdir().unwrap();
+
+        let inventory = DiskInventory::new();
+        let ids = inventory.discover_disks(&[path.clone()], false).unwrap();
+        let disk_id = ids[0];
+
+        let index = ExtentIndex::new();
+        let service = DataNodeService::with_oplog(
+            inventory,
+            index,
+            EpochId::new(1),
+            oplog_dir.path().to_path_buf(),
+        )
+        .unwrap();
+
+        let store = ExtentStore::new(path, disk_id);
+        store.init_directories().unwrap();
+        service.register_store(disk_id, store);
+
+        (dir, oplog_dir, service, disk_id)
+    }
+
+    #[test]
+    fn test_durable_oplog_persists_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        std::fs::write(path.join(".blockyard_xfs_ok"), "").unwrap();
+
+        let oplog_dir = tempfile::tempdir().unwrap();
+        let oplog_path = oplog_dir.path().to_path_buf();
+
+        let op_id;
+        let eid = ExtentId::generate();
+        {
+            let inventory = DiskInventory::new();
+            let ids = inventory.discover_disks(&[path.clone()], false).unwrap();
+            let disk_id = ids[0];
+            let index = ExtentIndex::new();
+            let service = DataNodeService::with_oplog(
+                inventory,
+                index,
+                EpochId::new(1),
+                oplog_path.clone(),
+            )
+            .unwrap();
+            let store = ExtentStore::new(path.clone(), disk_id);
+            store.init_directories().unwrap();
+            service.register_store(disk_id, store);
+
+            let data = b"durable oplog test";
+            let checksum = compute_checksum(data);
+            let req = make_write_request(
+                eid,
+                1,
+                EpochId::new(1),
+                Some(disk_id),
+                &checksum,
+                data.len() as u64,
+            );
+            op_id = req.operation_id;
+            let resp = service.handle_write(&req, data);
+            assert!(resp.success);
+            assert_eq!(service.operation_count(), 1);
+        }
+
+        {
+            let inventory = DiskInventory::new();
+            let ids = inventory.discover_disks(&[path.clone()], false).unwrap();
+            let disk_id = ids[0];
+            let index = ExtentIndex::new();
+            let service = DataNodeService::with_oplog(
+                inventory,
+                index,
+                EpochId::new(1),
+                oplog_path,
+            )
+            .unwrap();
+            let store = ExtentStore::new(path, disk_id);
+            store.init_directories().unwrap();
+            service.register_store(disk_id, store);
+
+            assert!(
+                service.operation_count() >= 1,
+                "operation log should survive restart"
+            );
+
+            let data = b"durable oplog test";
+            let checksum = compute_checksum(data);
+            let mut req = make_write_request(
+                eid,
+                1,
+                EpochId::new(1),
+                Some(disk_id),
+                &checksum,
+                data.len() as u64,
+            );
+            req.operation_id = op_id;
+            let resp = service.handle_write(&req, data);
+            assert!(resp.success, "duplicate should succeed from recovered log");
+        }
+    }
+
+    #[test]
+    fn test_durable_oplog_file_created() {
+        let (_dir, oplog_dir, service, disk_id) = setup_service_with_oplog();
+        let eid = ExtentId::generate();
+        let data = b"oplog file test";
+        let checksum = compute_checksum(data);
+        let req = make_write_request(
+            eid,
+            1,
+            EpochId::new(1),
+            Some(disk_id),
+            &checksum,
+            data.len() as u64,
+        );
+        service.handle_write(&req, data);
+
+        let oplog_file = oplog_dir.path().join("oplog.jsonl");
+        assert!(oplog_file.exists(), "oplog.jsonl should be created");
+        let contents = std::fs::read_to_string(oplog_file).unwrap();
+        assert!(!contents.is_empty(), "oplog should contain entries");
     }
 }
