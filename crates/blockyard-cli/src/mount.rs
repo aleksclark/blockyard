@@ -81,6 +81,83 @@ pub async fn execute_mount_kernel(
         extent_mappings: BTreeMap::new(),
     });
 
+    // Load existing extent mappings from the metadata server so data
+    // written in previous mount sessions is visible.
+    {
+        let http = reqwest::Client::new();
+        let url = format!("{}/api/v1/volumes/{}/extent-mappings", endpoint, volume_id);
+        if let Ok(resp) = http.get(&url).send().await {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(arr) = body.get("mappings").and_then(|m| m.as_array()) {
+                        let mut loaded = 0u64;
+                        for entry in arr {
+                            let block_start = entry
+                                .get("block_start")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let block_end = entry
+                                .get("block_end")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let extent_id_str =
+                                entry.get("extent_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let extent_id: blockyard_common::ExtentId = match extent_id_str.parse()
+                            {
+                                Ok(id) => id,
+                                Err(_) => continue,
+                            };
+                            let extent_version = entry
+                                .get("extent_version")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(1);
+                            let replica_locations: Vec<blockyard_common::NodeId> = entry
+                                .get("replica_locations")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str()?.parse().ok())
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let checksums: Vec<Vec<u8>> = entry
+                                .get("checksums")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| {
+                                            let s = v.as_str()?;
+                                            let bytes: Vec<u8> = (0..s.len())
+                                                .step_by(2)
+                                                .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+                                                .collect();
+                                            Some(bytes)
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+
+                            let size_bytes = (block_end - block_start) * 4096;
+                            metadata_cache.set_extent_mapping(
+                                &volume_id,
+                                block_start,
+                                blockyard_ublk::metadata_cache::CachedExtentMapping {
+                                    extent_id,
+                                    extent_version,
+                                    replica_locations,
+                                    checksums,
+                                    size_bytes,
+                                },
+                            );
+                            loaded += 1;
+                        }
+                        tracing::info!(count = loaded, "loaded extent mappings from metadata server");
+                    }
+                }
+            }
+        }
+    }
+
     let session = Arc::new(ClientSession::new(volume_id));
     let session_id = SessionId::generate();
     let watermark = Arc::new(WriteWatermark::new());

@@ -119,6 +119,10 @@ pub async fn start_management_api(
         .route("/api/v1/cluster/join", post(cluster_join))
         .route("/api/v1/disks", get(list_disks))
         .route("/api/v1/extent-mappings", post(commit_extent_mapping))
+        .route(
+            "/api/v1/volumes/{id}/extent-mappings",
+            get(list_extent_mappings),
+        )
         .route("/api/v1/operations/{id}", get(lookup_operation))
         .route("/api/v1/leases/acquire", post(acquire_lease))
         .route("/api/v1/leases/renew", post(renew_lease))
@@ -489,6 +493,48 @@ struct LeaseActionRequest {
 struct LeaseReleaseRequest {
     volume_id: VolumeId,
     session_id: blockyard_common::SessionId,
+}
+
+/// GET /api/v1/volumes/{id}/extent-mappings
+///
+/// List all committed extent mappings for a volume.
+async fn list_extent_mappings(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let volume_id: VolumeId = match id.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid volume ID"})),
+            )
+                .into_response();
+        }
+    };
+
+    let sm_data = state.metadata.sm_data();
+    let data = sm_data.read();
+    match data.get_volume_mappings(&volume_id) {
+        Some(mappings) => {
+            let entries: Vec<serde_json::Value> = mappings
+                .iter()
+                .map(|(block_start, m)| {
+                    serde_json::json!({
+                        "block_start": block_start,
+                        "block_end": m.block_range.end,
+                        "extent_id": m.extent_id.to_string(),
+                        "extent_version": m.extent_version,
+                        "epoch": m.epoch.as_u64(),
+                        "replica_locations": m.replica_locations.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+                        "checksums": m.checksums.iter().map(|c| c.iter().map(|b| format!("{:02x}", b)).collect::<String>()).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({"mappings": entries})).into_response()
+        }
+        None => Json(serde_json::json!({"mappings": []})).into_response(),
+    }
 }
 
 /// POST /api/v1/extent-mappings
