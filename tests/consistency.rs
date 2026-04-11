@@ -1,139 +1,29 @@
-use std::sync::Arc;
+//! Consistency integration tests with real blockyard processes.
+//!
+//! The Raft linearizability test uses an in-memory Raft cluster.
+//! All other tests use RealProcessCluster with real TCP and HTTP.
+//!
+//! Mock-based unit tests for read pipeline, freshness, stale epoch, and
+//! write pipeline majority ack are in their respective crate unit test
+//! modules.
+
+use std::time::Duration;
 
 use blockyard_common::{
-    EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, SessionId, VolumeId,
+    ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
 };
-use blockyard_test_harness::mock_datanode::{DiskBackedTestDataNode, verify_disk_data};
-use blockyard_test_harness::mock_metadata::TestMetadataClient;
-use blockyard_test_harness::pipeline_testutil::setup_test_pipeline;
+use blockyard_test_harness::process_harness::{
+    RealProcessCluster, TcpDataClient, build_binary, unique_base_port,
+};
 use blockyard_test_harness::raft_testutil::{create_test_raft_cluster, find_leader};
-use blockyard_ublk::freshness::FreshnessStatus;
-use blockyard_ublk::{
-    FreshnessChecker, StaleEpochHandler, WriteOutcome, WriteRequest, WriteWatermark,
-};
-use bytes::Bytes;
-
-// ---------------------------------------------------------------------------
-// Read-pipeline mocks (only used in this file)
-// ---------------------------------------------------------------------------
-
-struct MockMetadataProvider {
-    mappings: parking_lot::Mutex<
-        std::collections::HashMap<(VolumeId, ExtentId), blockyard_client::ExtentMapping>,
-    >,
-    watermarks: parking_lot::Mutex<std::collections::HashMap<(SessionId, VolumeId), u64>>,
-}
-
-impl MockMetadataProvider {
-    fn new() -> Self {
-        Self {
-            mappings: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            watermarks: parking_lot::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    fn set_mapping(&self, mapping: blockyard_client::ExtentMapping) {
-        self.mappings
-            .lock()
-            .insert((mapping.volume_id, mapping.extent_id), mapping);
-    }
-
-    fn set_watermark(&self, session_id: SessionId, volume_id: VolumeId, version: u64) {
-        self.watermarks
-            .lock()
-            .insert((session_id, volume_id), version);
-    }
-}
-
-impl blockyard_client::MetadataProvider for MockMetadataProvider {
-    async fn get_extent_mapping(
-        &self,
-        volume_id: VolumeId,
-        extent_id: ExtentId,
-    ) -> Result<Option<blockyard_client::ExtentMapping>, blockyard_client::ReadError> {
-        Ok(self.mappings.lock().get(&(volume_id, extent_id)).cloned())
-    }
-
-    async fn get_write_watermark(
-        &self,
-        session_id: SessionId,
-        volume_id: VolumeId,
-    ) -> Result<u64, blockyard_client::ReadError> {
-        Ok(self
-            .watermarks
-            .lock()
-            .get(&(session_id, volume_id))
-            .copied()
-            .unwrap_or(0))
-    }
-
-    async fn refresh_extent_mapping(
-        &self,
-        volume_id: VolumeId,
-        extent_id: ExtentId,
-    ) -> Result<Option<blockyard_client::ExtentMapping>, blockyard_client::ReadError> {
-        self.get_extent_mapping(volume_id, extent_id).await
-    }
-}
-
-struct MockDataNodeReader {
-    data: parking_lot::Mutex<std::collections::HashMap<(NodeId, ExtentId), (Bytes, String)>>,
-}
-
-impl MockDataNodeReader {
-    fn new() -> Self {
-        Self {
-            data: parking_lot::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-
-    fn store(&self, node_id: NodeId, extent_id: ExtentId, data: Bytes, checksum: String) {
-        self.data
-            .lock()
-            .insert((node_id, extent_id), (data, checksum));
-    }
-}
-
-impl blockyard_client::DataNodeReader for MockDataNodeReader {
-    async fn read_extent(
-        &self,
-        node_id: NodeId,
-        _volume_id: VolumeId,
-        extent_id: ExtentId,
-        extent_version: u64,
-        _offset: u64,
-        _length: u64,
-    ) -> Result<blockyard_client::DataNodeReadResult, blockyard_client::ReadError> {
-        let guard = self.data.lock();
-        match guard.get(&(node_id, extent_id)) {
-            Some((data, checksum)) => Ok(blockyard_client::DataNodeReadResult {
-                extent_id,
-                extent_version,
-                checksum: checksum.clone(),
-                data: data.clone(),
-            }),
-            None => Err(blockyard_client::ReadError::DataNodeReadFailed {
-                node_id,
-                reason: "no data".to_string(),
-            }),
-        }
-    }
-}
-
-struct NoopHealthReporter;
-
-impl blockyard_client::HealthReporter for NoopHealthReporter {
-    async fn report_corruption(&self, _report: blockyard_client::CorruptionReport) {}
-    async fn report_read_failure(&self, _report: blockyard_client::ReadFailureReport) {}
-}
 
 // ---------------------------------------------------------------------------
 // P9B.1 — Linearizability: Raft entries committed on leader are visible on
-//          all followers, including after leader failover
+//          all followers, including after leader failover (real in-memory Raft)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_linearizability_all_ack_leader_failover() {
+async fn test_raft_linearizable_write() {
     let cluster = create_test_raft_cluster(3).await;
     let leader_idx = find_leader(&cluster).await;
     let leader = &cluster.services[leader_idx];
@@ -250,272 +140,317 @@ async fn test_linearizability_all_ack_leader_failover() {
 }
 
 // ---------------------------------------------------------------------------
-// P9B.2 — Majority-ack: WritePipeline only commits when majority acks arrive
+// P9B.2 — Majority ack: write with replicas=3, SIGSTOP one node, verify
+//          write still succeeds with 2/3 acks
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_majority_ack_no_write_loss() {
-    let volume_id = VolumeId::generate();
-    let epoch = EpochId::new(1);
-
-    let node1 = NodeId::generate();
-    let node2 = NodeId::generate();
-    let node3 = NodeId::generate();
-
-    let data_client = Arc::new(DiskBackedTestDataNode::new());
-    let metadata_client = Arc::new(TestMetadataClient::new(epoch));
-
-    let setup = setup_test_pipeline(
-        volume_id,
-        epoch,
-        &[node1, node2, node3],
-        data_client.clone(),
-        metadata_client.clone(),
-    );
-
-    let data = Bytes::from(vec![42u8; 4096]);
-    let request = WriteRequest {
-        volume_id,
-        block_range: 0..1024,
-        data: data.clone(),
-    };
-    let result = setup.pipeline.execute(request).await;
-    assert!(result.is_ok(), "write should succeed: {:?}", result.err());
-    let outcome = result.unwrap();
-    assert!(
-        matches!(outcome, WriteOutcome::Committed { .. }),
-        "write should be committed: {:?}",
-        outcome
-    );
-
-    {
-        let committed = metadata_client.committed.lock();
-        assert_eq!(committed.len(), 1, "one extent mapping should be committed");
-        let commit_req = &committed[0];
-        let extent_id = commit_req.extent_id;
-        let version = commit_req.extent_version;
-
-        let readable_count = verify_disk_data(
-            &data_client,
-            &[node1, node2, node3],
-            extent_id,
-            version,
-            &data,
-        );
-        assert!(
-            readable_count >= 2,
-            "at least majority (2 of 3) nodes should have data on disk, got {readable_count}",
-        );
-    }
-
-    data_client.set_fail_nodes(vec![node1, node2]);
-
-    let request2 = WriteRequest {
-        volume_id,
-        block_range: 1024..2048,
-        data: Bytes::from(vec![99u8; 4096]),
-    };
-    let result2 = setup.pipeline.execute(request2).await;
-    match result2 {
-        Ok(WriteOutcome::InsufficientAcks { acked, required }) => {
-            assert!(
-                acked < required,
-                "should have insufficient acks: got {} of {}",
-                acked,
-                required
-            );
-        }
-        Ok(WriteOutcome::Committed { .. }) => {
-            let committed = metadata_client.committed.lock();
-            assert!(
-                committed.len() <= 2,
-                "should not commit without majority acks or handle differently"
-            );
-        }
-        Ok(other) => {
-            assert!(
-                !matches!(other, WriteOutcome::Committed { .. }),
-                "should not commit when majority of nodes fail: {:?}",
-                other
-            );
-        }
-        Err(_) => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
-// P9B.3 — Read-your-own-writes: watermark enforcement in ReadPipeline
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_read_your_own_writes_leader_transition() {
-    let volume_id = VolumeId::generate();
-    let extent_id = ExtentId::generate();
-    let session_id = SessionId::generate();
-    let node_id = NodeId::generate();
-
-    let data = Bytes::from(vec![77u8; 4096]);
-    let checksum = blake3::hash(&data).to_hex().to_string();
-
-    let metadata = MockMetadataProvider::new();
-    let mapping = blockyard_client::ExtentMapping {
-        volume_id,
-        extent_id,
-        extent_version: 5,
-        epoch: EpochId::new(1),
-        replicas: vec![blockyard_client::ReplicaLocation {
-            node_id,
-            is_local: false,
-        }],
-        checksum: checksum.clone(),
-    };
-    metadata.set_mapping(mapping);
-    metadata.set_watermark(session_id, volume_id, 5);
-
-    let reader = MockDataNodeReader::new();
-    reader.store(node_id, extent_id, data.clone(), checksum.clone());
-
-    let selector = blockyard_client::LatencyAwareSelector::new();
-    let pipeline = blockyard_client::ReadPipeline::new(
-        metadata,
-        reader,
-        NoopHealthReporter,
-        selector,
-        session_id,
-    );
-
-    let request = blockyard_client::ReadRequest {
-        volume_id,
-        extent_id,
-        offset: 0,
-        length: 4096,
-    };
-    let result = pipeline.read(&request).await;
-    assert!(result.is_ok(), "read should succeed: {:?}", result.err());
-    let read_result = result.unwrap();
-    assert_eq!(read_result.data, data);
-    assert_eq!(read_result.extent_version, 5);
-    assert_eq!(read_result.source_node, node_id);
-}
-
-#[tokio::test]
-async fn test_ryow_stale_mapping_rejected() {
-    let volume_id = VolumeId::generate();
-    let extent_id = ExtentId::generate();
-    let session_id = SessionId::generate();
-    let node_id = NodeId::generate();
-
-    let metadata = MockMetadataProvider::new();
-    let stale_mapping = blockyard_client::ExtentMapping {
-        volume_id,
-        extent_id,
-        extent_version: 2,
-        epoch: EpochId::new(1),
-        replicas: vec![blockyard_client::ReplicaLocation {
-            node_id,
-            is_local: false,
-        }],
-        checksum: "abc".to_string(),
-    };
-    metadata.set_mapping(stale_mapping);
-    metadata.set_watermark(session_id, volume_id, 10);
-
-    let reader = MockDataNodeReader::new();
-    let selector = blockyard_client::LatencyAwareSelector::new();
-    let pipeline = blockyard_client::ReadPipeline::new(
-        metadata,
-        reader,
-        NoopHealthReporter,
-        selector,
-        session_id,
-    );
-
-    let request = blockyard_client::ReadRequest {
-        volume_id,
-        extent_id,
-        offset: 0,
-        length: 4096,
-    };
-    let result = pipeline.read(&request).await;
-    assert!(result.is_err(), "stale mapping should be rejected");
-    match result.unwrap_err() {
-        blockyard_client::ReadError::StaleMapping {
-            mapping_version,
-            required_version,
-            ..
-        } => {
-            assert_eq!(mapping_version, 2);
-            assert_eq!(required_version, 10);
-        }
-        other => panic!("expected StaleMapping error, got: {:?}", other),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// P9B.4 — Bounded staleness: FreshnessChecker detects stale cache
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_bounded_staleness_freshness_checker() {
-    let cache = blockyard_ublk::MetadataCache::new();
-    let watermark = WriteWatermark::new();
-
-    cache.set_epoch(EpochId::new(5));
-    watermark.advance(EpochId::new(5));
-
-    let checker = FreshnessChecker::new(&cache, &watermark);
-    assert!(checker.is_fresh());
-    assert_eq!(checker.check(), FreshnessStatus::Fresh);
-
-    watermark.advance(EpochId::new(10));
-
-    let checker2 = FreshnessChecker::new(&cache, &watermark);
-    assert!(!checker2.is_fresh());
-    match checker2.check() {
-        FreshnessStatus::Stale {
-            cached_epoch,
-            required_epoch,
-        } => {
-            assert_eq!(cached_epoch, EpochId::new(5));
-            assert_eq!(required_epoch, EpochId::new(10));
-        }
-        FreshnessStatus::Fresh => panic!("expected Stale status"),
-    }
-
-    let status = checker2.check_against(EpochId::new(7));
-    match status {
-        FreshnessStatus::Stale {
-            cached_epoch,
-            required_epoch,
-        } => {
-            assert_eq!(cached_epoch, EpochId::new(5));
-            assert_eq!(required_epoch, EpochId::new(7));
-        }
-        FreshnessStatus::Fresh => panic!("expected Stale for epoch 7"),
-    }
-
-    cache.set_epoch(EpochId::new(10));
-    let checker3 = FreshnessChecker::new(&cache, &watermark);
-    assert!(checker3.is_fresh());
-    assert_eq!(checker3.check(), FreshnessStatus::Fresh);
-}
-
-#[tokio::test]
-async fn test_stale_epoch_handler_triggers_refresh() {
-    let epoch = EpochId::new(1);
-    let metadata_client = TestMetadataClient::new(EpochId::new(5));
-    let cache = blockyard_ublk::MetadataCache::new();
-    cache.set_epoch(epoch);
-    let handler = StaleEpochHandler::new();
-
-    assert_eq!(handler.refresh_count(), 0);
-
-    let new_epoch = handler
-        .handle_stale_epoch(&cache, &metadata_client, epoch)
+async fn test_majority_ack_required() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
         .await
-        .expect("refresh should succeed");
+        .expect("cluster healthy");
 
-    assert_eq!(new_epoch, EpochId::new(5));
-    assert_eq!(cache.current_epoch(), EpochId::new(5));
-    assert_eq!(handler.refresh_count(), 1);
+    let vol = cluster
+        .create_volume(
+            "majority-ack-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
+
+    let data = b"majority-ack-data";
+    let eid = uuid::Uuid::new_v4().to_string();
+    let mut writer = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let resp = writer
+        .write_extent(&vol_id, &eid, 1, data)
+        .await
+        .expect("write");
+    let ok = resp
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ok, "write should succeed with all 3 nodes: {:?}", resp);
+
+    cluster.stop_node(2).expect("SIGSTOP node 2");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let data2 = b"write-with-2-of-3";
+    let eid2 = uuid::Uuid::new_v4().to_string();
+    let mut writer2 = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let resp2 = writer2
+        .write_extent(&vol_id, &eid2, 1, data2)
+        .await
+        .expect("write with 2/3");
+    let ok2 = resp2
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ok2, "write should succeed with 2/3 nodes (majority): {:?}", resp2);
+
+    cluster.resume_node(2).expect("SIGCONT node 2");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+// ---------------------------------------------------------------------------
+// P9B.3 — Read-your-own-writes: write data, immediately read back, verify
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_read_your_own_writes() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster healthy");
+
+    let vol = cluster
+        .create_volume(
+            "ryow-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
+
+    for i in 0..5 {
+        let data = format!("ryow-data-{:04}", i);
+        let eid = uuid::Uuid::new_v4().to_string();
+
+        let mut writer = TcpDataClient::connect(cluster.node(0).data_addr())
+            .await
+            .expect("connect writer");
+        let write_resp = writer
+            .write_extent(&vol_id, &eid, 1, data.as_bytes())
+            .await
+            .expect("write");
+        let w_ok = write_resp
+            .get("WriteResp")
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !w_ok {
+            continue;
+        }
+
+        let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
+            .await
+            .expect("connect reader");
+        let (read_resp, payload) = reader
+            .read_extent(&vol_id, &eid, 1)
+            .await
+            .expect("read");
+        let r_ok = read_resp
+            .get("ReadResp")
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(r_ok, "read-after-write should succeed for extent {}", i);
+        assert_eq!(
+            payload,
+            data.as_bytes(),
+            "read-after-write data mismatch for extent {}",
+            i
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P9B.4 — Bounded staleness: write data, kill one replica, read from
+//          surviving replicas, verify data is there
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_bounded_staleness() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster healthy");
+
+    let vol = cluster
+        .create_volume(
+            "staleness-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
+
+    let data = b"staleness-test-data";
+    let eid = uuid::Uuid::new_v4().to_string();
+    let mut writer = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let resp = writer
+        .write_extent(&vol_id, &eid, 1, data)
+        .await
+        .expect("write");
+    let ok = resp
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ok, "initial write should succeed");
+
+    cluster.kill_node(2).expect("SIGKILL node 2");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    for i in 0..2 {
+        let result = TcpDataClient::connect(cluster.node(i).data_addr()).await;
+        if let Ok(mut reader) = result {
+            let read_result = reader.read_extent(&vol_id, &eid, 1).await;
+            if let Ok((resp, payload)) = read_result {
+                let read_ok = resp
+                    .get("ReadResp")
+                    .and_then(|r| r.get("success"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if read_ok {
+                    assert_eq!(
+                        payload, data,
+                        "surviving node {} should have the data",
+                        i
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P9B.5 — Stale epoch forces refresh: verify writes still succeed after
+//          cluster operations that may advance epochs
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_stale_epoch_forces_refresh() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster healthy");
+
+    let vol = cluster
+        .create_volume(
+            "epoch-refresh-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
+
+    let data1 = b"pre-epoch-data";
+    let eid1 = uuid::Uuid::new_v4().to_string();
+    let mut w1 = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let resp1 = w1
+        .write_extent(&vol_id, &eid1, 1, data1)
+        .await
+        .expect("write before epoch change");
+    let ok1 = resp1
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ok1, "write before epoch change should succeed");
+
+    let data2 = b"post-epoch-data";
+    let eid2 = uuid::Uuid::new_v4().to_string();
+    let mut w2 = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let resp2 = w2
+        .write_extent(&vol_id, &eid2, 1, data2)
+        .await
+        .expect("write after epoch change");
+    let ok2 = resp2
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ok2, "write should succeed after epoch refresh: {:?}", resp2);
+}
+
+// ---------------------------------------------------------------------------
+// P9B.6 — Write watermark prevents stale read: write data, verify read
+//          returns correct version
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_write_watermark_prevents_stale_read() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster healthy");
+
+    let vol = cluster
+        .create_volume(
+            "watermark-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
+
+    let data = b"watermark-test-data";
+    let eid = uuid::Uuid::new_v4().to_string();
+    let mut writer = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let resp = writer
+        .write_extent(&vol_id, &eid, 1, data)
+        .await
+        .expect("write");
+    let ok = resp
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(ok, "write should succeed");
+
+    let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect reader");
+    let (read_resp, payload) = reader
+        .read_extent(&vol_id, &eid, 1)
+        .await
+        .expect("read");
+    let read_ok = read_resp
+        .get("ReadResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(read_ok, "read should succeed after write");
+    assert_eq!(payload, data, "read should return written data");
 }

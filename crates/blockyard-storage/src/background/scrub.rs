@@ -697,4 +697,79 @@ mod tests {
         assert_eq!(results[0].checksum_errors, 1);
         assert_eq!(results[0].read_errors, 1);
     }
+
+    #[tokio::test]
+    async fn test_scrub_metrics_recorded() {
+        use blockyard_common::metrics::{record_scrub_finding, set_scrub_last_completed};
+        use blockyard_common::{
+            InMemoryRecorder, Labels, SCRUB_FINDINGS_TOTAL, SCRUB_LAST_COMPLETED_TIMESTAMP,
+        };
+
+        let recorder = InMemoryRecorder::new();
+        let node_id_str = "node-scrub-1";
+        let disk_id = DiskId::generate();
+        let disk_id_str = disk_id.to_string();
+
+        let eid_ok = ExtentId::generate();
+        let eid_corrupt = ExtentId::generate();
+        let eid_bad_read = ExtentId::generate();
+
+        let reader = FakeExtentReader::new()
+            .with_disk(disk_id)
+            .with_extent(
+                ScrubExtentEntry {
+                    extent_id: eid_ok,
+                    disk_id,
+                    expected_checksum: "good".to_string(),
+                    version: 1,
+                },
+                Ok((vec![1, 2, 3], "good".to_string())),
+            )
+            .with_extent(
+                ScrubExtentEntry {
+                    extent_id: eid_corrupt,
+                    disk_id,
+                    expected_checksum: "expected".to_string(),
+                    version: 1,
+                },
+                Ok((vec![9, 9, 9], "actual_bad".to_string())),
+            )
+            .with_extent(
+                ScrubExtentEntry {
+                    extent_id: eid_bad_read,
+                    disk_id,
+                    expected_checksum: "abc".to_string(),
+                    version: 1,
+                },
+                Err("io error".to_string()),
+            );
+
+        let worker = ScrubWorker::new(ScrubConfig::default());
+        let rate_limiter = TokenBucket::new(1000, 1000);
+        let (tx, _rx) = mpsc::channel(100);
+
+        let results = worker.scrub_pass(&reader, &rate_limiter, &tx).await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].extents_checked, 3);
+
+        let total_findings = results[0].checksum_errors + results[0].read_errors;
+        for _ in 0..total_findings {
+            record_scrub_finding(&recorder, node_id_str, &disk_id_str);
+        }
+        let now_ts = 1700000000.0;
+        set_scrub_last_completed(&recorder, node_id_str, &disk_id_str, now_ts);
+
+        let scrub_labels =
+            Labels::from_pairs(&[("node_id", node_id_str), ("disk_id", &disk_id_str)]);
+        assert_eq!(
+            recorder.counter(SCRUB_FINDINGS_TOTAL, &scrub_labels),
+            total_findings,
+            "scrub findings counter should match checksum + read errors"
+        );
+        assert_eq!(
+            recorder.gauge(SCRUB_LAST_COMPLETED_TIMESTAMP, &scrub_labels),
+            Some(now_ts),
+            "scrub last completed timestamp should be set"
+        );
+    }
 }

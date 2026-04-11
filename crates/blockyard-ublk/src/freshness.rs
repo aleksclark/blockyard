@@ -221,4 +221,49 @@ mod tests {
             FreshnessStatus::Fresh
         );
     }
+
+    #[test]
+    fn test_bounded_staleness_freshness_checker() {
+        let cache = MetadataCache::new();
+        let watermark = WriteWatermark::new();
+
+        cache.set_epoch(EpochId::new(5));
+        watermark.advance(EpochId::new(5));
+
+        let checker = FreshnessChecker::new(&cache, &watermark);
+        assert!(checker.is_fresh());
+        assert_eq!(checker.check(), FreshnessStatus::Fresh);
+
+        watermark.advance(EpochId::new(10));
+
+        let checker2 = FreshnessChecker::new(&cache, &watermark);
+        assert!(!checker2.is_fresh());
+        match checker2.check() {
+            FreshnessStatus::Stale {
+                cached_epoch,
+                required_epoch,
+            } => {
+                assert_eq!(cached_epoch, EpochId::new(5));
+                assert_eq!(required_epoch, EpochId::new(10));
+            }
+            FreshnessStatus::Fresh => panic!("expected Stale status"),
+        }
+
+        let status = checker2.check_against(EpochId::new(7));
+        match status {
+            FreshnessStatus::Stale {
+                cached_epoch,
+                required_epoch,
+            } => {
+                assert_eq!(cached_epoch, EpochId::new(5));
+                assert_eq!(required_epoch, EpochId::new(7));
+            }
+            FreshnessStatus::Fresh => panic!("expected Stale for epoch 7"),
+        }
+
+        cache.set_epoch(EpochId::new(10));
+        let checker3 = FreshnessChecker::new(&cache, &watermark);
+        assert!(checker3.is_fresh());
+        assert_eq!(checker3.check(), FreshnessStatus::Fresh);
+    }
 }

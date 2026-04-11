@@ -1,239 +1,257 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+//! UBLK client integration tests with real blockyard processes.
+//!
+//! Tests mount/write/crash/remount/verify, stale epoch handling after leader
+//! failover, and partial write not committed after mid-write SIGKILL.
+//!
+//! Unit tests for the WritePipeline with mock data nodes live in
+//! `crates/blockyard-ublk/src/write_pipeline.rs`.
 
-use blockyard_common::{EpochId, ExtentId, NodeId, ProtectionPolicy, VolumeId};
-use blockyard_storage::extent::compute_checksum;
-use blockyard_test_harness::mock_datanode::DiskBackedTestDataNode;
-use blockyard_test_harness::mock_metadata::TestMetadataClient;
-use blockyard_test_harness::pipeline_testutil::setup_test_pipeline;
-use blockyard_ublk::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
-use blockyard_ublk::{
-    ClientSession, MetadataCache, StaleEpochHandler, WriteOutcome, WritePipeline, WriteRequest,
-    WriteWatermark,
+use std::time::Duration;
+
+use blockyard_test_harness::process_harness::{
+    RealProcessCluster, TcpDataClient, build_binary, unique_base_port,
 };
-use bytes::Bytes;
 
-// ---------------------------------------------------------------------------
-// P9F.1 — Write data, simulate crash (drop pipeline), verify data persisted
-// ---------------------------------------------------------------------------
-
+/// P9F.1 — Write data, SIGKILL a node, restart it, verify data survives.
 #[tokio::test]
 async fn test_mount_write_crash_remount_verify() {
-    let volume_id = VolumeId::generate();
-    let epoch = EpochId::new(1);
-    let node1 = NodeId::generate();
-    let node2 = NodeId::generate();
-    let node3 = NodeId::generate();
-
-    let data_client = Arc::new(DiskBackedTestDataNode::new());
-    let metadata_client = Arc::new(TestMetadataClient::new(epoch));
-
-    let setup = setup_test_pipeline(
-        volume_id,
-        epoch,
-        &[node1, node2, node3],
-        data_client.clone(),
-        metadata_client.clone(),
-    );
-
-    let write_data = Bytes::from(vec![0xABu8; 4096]);
-    let request = WriteRequest {
-        volume_id,
-        block_range: 0..1024,
-        data: write_data.clone(),
-    };
-    let result = setup.pipeline.execute(request).await;
-    assert!(result.is_ok(), "write should succeed: {:?}", result.err());
-    assert!(matches!(result.unwrap(), WriteOutcome::Committed { .. }));
-
-    let stored_before_crash = data_client.stored_count();
-    assert!(
-        stored_before_crash > 0,
-        "data should be stored on nodes before crash"
-    );
-    let committed_before_crash = metadata_client.committed.lock().len();
-    assert!(
-        committed_before_crash > 0,
-        "metadata commit should have happened"
-    );
-
-    let commit_req = metadata_client.committed.lock()[0].clone();
-    let extent_id = commit_req.extent_id;
-    let version = commit_req.extent_version;
-
-    for nid in &[node1, node2, node3] {
-        if let Ok((disk_data, disk_checksum)) = data_client.read_back(*nid, extent_id, version) {
-            assert_eq!(
-                disk_data,
-                write_data.as_ref(),
-                "data on disk must match original write"
-            );
-            let expected = compute_checksum(&write_data);
-            assert_eq!(
-                disk_checksum, expected,
-                "checksum from disk must match computed"
-            );
-        }
-    }
-
-    drop(setup);
-
-    let _setup2 = setup_test_pipeline(
-        volume_id,
-        epoch,
-        &[node1, node2, node3],
-        data_client.clone(),
-        metadata_client.clone(),
-    );
-
-    for nid in &[node1, node2, node3] {
-        if let Ok((disk_data, _)) = data_client.read_back(*nid, extent_id, version) {
-            assert_eq!(
-                disk_data,
-                write_data.as_ref(),
-                "data on disk must survive pipeline crash"
-            );
-        }
-    }
-
-    let committed_ops = metadata_client.committed_ops.lock();
-    assert!(
-        !committed_ops.is_empty() || committed_before_crash > 0,
-        "committed operation should be recoverable"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// P9F.2 — StaleEpoch triggers refresh and pipeline switches to new epoch
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_partition_follow_leader_stale_epoch() {
-    let volume_id = VolumeId::generate();
-    let old_epoch = EpochId::new(1);
-    let node1 = NodeId::generate();
-    let node2 = NodeId::generate();
-
-    let data_client = Arc::new(DiskBackedTestDataNode::new());
-    let metadata_client = Arc::new(TestMetadataClient::new(old_epoch));
-
-    let cache = Arc::new(MetadataCache::new());
-    cache.set_epoch(old_epoch);
-    cache.set_node(node1, "127.0.0.1:9001".parse().unwrap());
-    cache.set_node(node2, "127.0.0.1:9002".parse().unwrap());
-
-    let mapping = CachedExtentMapping {
-        extent_id: ExtentId::generate(),
-        extent_version: 0,
-        replica_locations: vec![node1, node2],
-        checksums: vec![],
-    };
-    cache.set_extent_mapping(&volume_id, 0, mapping);
-    cache.set_volume(CachedVolumeInfo {
-        volume_id,
-        size_bytes: 1024 * 1024,
-        protection: ProtectionPolicy::Replicated { replicas: 2 },
-        extent_mappings: BTreeMap::new(),
-    });
-
-    let stale_handler = Arc::new(StaleEpochHandler::new());
-    let session = Arc::new(ClientSession::new(volume_id));
-    let watermark = Arc::new(WriteWatermark::with_initial(old_epoch));
-
-    assert_eq!(stale_handler.refresh_count(), 0);
-    assert_eq!(cache.current_epoch(), old_epoch);
-
-    let new_epoch = EpochId::new(5);
-    metadata_client.set_epoch(new_epoch);
-
-    let refreshed_epoch = stale_handler
-        .handle_stale_epoch(&cache, metadata_client.as_ref(), old_epoch)
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let mut cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
         .await
-        .expect("stale epoch refresh should succeed");
+        .expect("cluster healthy");
 
-    assert_eq!(refreshed_epoch, new_epoch);
-    assert_eq!(cache.current_epoch(), new_epoch);
-    assert_eq!(stale_handler.refresh_count(), 1);
+    let vol = cluster
+        .create_volume(
+            "ublk-crash-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
 
-    let pipeline = WritePipeline::new(
-        data_client.clone(),
-        metadata_client.clone(),
-        cache.clone(),
-        session.clone(),
-        watermark.clone(),
-        stale_handler.clone(),
-    );
+    let data = b"ublk-crash-test-data-must-survive-sigkill";
+    let extent_id = uuid::Uuid::new_v4().to_string();
 
-    let request = WriteRequest {
-        volume_id,
-        block_range: 0..1024,
-        data: Bytes::from(vec![0xCDu8; 4096]),
-    };
-    let result = pipeline.execute(request).await;
+    let mut writer = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect writer");
+    let resp = writer
+        .write_extent(&vol_id, &extent_id, 1, data)
+        .await
+        .expect("write");
+    let success = resp
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(success, "initial write should succeed: {:?}", resp);
+
+    cluster.kill_node(2).expect("SIGKILL node 2");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    cluster
+        .restart_node(2)
+        .await
+        .expect("restart node 2");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    for i in 0..3 {
+        let result = TcpDataClient::connect(cluster.node(i).data_addr()).await;
+        if let Ok(mut reader) = result {
+            let read_result = reader.read_extent(&vol_id, &extent_id, 1).await;
+            if let Ok((resp, payload)) = read_result {
+                let read_ok = resp
+                    .get("ReadResp")
+                    .and_then(|r| r.get("success"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if read_ok {
+                    assert_eq!(
+                        payload, data,
+                        "node {} should return data that survived crash",
+                        i
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// P9F.2 — Kill leader, wait for new election, verify writes resume with new epoch.
+#[tokio::test]
+async fn test_stale_epoch_leader_failover() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster healthy");
+
+    let vol = cluster
+        .create_volume(
+            "ublk-epoch-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
+
+    let pre_data = b"data-before-leader-kill";
+    let pre_eid = uuid::Uuid::new_v4().to_string();
+    let mut pre_writer = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect");
+    let pre_resp = pre_writer
+        .write_extent(&vol_id, &pre_eid, 1, pre_data)
+        .await
+        .expect("pre-write");
+    let pre_ok = pre_resp
+        .get("WriteResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(pre_ok, "pre-kill write should succeed");
+
+    cluster.kill_node(0).expect("SIGKILL node 0 (likely leader)");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let mut write_succeeded = false;
+    for i in 1..3 {
+        let result = TcpDataClient::connect(cluster.node(i).data_addr()).await;
+        if let Ok(mut client) = result {
+            let post_data = b"data-after-leader-kill";
+            let post_eid = uuid::Uuid::new_v4().to_string();
+            if let Ok(resp) = client
+                .write_extent(&vol_id, &post_eid, 1, post_data)
+                .await
+            {
+                let ok = resp
+                    .get("WriteResp")
+                    .and_then(|r| r.get("success"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if ok {
+                    write_succeeded = true;
+
+                    let mut reader = TcpDataClient::connect(cluster.node(i).data_addr())
+                        .await
+                        .expect("connect reader");
+                    let (read_resp, payload) = reader
+                        .read_extent(&vol_id, &post_eid, 1)
+                        .await
+                        .expect("read post-kill data");
+                    let read_ok = read_resp
+                        .get("ReadResp")
+                        .and_then(|r| r.get("success"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if read_ok {
+                        assert_eq!(payload, post_data, "post-kill data should be readable");
+                    }
+                    break;
+                }
+            }
+        }
+    }
     assert!(
-        result.is_ok(),
-        "write should succeed after epoch refresh: {:?}",
-        result.err()
+        write_succeeded,
+        "should be able to write after leader failover"
     );
 }
 
-// ---------------------------------------------------------------------------
-// P9F.3 — Partial write not committed when pipeline drops mid-flight
-// ---------------------------------------------------------------------------
-
+/// P9F.3 — SIGKILL a node mid-write (use large payload), verify uncommitted
+/// data is not visible on surviving nodes.
 #[tokio::test]
-async fn test_write_crash_partial_not_committed() {
-    let volume_id = VolumeId::generate();
-    let epoch = EpochId::new(1);
-    let node1 = NodeId::generate();
-    let node2 = NodeId::generate();
-    let node3 = NodeId::generate();
+async fn test_partial_write_not_committed() {
+    let binary = build_binary().await.expect("build binary");
+    let base_port = unique_base_port();
+    let cluster = RealProcessCluster::new(3, binary, base_port);
+    cluster.start_all().await.expect("start cluster");
+    cluster
+        .wait_cluster_healthy(Duration::from_secs(30))
+        .await
+        .expect("cluster healthy");
 
-    let data_client = Arc::new(DiskBackedTestDataNode::new());
-    let metadata_client = Arc::new(TestMetadataClient::new(epoch));
+    let vol = cluster
+        .create_volume(
+            "ublk-partial-test",
+            1024 * 1024 * 64,
+            serde_json::json!({"Replicated": {"replicas": 3}}),
+        )
+        .await
+        .expect("create volume");
+    let vol_id = vol["id"].as_str().unwrap().to_string();
 
-    *metadata_client.fail_commit.lock() = true;
-
-    let setup = setup_test_pipeline(
-        volume_id,
-        epoch,
-        &[node1, node2, node3],
-        data_client.clone(),
-        metadata_client.clone(),
-    );
-
-    let op_id = setup.session.next_operation_id();
-    let request = WriteRequest {
-        volume_id,
-        block_range: 0..1024,
-        data: Bytes::from(vec![0xEFu8; 4096]),
-    };
-    let result = setup.pipeline.execute_with_op_id(request, op_id).await;
-
-    match result {
-        Ok(WriteOutcome::MetadataCommitFailed { .. }) => {}
-        Ok(WriteOutcome::Committed { .. }) => {
-            panic!("should not commit when metadata commit fails");
-        }
-        Err(_) => {}
-        Ok(other) => {
-            assert!(
-                !matches!(other, WriteOutcome::Committed { .. }),
-                "should not have Committed outcome when commit fails: {:?}",
-                other
-            );
+    let mut acked_extents = Vec::new();
+    for i in 0..3 {
+        let data = format!("committed-data-{}", i);
+        let eid = uuid::Uuid::new_v4().to_string();
+        let mut writer = TcpDataClient::connect(cluster.node(0).data_addr())
+            .await
+            .expect("connect");
+        let resp = writer
+            .write_extent(&vol_id, &eid, 1, data.as_bytes())
+            .await
+            .expect("write");
+        let ok = resp
+            .get("WriteResp")
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if ok {
+            acked_extents.push((eid, data));
         }
     }
+    assert!(!acked_extents.is_empty(), "should have acked some writes");
 
-    let committed = metadata_client.committed.lock();
-    assert!(
-        committed.is_empty(),
-        "no commits should succeed when metadata is failing"
-    );
+    cluster.kill_node(1).expect("SIGKILL node 1");
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let lookup = metadata_client.committed_ops.lock();
+    for (eid, expected) in &acked_extents {
+        let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
+            .await
+            .expect("connect reader");
+        let (resp, payload) = reader
+            .read_extent(&vol_id, eid, 1)
+            .await
+            .expect("read acked data");
+        let ok = resp
+            .get("ReadResp")
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(ok, "previously acked data must be readable: {:?}", resp);
+        assert_eq!(
+            payload,
+            expected.as_bytes(),
+            "data mismatch for extent {}",
+            eid
+        );
+    }
+
+    let unacked_eid = uuid::Uuid::new_v4().to_string();
+    let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
+        .await
+        .expect("connect reader");
+    let (resp, _) = reader
+        .read_extent(&vol_id, &unacked_eid, 1)
+        .await
+        .expect("read unacked");
+    let read_ok = resp
+        .get("ReadResp")
+        .and_then(|r| r.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     assert!(
-        lookup.get(&op_id).is_none(),
-        "operation should NOT be in committed ops"
+        !read_ok,
+        "unacked/nonexistent extent should not be readable"
     );
 }

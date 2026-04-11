@@ -281,4 +281,26 @@ mod tests {
         let debug = format!("{:?}", handler);
         assert!(debug.contains("StaleEpochHandler"));
     }
+
+    #[tokio::test]
+    async fn test_stale_epoch_handler_triggers_refresh_from_old_epoch() {
+        let handler = StaleEpochHandler::new();
+        let cache = MetadataCache::new();
+        cache.set_epoch(EpochId::new(1));
+        let client = MockMetadataClient {
+            new_epoch: EpochId::new(5),
+            should_fail: false,
+        };
+
+        assert_eq!(handler.refresh_count(), 0);
+
+        let new_epoch = handler
+            .handle_stale_epoch(&cache, &client, EpochId::new(1))
+            .await
+            .expect("refresh should succeed");
+
+        assert_eq!(new_epoch, EpochId::new(5));
+        assert_eq!(cache.current_epoch(), EpochId::new(5));
+        assert_eq!(handler.refresh_count(), 1);
+    }
 }

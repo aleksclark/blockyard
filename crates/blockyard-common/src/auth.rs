@@ -801,4 +801,50 @@ mod tests {
         assert!(SharedSecretAuth::new("12345678").is_ok());
         assert!(SharedSecretAuth::new("1234567").is_err());
     }
+
+    #[test]
+    fn test_auth_full_flow_with_volume_acl() {
+        let auth = SharedSecretAuth::new("full-flow-integration-key").unwrap();
+        let acl = VolumeAcl::new();
+
+        let vol1 = VolumeId::generate();
+        let vol2 = VolumeId::generate();
+        let session = SessionId::generate();
+        let identity = PeerIdentity::Client(session);
+
+        let token = auth.create_token(&identity, 300_000).unwrap();
+
+        let validated_identity = auth.validate_token(&token).expect("token should be valid");
+        assert_eq!(validated_identity, identity);
+
+        acl.grant(
+            vol1,
+            &validated_identity.to_string(),
+            VolumePermission::read_write(),
+        );
+        acl.grant(
+            vol2,
+            &validated_identity.to_string(),
+            VolumePermission::read_only(),
+        );
+
+        assert!(acl.check_read(&vol1, &validated_identity));
+        assert!(acl.check_write(&vol1, &validated_identity));
+
+        assert!(acl.check_read(&vol2, &validated_identity));
+        assert!(!acl.check_write(&vol2, &validated_identity));
+
+        let other_vol = VolumeId::generate();
+        assert!(
+            !acl.check_read(&other_vol, &validated_identity),
+            "should not have access to ungranted volume"
+        );
+
+        let other_auth = SharedSecretAuth::new("different-secret-key-999").unwrap();
+        let result = other_auth.validate_token(&token);
+        assert!(
+            result.is_err(),
+            "token from different auth provider should be rejected"
+        );
+    }
 }

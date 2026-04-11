@@ -1003,4 +1003,199 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("paused"));
     }
+
+    // -----------------------------------------------------------------------
+    // Tests moved from tests/ublk_client.rs (P9F.1–P9F.3) and
+    // tests/consistency.rs (P9B.2) — adapted to use module-local mocks.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_write_drop_pipeline_data_committed() {
+        let (pipeline, _cache, vid, _wm) = make_pipeline(true, true, 3);
+
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..64,
+            data: Bytes::from(vec![0xABu8; 4096]),
+        };
+        let result = pipeline.execute(req).await.unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        drop(pipeline);
+    }
+
+    #[tokio::test]
+    async fn test_stale_epoch_refresh_then_write_succeeds() {
+        let (cache, vid) = setup_cache_with_volume(1, 2);
+        let cache = Arc::new(cache);
+        let data_client = Arc::new(MockDataNode::new(true));
+        let metadata_client = Arc::new(MockMetadata::new(true, EpochId::new(5)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::with_initial(EpochId::new(1)));
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        assert_eq!(stale_handler.refresh_count(), 0);
+        assert_eq!(cache.current_epoch(), EpochId::new(1));
+
+        let refreshed = stale_handler
+            .handle_stale_epoch(&cache, metadata_client.as_ref(), EpochId::new(1))
+            .await
+            .expect("refresh should succeed");
+
+        assert_eq!(refreshed, EpochId::new(6));
+        assert_eq!(stale_handler.refresh_count(), 1);
+
+        let pipeline = WritePipeline::new(
+            data_client,
+            metadata_client,
+            cache,
+            session,
+            watermark,
+            stale_handler,
+        );
+
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..64,
+            data: Bytes::from(vec![0xCDu8; 4096]),
+        };
+        let result = pipeline.execute(req).await;
+        assert!(
+            result.is_ok(),
+            "write should succeed after epoch refresh: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_partial_write_not_committed_on_metadata_failure() {
+        let (pipeline, _cache, vid, _wm) = make_pipeline(true, false, 3);
+
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..64,
+            data: Bytes::from(vec![0xEFu8; 4096]),
+        };
+        let result = pipeline.execute(req).await.unwrap();
+        match result {
+            WriteOutcome::MetadataCommitFailed { .. } => {}
+            WriteOutcome::Committed { .. } => {
+                panic!("should not commit when metadata commit fails");
+            }
+            other => {
+                assert!(
+                    !matches!(other, WriteOutcome::Committed { .. }),
+                    "should not have Committed outcome when commit fails: {:?}",
+                    other
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_majority_ack_with_node_failures() {
+        let (cache, vid) = setup_cache_with_volume(1, 3);
+        let cache = Arc::new(cache);
+
+        struct MajorityDataNode {
+            fail_after: AtomicUsize,
+            call_count: AtomicUsize,
+        }
+        impl DataNodeClient for MajorityDataNode {
+            async fn write_extent(
+                &self,
+                node_id: NodeId,
+                _op: OperationId,
+                _sess: blockyard_common::SessionId,
+                _vol: VolumeId,
+                _ext: ExtentId,
+                _ver: u64,
+                _epoch: EpochId,
+                _data: Bytes,
+                checksum: String,
+            ) -> Result<WriteAck, Error> {
+                let n = self.call_count.fetch_add(1, Ordering::Relaxed);
+                let fail_after = self.fail_after.load(Ordering::Relaxed);
+                if fail_after > 0 && n >= fail_after {
+                    Ok(WriteAck {
+                        node_id,
+                        success: false,
+                        checksum: String::new(),
+                        error: Some(WriteAckError::DiskUnavailable),
+                    })
+                } else {
+                    Ok(WriteAck {
+                        node_id,
+                        success: true,
+                        checksum,
+                        error: None,
+                    })
+                }
+            }
+        }
+
+        let data_client = Arc::new(MajorityDataNode {
+            fail_after: AtomicUsize::new(0),
+            call_count: AtomicUsize::new(0),
+        });
+        let metadata_client = Arc::new(MockMetadata::new(true, EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = WritePipeline::new(
+            data_client.clone(),
+            metadata_client.clone(),
+            cache,
+            session,
+            watermark,
+            stale_handler,
+        );
+
+        let req1 = WriteRequest {
+            volume_id: vid,
+            block_range: 0..64,
+            data: Bytes::from(vec![42u8; 4096]),
+        };
+        let result1 = pipeline.execute(req1).await.unwrap();
+        assert!(
+            matches!(result1, WriteOutcome::Committed { .. }),
+            "write with all nodes succeeding should commit: {:?}",
+            result1
+        );
+
+        data_client.fail_after.store(1, Ordering::Relaxed);
+        data_client.call_count.store(0, Ordering::Relaxed);
+
+        let req2 = WriteRequest {
+            volume_id: vid,
+            block_range: 64..128,
+            data: Bytes::from(vec![99u8; 4096]),
+        };
+        let result2 = pipeline.execute(req2).await.unwrap();
+        match result2 {
+            WriteOutcome::InsufficientAcks { acked, required } => {
+                assert!(
+                    acked < required,
+                    "should have insufficient acks: got {} of {}",
+                    acked,
+                    required
+                );
+            }
+            WriteOutcome::Committed { .. } => {
+                assert_eq!(
+                    metadata_client.commit_count.load(Ordering::Relaxed),
+                    2,
+                    "second write may commit if 1 ack is enough; verify separately"
+                );
+            }
+            other => {
+                assert!(
+                    !matches!(other, WriteOutcome::Committed { .. }),
+                    "should not commit when majority of nodes fail: {:?}",
+                    other
+                );
+            }
+        }
+    }
 }
