@@ -1352,4 +1352,292 @@ mod tests {
         let c = compute_checksum(b"");
         assert!(!c.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // InMemoryEcDataNode — stores fragment data keyed by (node_id, extent_id, version).
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use parking_lot::Mutex as ParkingMutex;
+
+    struct InMemoryEcDataNode {
+        store: ParkingMutex<HashMap<(NodeId, ExtentId, u64), Vec<u8>>>,
+    }
+
+    impl InMemoryEcDataNode {
+        fn new() -> Self {
+            Self {
+                store: ParkingMutex::new(HashMap::new()),
+            }
+        }
+
+        fn all_fragments_for_extent(
+            &self,
+            extent_id: ExtentId,
+            version: u64,
+        ) -> Vec<(NodeId, Vec<u8>)> {
+            self.store
+                .lock()
+                .iter()
+                .filter(|((_, eid, ver), _)| *eid == extent_id && *ver == version)
+                .map(|((nid, _, _), data)| (*nid, data.clone()))
+                .collect()
+        }
+    }
+
+    impl DataNodeClient for InMemoryEcDataNode {
+        async fn write_extent(
+            &self,
+            node_id: NodeId,
+            _operation_id: OperationId,
+            _session_id: blockyard_common::SessionId,
+            _volume_id: VolumeId,
+            extent_id: ExtentId,
+            extent_version: u64,
+            _epoch: EpochId,
+            data: Bytes,
+            checksum: String,
+        ) -> Result<WriteAck, Error> {
+            self.store
+                .lock()
+                .insert((node_id, extent_id, extent_version), data.to_vec());
+            Ok(WriteAck {
+                node_id,
+                success: true,
+                checksum,
+                error: None,
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // InMemoryEcMetadata — records commits for verification.
+    // -----------------------------------------------------------------------
+
+    struct InMemoryEcMetadata {
+        epoch: EpochId,
+        committed: ParkingMutex<Vec<CommitRequest>>,
+    }
+
+    impl InMemoryEcMetadata {
+        fn new(epoch: EpochId) -> Self {
+            Self {
+                epoch,
+                committed: ParkingMutex::new(Vec::new()),
+            }
+        }
+
+        fn last_commit(&self) -> Option<CommitRequest> {
+            self.committed.lock().last().cloned()
+        }
+    }
+
+    impl MetadataClient for InMemoryEcMetadata {
+        async fn refresh_metadata(
+            &self,
+            cache: &MetadataCache,
+        ) -> Result<EpochId, Error> {
+            let new_epoch = EpochId::new(self.epoch.as_u64() + 1);
+            cache.set_epoch(new_epoch);
+            Ok(new_epoch)
+        }
+
+        async fn commit_extent_mapping(
+            &self,
+            request: CommitRequest,
+        ) -> Result<EpochId, Error> {
+            self.committed.lock().push(request);
+            Ok(self.epoch)
+        }
+
+        async fn lookup_operation(
+            &self,
+            _operation_id: &OperationId,
+        ) -> Result<Option<CommittedMapping>, Error> {
+            Ok(None)
+        }
+
+        async fn current_epoch(&self) -> Result<EpochId, Error> {
+            Ok(self.epoch)
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            let epoch = self.epoch;
+            async move {
+                let _ = requests;
+                Ok(epoch)
+            }
+        }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // EC pipeline roundtrip tests (data integrity through encode/decode).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_ec_write_then_reconstruct() {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let k: u8 = 4;
+        let m: u8 = 2;
+        let num_nodes = (k + m) as usize;
+        let (cache, vid) = setup_ec_cache(1, num_nodes, k, m);
+        let cache = Arc::new(cache);
+        let node_ids: Vec<NodeId> = cache.list_nodes().iter().map(|n| n.node_id).collect();
+
+        let data_client = Arc::new(InMemoryEcDataNode::new());
+        let metadata_client = Arc::new(InMemoryEcMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = EcWritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            Arc::clone(&watermark),
+            stale_handler,
+        );
+
+        let original_data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let result = pipeline
+            .execute(vid, 0..64, Bytes::from(original_data.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        let commit = metadata_client.last_commit().expect("should have a commit");
+        let fragments = data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
+        assert_eq!(
+            fragments.len(),
+            num_nodes,
+            "should have K+M fragments stored"
+        );
+
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
+        for (nid, frag_data) in &fragments {
+            let idx = node_ids.iter().position(|n| n == nid).expect("node should be in list");
+            shards[idx] = Some(frag_data.clone());
+        }
+
+        let rs = ReedSolomon::new(k as usize, m as usize).unwrap();
+        rs.reconstruct(&mut shards).expect("reconstruction must succeed");
+
+        let mut reconstructed = Vec::new();
+        for shard in shards.iter().take(k as usize) {
+            reconstructed.extend_from_slice(shard.as_ref().unwrap());
+        }
+        reconstructed.truncate(original_data.len());
+
+        assert_eq!(
+            reconstructed, original_data,
+            "reconstructed data from EC fragments must match original"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ec_partial_stripe_integrity() {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let k: u8 = 4;
+        let m: u8 = 2;
+        let num_nodes = (k + m) as usize;
+        let (cache, vid) = setup_ec_cache(1, num_nodes, k, m);
+        let cache = Arc::new(cache);
+        let node_ids: Vec<NodeId> = cache.list_nodes().iter().map(|n| n.node_id).collect();
+
+        let data_client = Arc::new(InMemoryEcDataNode::new());
+        let metadata_client = Arc::new(InMemoryEcMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = EcWritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            Arc::clone(&watermark),
+            stale_handler,
+        );
+
+        let existing_stripe = vec![0xAA; 4096];
+        let new_data = vec![0xBB; 100];
+        let stripe_offset = 50;
+
+        let mut expected = existing_stripe.clone();
+        expected[stripe_offset..stripe_offset + new_data.len()].copy_from_slice(&new_data);
+
+        let result = pipeline
+            .partial_stripe_write(
+                vid,
+                0..64,
+                Bytes::from(new_data),
+                Bytes::from(existing_stripe),
+                stripe_offset,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        let commit = metadata_client.last_commit().expect("should have a commit");
+        let fragments = data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
+        assert_eq!(fragments.len(), num_nodes);
+
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
+        for (nid, frag_data) in &fragments {
+            let idx = node_ids.iter().position(|n| n == nid).expect("node should be in list");
+            shards[idx] = Some(frag_data.clone());
+        }
+
+        let rs = ReedSolomon::new(k as usize, m as usize).unwrap();
+        rs.reconstruct(&mut shards).expect("reconstruction must succeed");
+
+        let mut reconstructed = Vec::new();
+        for shard in shards.iter().take(k as usize) {
+            reconstructed.extend_from_slice(shard.as_ref().unwrap());
+        }
+        reconstructed.truncate(expected.len());
+
+        assert_eq!(
+            reconstructed, expected,
+            "partial stripe reconstruction must match expected modified data"
+        );
+    }
 }

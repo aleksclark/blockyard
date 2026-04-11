@@ -1007,4 +1007,441 @@ mod tests {
         let result = handler.handle_io(req).await;
         assert!(result.is_ok());
     }
+
+    // -----------------------------------------------------------------------
+    // InMemoryDataNode — stores data so writes are connected to reads.
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use parking_lot::Mutex;
+
+    struct InMemoryDataNode {
+        store: Mutex<HashMap<(ExtentId, u64), Vec<u8>>>,
+    }
+
+    impl InMemoryDataNode {
+        fn new() -> Self {
+            Self {
+                store: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl DataNodeClient for InMemoryDataNode {
+        async fn write_extent(
+            &self,
+            node_id: NodeId,
+            _operation_id: OperationId,
+            _session_id: SessionId,
+            _volume_id: VolumeId,
+            extent_id: ExtentId,
+            extent_version: u64,
+            _epoch: EpochId,
+            data: Bytes,
+            checksum: String,
+        ) -> Result<WriteAck, Error> {
+            self.store
+                .lock()
+                .insert((extent_id, extent_version), data.to_vec());
+            Ok(WriteAck {
+                node_id,
+                success: true,
+                checksum,
+                error: None,
+            })
+        }
+    }
+
+    impl DataNodeReader for InMemoryDataNode {
+        async fn read_extent(
+            &self,
+            _node_id: NodeId,
+            _volume_id: VolumeId,
+            extent_id: ExtentId,
+            extent_version: u64,
+            offset: u64,
+            length: u64,
+        ) -> Result<DataNodeReadResult, ReadError> {
+            let store = self.store.lock();
+            let data = store
+                .get(&(extent_id, extent_version))
+                .ok_or_else(|| ReadError::DataNodeReadFailed {
+                    node_id: _node_id,
+                    reason: format!("extent {extent_id} v{extent_version} not found"),
+                })?;
+            let start = offset as usize;
+            let end = std::cmp::min(start + length as usize, data.len());
+            let slice = data[start..end].to_vec();
+            let checksum = blockyard_common::checksum::compute_checksum(&slice);
+            Ok(DataNodeReadResult {
+                extent_id,
+                extent_version,
+                checksum,
+                data: Bytes::from(slice),
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // InMemoryMetadata — commits succeed, records operations.
+    // -----------------------------------------------------------------------
+
+    struct InMemoryMetadata {
+        epoch: EpochId,
+        committed_ops:
+            Mutex<HashMap<OperationId, crate::traits::CommittedMapping>>,
+    }
+
+    impl InMemoryMetadata {
+        fn new(epoch: EpochId) -> Self {
+            Self {
+                epoch,
+                committed_ops: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl MetadataClient for InMemoryMetadata {
+        async fn refresh_metadata(&self, cache: &MetadataCache) -> Result<EpochId, Error> {
+            let new_epoch = EpochId::new(self.epoch.as_u64() + 1);
+            cache.set_epoch(new_epoch);
+            Ok(new_epoch)
+        }
+
+        async fn commit_extent_mapping(
+            &self,
+            request: crate::traits::CommitRequest,
+        ) -> Result<EpochId, Error> {
+            if let Some(op_id) = &request.operation_id {
+                let mapping = crate::traits::CommittedMapping {
+                    extent_id: request.extent_id,
+                    extent_version: request.extent_version,
+                    epoch: self.epoch,
+                    block_range: request.block_range.clone(),
+                    replica_locations: request.replica_locations.clone(),
+                    checksums: request.checksums.clone(),
+                };
+                self.committed_ops.lock().insert(*op_id, mapping);
+            }
+            Ok(self.epoch)
+        }
+
+        async fn lookup_operation(
+            &self,
+            operation_id: &OperationId,
+        ) -> Result<Option<crate::traits::CommittedMapping>, Error> {
+            Ok(self.committed_ops.lock().get(operation_id).cloned())
+        }
+
+        async fn current_epoch(&self) -> Result<EpochId, Error> {
+            Ok(self.epoch)
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<crate::traits::CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            let epoch = self.epoch;
+            async move {
+                let _ = requests;
+                Ok(epoch)
+            }
+        }
+
+        async fn acquire_lease(
+            &self,
+            _volume_id: VolumeId,
+            _session_id: SessionId,
+            now_ms: u64,
+            ttl_ms: u64,
+        ) -> Result<LeaseResponse, Error> {
+            Ok(LeaseResponse::Granted {
+                lease_version: 1,
+                expires_at_ms: now_ms + ttl_ms,
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _volume_id: VolumeId,
+            _session_id: SessionId,
+            now_ms: u64,
+            ttl_ms: u64,
+        ) -> Result<LeaseResponse, Error> {
+            Ok(LeaseResponse::Renewed {
+                lease_version: 2,
+                expires_at_ms: now_ms + ttl_ms,
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _volume_id: VolumeId,
+            _session_id: SessionId,
+        ) -> Result<LeaseResponse, Error> {
+            Ok(LeaseResponse::Released)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Setup helper for roundtrip tests.
+    // -----------------------------------------------------------------------
+
+    fn setup_roundtrip_handler(
+        num_nodes: usize,
+    ) -> (
+        ClusterBlockHandler<InMemoryDataNode, InMemoryMetadata>,
+        Arc<MetadataCache>,
+        VolumeId,
+    ) {
+        let vid = VolumeId::generate();
+        let sid = SessionId::generate();
+
+        let cache = Arc::new(MetadataCache::new());
+        cache.set_epoch(EpochId::new(1));
+        let mut node_ids = Vec::new();
+        for i in 0..num_nodes {
+            let nid = NodeId::generate();
+            cache.set_node(nid, addr(&format!("10.0.0.{}:9800", i + 1)));
+            node_ids.push(nid);
+        }
+        cache.set_volume(CachedVolumeInfo {
+            volume_id: vid,
+            size_bytes: 1024 * 1024,
+            protection: ProtectionPolicy::Replicated {
+                replicas: num_nodes as u8,
+            },
+            extent_mappings: BTreeMap::new(),
+        });
+
+        let data_client = Arc::new(InMemoryDataNode::new());
+        let metadata_client = Arc::new(InMemoryMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+        let lease_manager = Arc::new(LeaseManager::new(vid, sid, Duration::from_secs(30)));
+
+        let volume_config = VolumeConfig {
+            volume_id: vid,
+            size_bytes: 1024 * 1024,
+            block_size: 4096,
+            protection: ProtectionPolicy::Replicated {
+                replicas: num_nodes as u8,
+            },
+        };
+
+        let handler = ClusterBlockHandler::new(
+            volume_config,
+            data_client,
+            metadata_client,
+            lease_manager,
+            session,
+            Arc::clone(&cache),
+            watermark,
+            stale_handler,
+        );
+
+        (handler, cache, vid)
+    }
+
+    // -----------------------------------------------------------------------
+    // Write-then-read roundtrip tests (data integrity).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_write_then_read_single_block() {
+        let (handler, _cache, _vid) = setup_roundtrip_handler(3);
+        activate_lease(&handler).await;
+
+        let pattern: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let write_req = IoRequest {
+            operation: IoOperation::Write,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: Some(Bytes::from(pattern.clone())),
+            tag: 100,
+        };
+        handler.handle_io(write_req).await.unwrap();
+
+        let read_req = IoRequest {
+            operation: IoOperation::Read,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: None,
+            tag: 101,
+        };
+        let result = handler.handle_io(read_req).await.unwrap().unwrap();
+        assert_eq!(result.len(), 4096);
+        assert_eq!(&result[..], &pattern[..], "read data must match written data byte-for-byte");
+    }
+
+    #[tokio::test]
+    async fn test_write_then_read_multi_block() {
+        let (handler, _cache, _vid) = setup_roundtrip_handler(3);
+        activate_lease(&handler).await;
+
+        let mut patterns = Vec::new();
+        for block in 0u64..5 {
+            let pattern: Vec<u8> = (0..4096).map(|i| ((block as usize * 37 + i) % 256) as u8).collect();
+            let write_req = IoRequest {
+                operation: IoOperation::Write,
+                offset_bytes: block * 4096,
+                length_bytes: 4096,
+                data: Some(Bytes::from(pattern.clone())),
+                tag: 200 + block,
+            };
+            handler.handle_io(write_req).await.unwrap();
+            patterns.push(pattern);
+        }
+
+        for (block, expected) in patterns.iter().enumerate() {
+            let read_req = IoRequest {
+                operation: IoOperation::Read,
+                offset_bytes: block as u64 * 4096,
+                length_bytes: 4096,
+                data: None,
+                tag: 300 + block as u64,
+            };
+            let result = handler.handle_io(read_req).await.unwrap().unwrap();
+            assert_eq!(result.len(), 4096);
+            assert_eq!(
+                &result[..], &expected[..],
+                "block {block} data must match written data"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_overwrite_read() {
+        let (handler, _cache, _vid) = setup_roundtrip_handler(3);
+        activate_lease(&handler).await;
+
+        let pattern_v1: Vec<u8> = vec![0xAA; 4096];
+        let write_v1 = IoRequest {
+            operation: IoOperation::Write,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: Some(Bytes::from(pattern_v1)),
+            tag: 400,
+        };
+        handler.handle_io(write_v1).await.unwrap();
+
+        let pattern_v2: Vec<u8> = vec![0xBB; 4096];
+        let write_v2 = IoRequest {
+            operation: IoOperation::Write,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: Some(Bytes::from(pattern_v2.clone())),
+            tag: 401,
+        };
+        handler.handle_io(write_v2).await.unwrap();
+
+        let read_req = IoRequest {
+            operation: IoOperation::Read,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: None,
+            tag: 402,
+        };
+        let result = handler.handle_io(read_req).await.unwrap().unwrap();
+        assert_eq!(
+            &result[..], &pattern_v2[..],
+            "overwritten block must return latest data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_unwritten_block_returns_zeros() {
+        let (handler, _cache, _vid) = setup_roundtrip_handler(3);
+
+        let read_req = IoRequest {
+            operation: IoOperation::Read,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: None,
+            tag: 500,
+        };
+        let result = handler.handle_io(read_req).await.unwrap().unwrap();
+        assert_eq!(result.len(), 4096);
+        assert!(
+            result.iter().all(|&b| b == 0),
+            "unwritten block must return all zeros"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_read_various_sizes() {
+        let (handler, _cache, _vid) = setup_roundtrip_handler(3);
+        activate_lease(&handler).await;
+
+        let sizes: &[u32] = &[512, 1024, 4096, 8192, 16384];
+        for (i, &size) in sizes.iter().enumerate() {
+            let pattern: Vec<u8> = (0..size as usize).map(|j| ((i * 41 + j) % 256) as u8).collect();
+            let offset = i as u64 * 16384;
+            let write_req = IoRequest {
+                operation: IoOperation::Write,
+                offset_bytes: offset,
+                length_bytes: size,
+                data: Some(Bytes::from(pattern.clone())),
+                tag: 600 + i as u64,
+            };
+            handler.handle_io(write_req).await.unwrap();
+
+            let read_req = IoRequest {
+                operation: IoOperation::Read,
+                offset_bytes: offset,
+                length_bytes: size,
+                data: None,
+                tag: 700 + i as u64,
+            };
+            let result = handler.handle_io(read_req).await.unwrap().unwrap();
+            assert_eq!(
+                result.len(),
+                size as usize,
+                "size={size}: read length must match"
+            );
+            assert_eq!(
+                &result[..], &pattern[..],
+                "size={size}: data must match"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_read_large_sequential() {
+        let (handler, _cache, _vid) = setup_roundtrip_handler(3);
+        activate_lease(&handler).await;
+
+        let mut patterns = Vec::new();
+        for block in 0u64..100 {
+            let pattern: Vec<u8> = (0..4096)
+                .map(|i| ((block as usize).wrapping_mul(0x37) ^ i) as u8)
+                .collect();
+            let write_req = IoRequest {
+                operation: IoOperation::Write,
+                offset_bytes: block * 4096,
+                length_bytes: 4096,
+                data: Some(Bytes::from(pattern.clone())),
+                tag: 800 + block,
+            };
+            handler.handle_io(write_req).await.unwrap();
+            patterns.push(pattern);
+        }
+
+        for (block, expected) in patterns.iter().enumerate() {
+            let read_req = IoRequest {
+                operation: IoOperation::Read,
+                offset_bytes: block as u64 * 4096,
+                length_bytes: 4096,
+                data: None,
+                tag: 900 + block as u64,
+            };
+            let result = handler.handle_io(read_req).await.unwrap().unwrap();
+            assert_eq!(result.len(), 4096);
+            assert_eq!(
+                &result[..], &expected[..],
+                "block {block}: data must match written pattern"
+            );
+        }
+    }
 }
