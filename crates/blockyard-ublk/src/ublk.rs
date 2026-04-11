@@ -204,7 +204,23 @@ impl<H: BlockHandler> UblkDevice<H> {
                 let device_path = format!("/dev/ublkb{}", dev_id);
 
                 let tgt_init = |dev: &mut UblkDev| {
-                    dev.set_default_params(dev_size);
+                    let info = dev.dev_info;
+                    let bs_shift = block_size.trailing_zeros() as u8; // 4096 -> 12
+                    dev.tgt.dev_size = dev_size;
+                    dev.tgt.params = libublk::sys::ublk_params {
+                        types: libublk::sys::UBLK_PARAM_TYPE_BASIC,
+                        basic: libublk::sys::ublk_param_basic {
+                            attrs: libublk::sys::UBLK_ATTR_VOLATILE_CACHE,
+                            logical_bs_shift: bs_shift,
+                            physical_bs_shift: bs_shift,
+                            io_opt_shift: bs_shift,
+                            io_min_shift: bs_shift,
+                            max_sectors: info.max_io_buf_bytes >> 9,
+                            dev_sectors: dev_size >> 9,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
                     Ok(())
                 };
 
