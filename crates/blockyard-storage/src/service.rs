@@ -526,12 +526,30 @@ impl DataNodeService {
         }
 
         let disks = self.inventory.list_disks();
+        let mut healthy_candidate = None;
+        let mut suspect_candidate = None;
         for disk_id in &disks {
-            if self.inventory.allows_allocation(*disk_id).unwrap_or(false)
-                && !self.inventory.has_bad_regions(*disk_id).unwrap_or(true)
-            {
-                return Ok(*disk_id);
+            if !self.inventory.allows_allocation(*disk_id).unwrap_or(false) {
+                continue;
             }
+            if self.inventory.has_bad_regions(*disk_id).unwrap_or(true) {
+                continue;
+            }
+            match self.inventory.get_state(*disk_id) {
+                Ok(DiskState::Healthy) if healthy_candidate.is_none() => {
+                    healthy_candidate = Some(*disk_id);
+                }
+                Ok(DiskState::Suspect) if suspect_candidate.is_none() => {
+                    suspect_candidate = Some(*disk_id);
+                }
+                _ => {}
+            }
+        }
+        if let Some(id) = healthy_candidate {
+            return Ok(id);
+        }
+        if let Some(id) = suspect_candidate {
+            return Ok(id);
         }
 
         Err(StorageError::AllocationDenied(
@@ -1858,5 +1876,24 @@ mod tests {
         assert!(oplog_file.exists(), "oplog.jsonl should be created");
         let contents = std::fs::read_to_string(oplog_file).unwrap();
         assert!(!contents.is_empty(), "oplog should contain entries");
+    }
+
+    #[test]
+    fn test_write_auto_select_suspect_disk_fallback() {
+        let (_dir, service, disk_id) = setup_service();
+        service
+            .inventory()
+            .transition_state(disk_id, DiskState::Suspect)
+            .unwrap();
+
+        let eid = ExtentId::generate();
+        let data = b"suspect fallback";
+        let checksum = compute_checksum(data);
+        let req = make_write_request(eid, 1, EpochId::new(1), None, &checksum, data.len() as u64);
+        let resp = service.handle_write(&req, data, &test_node_identity());
+        assert!(
+            resp.success,
+            "suspect disk should be usable as fallback when no healthy disks"
+        );
     }
 }
