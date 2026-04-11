@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use blockyard_common::{
     DiskId, DiskState, EpochId, ExtentId, LeaseVersion, OperationId, PeerIdentity, SessionId,
@@ -189,33 +189,24 @@ impl DataNodeService {
     }
 
     /// Handle a write extent request (P2.3: epoch validation → disk eligibility → stage → persist → record → ack).
+    ///
+    /// All writes require a caller identity for ACL checks (spec §8).
     pub fn handle_write(
         &self,
         request: &WriteExtentRequest,
         payload: &[u8],
-    ) -> WriteExtentResponse {
-        self.handle_write_as(request, payload, None)
-    }
-
-    /// Handle a write extent request with per-volume ACL check (P6.5).
-    pub fn handle_write_as(
-        &self,
-        request: &WriteExtentRequest,
-        payload: &[u8],
-        caller: Option<&PeerIdentity>,
+        caller: &PeerIdentity,
     ) -> WriteExtentResponse {
         let op_id = request.operation_id;
 
-        if let Some(identity) = caller {
-            if !self.volume_acl.check_write(&request.volume_id, identity) {
-                return self.write_error(
-                    request,
-                    format!(
-                        "write denied: {} not authorized for volume {}",
-                        identity, request.volume_id
-                    ),
-                );
-            }
+        if !self.volume_acl.check_write(&request.volume_id, caller) {
+            return self.write_error(
+                request,
+                format!(
+                    "write denied: {} not authorized for volume {}",
+                    caller, request.volume_id
+                ),
+            );
         }
 
         if let Some(record) = self.check_duplicate(op_id) {
@@ -325,34 +316,26 @@ impl DataNodeService {
     }
 
     /// Handle a read extent request (P2.5: locate → verify readable → read → checksum → return).
+    ///
+    /// All reads require a caller identity for ACL checks (spec §8).
     pub fn handle_read(
         &self,
         request: &ReadExtentRequest,
-    ) -> (ReadExtentResponse, Option<Vec<u8>>) {
-        self.handle_read_as(request, None)
-    }
-
-    /// Handle a read extent request with per-volume ACL check (P6.5).
-    pub fn handle_read_as(
-        &self,
-        request: &ReadExtentRequest,
-        caller: Option<&PeerIdentity>,
+        caller: &PeerIdentity,
     ) -> (ReadExtentResponse, Option<Vec<u8>>) {
         let op_id = request.operation_id;
 
-        if let Some(identity) = caller {
-            if !self.volume_acl.check_read(&request.volume_id, identity) {
-                return (
-                    self.read_error(
-                        request,
-                        format!(
-                            "read denied: {} not authorized for volume {}",
-                            identity, request.volume_id
-                        ),
+        if !self.volume_acl.check_read(&request.volume_id, caller) {
+            return (
+                self.read_error(
+                    request,
+                    format!(
+                        "read denied: {} not authorized for volume {}",
+                        caller, request.volume_id
                     ),
-                    None,
-                );
-            }
+                ),
+                None,
+            );
         }
 
         if let Err(msg) = self.validate_epoch_for_read(request.epoch) {
@@ -749,6 +732,10 @@ mod tests {
         (dir, service, disk_id)
     }
 
+    fn test_node_identity() -> blockyard_common::PeerIdentity {
+        blockyard_common::PeerIdentity::Node(blockyard_common::NodeId::generate())
+    }
+
     fn make_write_request(
         extent_id: ExtentId,
         version: u64,
@@ -799,12 +786,12 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(resp.success, "write failed: {:?}", resp.error);
         assert_eq!(resp.checksum, checksum);
 
         let read_req = make_read_request(eid, 1, EpochId::new(1));
-        let (read_resp, payload) = service.handle_read(&read_req);
+        let (read_resp, payload) = service.handle_read(&read_req, &test_node_identity());
         assert!(read_resp.success, "read failed: {:?}", read_resp.error);
         assert_eq!(payload.unwrap(), data.to_vec());
     }
@@ -826,7 +813,7 @@ mod tests {
             data.len() as u64,
         );
 
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("stale epoch"));
     }
@@ -846,7 +833,7 @@ mod tests {
             data.len() as u64,
         );
 
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(resp.success);
     }
 
@@ -867,11 +854,11 @@ mod tests {
         );
         let op_id = req.operation_id;
 
-        let resp1 = service.handle_write(&req, data);
+        let resp1 = service.handle_write(&req, data, &test_node_identity());
         assert!(resp1.success);
 
         req.operation_id = op_id;
-        let resp2 = service.handle_write(&req, data);
+        let resp2 = service.handle_write(&req, data, &test_node_identity());
         assert!(resp2.success);
         assert_eq!(resp2.operation_id, op_id);
     }
@@ -880,7 +867,7 @@ mod tests {
     fn test_read_nonexistent_extent() {
         let (_dir, service, _) = setup_service();
         let req = make_read_request(ExtentId::generate(), 1, EpochId::new(1));
-        let (resp, payload) = service.handle_read(&req);
+        let (resp, payload) = service.handle_read(&req, &test_node_identity());
         assert!(!resp.success);
         assert!(payload.is_none());
     }
@@ -900,10 +887,10 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         let read_req = make_read_request(eid, 2, EpochId::new(1));
-        let (resp, _) = service.handle_read(&read_req);
+        let (resp, _) = service.handle_read(&read_req, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("version mismatch"));
     }
@@ -923,11 +910,11 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         service.set_epoch(EpochId::new(2));
         let read_req = make_read_request(eid, 1, EpochId::new(1));
-        let (resp, payload) = service.handle_read(&read_req);
+        let (resp, payload) = service.handle_read(&read_req, &test_node_identity());
         assert!(resp.success, "read should tolerate epoch being 1 behind");
         assert!(payload.is_some());
     }
@@ -947,11 +934,11 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         service.set_epoch(EpochId::new(10));
         let read_req = make_read_request(eid, 1, EpochId::new(1));
-        let (resp, _) = service.handle_read(&read_req);
+        let (resp, _) = service.handle_read(&read_req, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("stale epoch"));
     }
@@ -970,7 +957,7 @@ mod tests {
             "wrong_checksum",
             data.len() as u64,
         );
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("checksum mismatch"));
     }
@@ -995,7 +982,7 @@ mod tests {
             data.len() as u64,
         );
 
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("allocation"));
     }
@@ -1013,7 +1000,7 @@ mod tests {
         let checksum = compute_checksum(data);
         let req = make_write_request(eid, 1, EpochId::new(1), None, &checksum, data.len() as u64);
 
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
     }
 
@@ -1032,12 +1019,12 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         let mut read_req = make_read_request(eid, 1, EpochId::new(1));
         read_req.offset = 4;
         read_req.length = 4;
-        let (resp, payload) = service.handle_read(&read_req);
+        let (resp, payload) = service.handle_read(&read_req, &test_node_identity());
         assert!(resp.success);
         assert_eq!(payload.unwrap(), b"4567".to_vec());
     }
@@ -1057,12 +1044,12 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         let mut read_req = make_read_request(eid, 1, EpochId::new(1));
         read_req.offset = 0;
         read_req.length = 1000;
-        let (resp, _) = service.handle_read(&read_req);
+        let (resp, _) = service.handle_read(&read_req, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("exceeds extent size"));
     }
@@ -1091,7 +1078,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&req, data);
+        service.handle_write(&req, data, &test_node_identity());
         assert_eq!(service.operation_count(), 1);
     }
 
@@ -1110,7 +1097,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        let resp = service.handle_write(&write_req, data);
+        let resp = service.handle_write(&write_req, data, &test_node_identity());
         assert!(resp.success);
 
         service
@@ -1119,7 +1106,7 @@ mod tests {
             .unwrap();
 
         let read_req = make_read_request(eid, 1, EpochId::new(1));
-        let (resp, _) = service.handle_read(&read_req);
+        let (resp, _) = service.handle_read(&read_req, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("not readable"));
     }
@@ -1132,7 +1119,7 @@ mod tests {
         let checksum = compute_checksum(data);
 
         let req = make_write_request(eid, 1, EpochId::new(1), None, &checksum, data.len() as u64);
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(resp.success);
     }
 
@@ -1152,7 +1139,7 @@ mod tests {
                 &checksum,
                 data.len() as u64,
             );
-            let resp = service.handle_write(&req, data.as_bytes());
+            let resp = service.handle_write(&req, data.as_bytes(), &test_node_identity());
             assert!(resp.success, "write {i} failed: {:?}", resp.error);
         }
 
@@ -1175,7 +1162,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        let resp = service.handle_write(&write_req, data);
+        let resp = service.handle_write(&write_req, data, &test_node_identity());
         assert!(resp.success);
 
         let mount_path = service.inventory().get_mount_path(disk_id).unwrap();
@@ -1183,7 +1170,7 @@ mod tests {
         std::fs::write(&committed_path, b"corrupted data").unwrap();
 
         let read_req = make_read_request(eid, 1, EpochId::new(1));
-        let (resp, _) = service.handle_read(&read_req);
+        let (resp, _) = service.handle_read(&read_req, &test_node_identity());
         assert!(!resp.success);
 
         let state = service.inventory().get_state(disk_id).unwrap();
@@ -1260,7 +1247,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(
             resp.success,
             "write without lease should succeed when no lease is registered"
@@ -1290,7 +1277,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: Some(5),
         };
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(
             resp.success,
             "write with valid lease should succeed: {:?}",
@@ -1321,7 +1308,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("requires lease"));
     }
@@ -1350,7 +1337,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: Some(1),
         };
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("held by session"));
     }
@@ -1378,7 +1365,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: Some(3),
         };
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("stale lease version"));
     }
@@ -1407,7 +1394,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: Some(1),
         };
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(
             resp.success,
             "write after lease revoked should succeed (no lease registered)"
@@ -1449,7 +1436,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        let resp = service.handle_write_as(&req, data, Some(&identity));
+        let resp = service.handle_write(&req, data, &identity);
         assert!(
             resp.success,
             "authorized write should succeed: {:?}",
@@ -1479,7 +1466,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        let resp = service.handle_write_as(&req, data, Some(&identity));
+        let resp = service.handle_write(&req, data, &identity);
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("write denied"));
     }
@@ -1512,7 +1499,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        let resp = service.handle_write_as(&req, data, Some(&identity));
+        let resp = service.handle_write(&req, data, &identity);
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("write denied"));
     }
@@ -1539,7 +1526,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        let resp = service.handle_write_as(&req, data, Some(&identity));
+        let resp = service.handle_write(&req, data, &identity);
         assert!(resp.success, "node writes always allowed: {:?}", resp.error);
     }
 
@@ -1571,7 +1558,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         let read_req = ReadExtentRequest {
             operation_id: OperationId::generate(),
@@ -1583,7 +1570,7 @@ mod tests {
             offset: 0,
             length: 0,
         };
-        let (resp, payload) = service.handle_read_as(&read_req, Some(&identity));
+        let (resp, payload) = service.handle_read(&read_req, &identity);
         assert!(
             resp.success,
             "authorized read should succeed: {:?}",
@@ -1614,7 +1601,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         let read_req = ReadExtentRequest {
             operation_id: OperationId::generate(),
@@ -1626,7 +1613,7 @@ mod tests {
             offset: 0,
             length: 0,
         };
-        let (resp, payload) = service.handle_read_as(&read_req, Some(&identity));
+        let (resp, payload) = service.handle_read(&read_req, &identity);
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("read denied"));
         assert!(payload.is_none());
@@ -1654,7 +1641,7 @@ mod tests {
             payload_size: data.len() as u64,
             lease_version: None,
         };
-        service.handle_write(&write_req, data);
+        service.handle_write(&write_req, data, &test_node_identity());
 
         let read_req = ReadExtentRequest {
             operation_id: OperationId::generate(),
@@ -1666,7 +1653,7 @@ mod tests {
             offset: 0,
             length: 0,
         };
-        let (resp, payload) = service.handle_read_as(&read_req, Some(&identity));
+        let (resp, payload) = service.handle_read(&read_req, &identity);
         assert!(resp.success, "node reads always allowed: {:?}", resp.error);
         assert_eq!(payload.unwrap(), data.to_vec());
     }
@@ -1685,7 +1672,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        let resp = service.handle_write_as(&req, data, None);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(resp.success, "no caller means no ACL check");
     }
 
@@ -1723,7 +1710,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("bad regions"));
     }
@@ -1740,7 +1727,7 @@ mod tests {
         let data = b"auto select bad regions";
         let checksum = compute_checksum(data);
         let req = make_write_request(eid, 1, EpochId::new(1), None, &checksum, data.len() as u64);
-        let resp = service.handle_write(&req, data);
+        let resp = service.handle_write(&req, data, &test_node_identity());
         assert!(!resp.success, "should fail when only disk has bad regions");
     }
 
@@ -1809,7 +1796,7 @@ mod tests {
                 data.len() as u64,
             );
             op_id = req.operation_id;
-            let resp = service.handle_write(&req, data);
+            let resp = service.handle_write(&req, data, &test_node_identity());
             assert!(resp.success);
             assert_eq!(service.operation_count(), 1);
         }
@@ -1846,7 +1833,7 @@ mod tests {
                 data.len() as u64,
             );
             req.operation_id = op_id;
-            let resp = service.handle_write(&req, data);
+            let resp = service.handle_write(&req, data, &test_node_identity());
             assert!(resp.success, "duplicate should succeed from recovered log");
         }
     }
@@ -1865,7 +1852,7 @@ mod tests {
             &checksum,
             data.len() as u64,
         );
-        service.handle_write(&req, data);
+        service.handle_write(&req, data, &test_node_identity());
 
         let oplog_file = oplog_dir.path().join("oplog.jsonl");
         assert!(oplog_file.exists(), "oplog.jsonl should be created");

@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use blockyard_common::{DiskId, EpochId, NodeConfig, NodeId};
+use blockyard_common::{DiskId, EpochId, NodeConfig, NodeId, PeerIdentity};
 use blockyard_gossip::GossipService;
 use blockyard_protocol::{
     DataPlaneHandler, ReadExtentRequest, ReadExtentResponse, WriteExtentRequest,
@@ -31,15 +31,15 @@ use tracing::{info, warn};
 ///
 /// Required to satisfy the orphan rule (both trait and type are foreign to this crate).
 #[derive(Debug)]
-pub struct DataNodeHandler(pub DataNodeService);
+pub struct DataNodeHandler(pub DataNodeService, pub PeerIdentity);
 
 impl DataPlaneHandler for DataNodeHandler {
     fn handle_write(&self, request: &WriteExtentRequest, payload: &[u8]) -> WriteExtentResponse {
-        self.0.handle_write(request, payload)
+        self.0.handle_write(request, payload, &self.1)
     }
 
     fn handle_read(&self, request: &ReadExtentRequest) -> (ReadExtentResponse, Option<Vec<u8>>) {
-        self.0.handle_read(request)
+        self.0.handle_read(request, &self.1)
     }
 }
 
@@ -199,7 +199,7 @@ impl BlockyardNode {
             service.register_store(disk_id, store);
         }
 
-        let data_service = Arc::new(DataNodeHandler(service));
+        let data_service = Arc::new(DataNodeHandler(service, PeerIdentity::Node(node_id)));
 
         // Step 6: Open persistent raft stores
         let log_store = PersistentLogStore::new(&config.data_dir.join("raft.db"))
