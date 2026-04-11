@@ -681,6 +681,17 @@ mod tests {
             Ok(self.commit_epoch)
         }
 
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            let epoch = self.commit_epoch;
+            async move {
+                let _ = requests;
+                Ok(epoch)
+            }
+        }
+
         async fn acquire_lease(
             &self,
             _: blockyard_common::VolumeId,

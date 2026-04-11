@@ -283,6 +283,29 @@ impl MetadataStateMachineData {
                 MetadataResponse::epoch(self.epoch)
             }
 
+            MetadataRequest::CommitExtentMappingBatch { mappings } => {
+                // Apply each mapping in the batch. On first error, return error.
+                // All mappings are applied in a single Raft proposal for atomicity.
+                for entry in mappings {
+                    let single_req = MetadataRequest::CommitExtentMapping {
+                        volume_id: entry.volume_id,
+                        block_range: entry.block_range.clone(),
+                        extent_id: entry.extent_id,
+                        extent_version: entry.extent_version,
+                        epoch: entry.epoch,
+                        replica_locations: entry.replica_locations.clone(),
+                        checksums: entry.checksums.clone(),
+                        operation_id: entry.operation_id,
+                        previous_version: entry.previous_version,
+                    };
+                    let resp = self.apply_request(&single_req);
+                    if resp.is_error() {
+                        return resp;
+                    }
+                }
+                MetadataResponse::epoch(self.epoch)
+            }
+
             MetadataRequest::UpdatePlacementMap { assignments } => {
                 for (key, nodes) in assignments {
                     self.placement_map.insert(key.clone(), nodes.clone());

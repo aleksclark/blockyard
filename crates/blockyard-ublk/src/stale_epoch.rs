@@ -112,7 +112,7 @@ impl Default for StaleEpochHandler {
 mod tests {
     use super::*;
     use crate::metadata_cache::MetadataCache;
-    use crate::traits::MetadataClient;
+    use crate::traits::{CommitRequest, MetadataClient};
 
     struct MockMetadataClient {
         new_epoch: EpochId,
@@ -144,6 +144,17 @@ mod tests {
 
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.new_epoch)
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            let epoch = self.new_epoch;
+            async move {
+                let _ = requests;
+                Ok(epoch)
+            }
         }
 
         async fn acquire_lease(

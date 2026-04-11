@@ -90,6 +90,14 @@ pub trait MetadataClient: Send + Sync + 'static {
     /// Returns the commit epoch.
     async fn commit_extent_mapping(&self, request: CommitRequest) -> Result<EpochId, Error>;
 
+    /// Commit multiple extent mappings in a single Raft proposal (batch optimization).
+    /// Returns the commit epoch after all mappings are applied.
+    /// Implementors should override this for true batch support.
+    fn commit_extent_mappings_batch(
+        &self,
+        requests: Vec<CommitRequest>,
+    ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send;
+
     /// Look up a previously committed operation by its ID (for ambiguous write resolution).
     async fn lookup_operation(
         &self,

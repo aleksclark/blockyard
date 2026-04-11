@@ -30,7 +30,7 @@ pub mod typ;
 
 pub use network::{NetworkFactory, Router};
 pub use persistent_store::{PersistentLogStore, PersistentStateMachineStore};
-pub use request::MetadataRequest;
+pub use request::{ExtentMappingEntry, MetadataRequest};
 pub use response::MetadataResponse;
 pub use rpc::{RaftRpc, RaftRpcResponse};
 pub use server::{RaftRpcServer, RaftRpcServerHandle};

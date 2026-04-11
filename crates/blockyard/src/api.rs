@@ -120,6 +120,10 @@ pub async fn start_management_api(
         .route("/api/v1/disks", get(list_disks))
         .route("/api/v1/extent-mappings", post(commit_extent_mapping))
         .route(
+            "/api/v1/extent-mappings/batch",
+            post(commit_extent_mapping_batch),
+        )
+        .route(
             "/api/v1/volumes/{id}/extent-mappings",
             get(list_extent_mappings),
         )
@@ -574,6 +578,43 @@ async fn commit_extent_mapping(
         )
         .await
     {
+        Ok(epoch) => {
+            let resp = ExtentMappingResponse {
+                epoch: epoch.as_u64(),
+            };
+            (StatusCode::OK, Json(serde_json::to_value(&resp).unwrap())).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/v1/extent-mappings/batch
+///
+/// Commit multiple extent mappings in a single Raft proposal (batch optimization).
+async fn commit_extent_mapping_batch(
+    State(state): State<Arc<AppState>>,
+    Json(reqs): Json<Vec<ExtentMappingRequest>>,
+) -> impl IntoResponse {
+    let mappings: Vec<blockyard_raft::ExtentMappingEntry> = reqs
+        .into_iter()
+        .map(|req| blockyard_raft::ExtentMappingEntry {
+            volume_id: req.volume_id,
+            block_range: req.block_range_start..req.block_range_end,
+            extent_id: req.extent_id,
+            extent_version: req.extent_version,
+            epoch: blockyard_common::EpochId::new(req.epoch),
+            replica_locations: req.replica_locations,
+            checksums: req.checksums,
+            operation_id: req.operation_id,
+            previous_version: req.previous_version,
+        })
+        .collect();
+
+    match state.metadata.commit_extent_mappings_batch(mappings).await {
         Ok(epoch) => {
             let resp = ExtentMappingResponse {
                 epoch: epoch.as_u64(),
