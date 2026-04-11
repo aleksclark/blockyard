@@ -165,6 +165,17 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
     }
 
     async fn handle_read(&self, request: IoRequest) -> Result<Option<Bytes>, Error> {
+        if !self.watermark.is_fresh(self.metadata_cache.current_epoch()) {
+            tracing::debug!(
+                watermark = %self.watermark.current(),
+                cache_epoch = %self.metadata_cache.current_epoch(),
+                "metadata stale for read-your-own-writes; refreshing"
+            );
+            self.metadata_client
+                .refresh_metadata(&self.metadata_cache)
+                .await?;
+        }
+
         let block_size = self.volume_config.block_size as u64;
         let block_range = request.block_range(block_size);
         let total_length = request.length_bytes as usize;
@@ -1007,5 +1018,30 @@ mod tests {
         };
         let result = handler.handle_io(req).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_read_refreshes_when_watermark_stale() {
+        let (handler, cache, _vid) =
+            setup_handler(true, true, ProtectionPolicy::Replicated { replicas: 3 }, 3);
+
+        handler.watermark().advance(EpochId::new(2));
+        cache.set_epoch(EpochId::new(1));
+
+        assert!(!handler.watermark().is_fresh(cache.current_epoch()));
+
+        let req = IoRequest {
+            operation: IoOperation::Read,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: None,
+            tag: 17,
+        };
+        let result = handler.handle_io(req).await;
+        assert!(result.is_ok());
+        assert!(
+            handler.watermark().is_fresh(handler.metadata_cache().current_epoch()),
+            "metadata should have been refreshed to meet watermark"
+        );
     }
 }
