@@ -413,10 +413,15 @@ impl DataNodeService {
         }
     }
 
-    /// Select a disk for writing, validating eligibility (P2.3 step 2).
+    /// Select a disk for writing, validating eligibility (P2.3 step 2, §5.9).
     fn select_write_disk(&self, preferred: Option<DiskId>) -> Result<DiskId, StorageError> {
         if let Some(disk_id) = preferred {
             if self.inventory.allows_allocation(disk_id)? {
+                if self.inventory.has_bad_regions(disk_id).unwrap_or(false) {
+                    return Err(StorageError::AllocationDenied(format!(
+                        "preferred disk {disk_id} has quarantined bad regions"
+                    )));
+                }
                 return Ok(disk_id);
             }
             return Err(StorageError::AllocationDenied(format!(
@@ -426,7 +431,9 @@ impl DataNodeService {
 
         let disks = self.inventory.list_disks();
         for disk_id in &disks {
-            if self.inventory.allows_allocation(*disk_id).unwrap_or(false) {
+            if self.inventory.allows_allocation(*disk_id).unwrap_or(false)
+                && !self.inventory.has_bad_regions(*disk_id).unwrap_or(true)
+            {
                 return Ok(*disk_id);
             }
         }
@@ -1582,5 +1589,45 @@ mod tests {
             blockyard_common::VolumePermission::read_write(),
         );
         assert!(service.volume_acl().check_write(&vid, &identity));
+    }
+
+    #[test]
+    fn test_write_rejected_on_disk_with_bad_regions() {
+        let (_dir, service, disk_id) = setup_service();
+        service
+            .inventory()
+            .report_bad_region(disk_id, 0, 1024)
+            .unwrap();
+
+        let eid = ExtentId::generate();
+        let data = b"bad region test";
+        let checksum = compute_checksum(data);
+        let req = make_write_request(
+            eid,
+            1,
+            EpochId::new(1),
+            Some(disk_id),
+            &checksum,
+            data.len() as u64,
+        );
+        let resp = service.handle_write(&req, data);
+        assert!(!resp.success);
+        assert!(resp.error.unwrap().contains("bad regions"));
+    }
+
+    #[test]
+    fn test_write_auto_select_skips_disk_with_bad_regions() {
+        let (_dir, service, disk_id) = setup_service();
+        service
+            .inventory()
+            .report_bad_region(disk_id, 0, 1024)
+            .unwrap();
+
+        let eid = ExtentId::generate();
+        let data = b"auto select bad regions";
+        let checksum = compute_checksum(data);
+        let req = make_write_request(eid, 1, EpochId::new(1), None, &checksum, data.len() as u64);
+        let resp = service.handle_write(&req, data);
+        assert!(!resp.success, "should fail when only disk has bad regions");
     }
 }

@@ -310,6 +310,15 @@ impl DiskInventory {
             .ok_or_else(|| StorageError::DiskNotFound(format!("unknown disk: {disk_id}")))?;
         Ok(disk.bad_regions.overlaps(offset, length))
     }
+
+    /// Check whether a disk has any quarantined bad regions.
+    pub fn has_bad_regions(&self, disk_id: DiskId) -> Result<bool, StorageError> {
+        let disks = self.disks.read();
+        let disk = disks
+            .get(&disk_id)
+            .ok_or_else(|| StorageError::DiskNotFound(format!("unknown disk: {disk_id}")))?;
+        Ok(disk.bad_regions.count() > 0)
+    }
 }
 
 impl Default for DiskInventory {
