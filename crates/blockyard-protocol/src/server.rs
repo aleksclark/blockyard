@@ -8,7 +8,7 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use blockyard_common::NodeId;
+use blockyard_common::{AuthProvider, NodeId};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -17,7 +17,7 @@ use tracing::{debug, error, info, warn};
 use crate::messages::{
     ProtocolMessage, ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,
 };
-use crate::version::negotiate_version;
+use crate::version::negotiate_version_with_auth;
 
 /// Error type for data plane server operations.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +55,7 @@ pub struct DataPlaneServer<H: DataPlaneHandler> {
     listener: TcpListener,
     handler: Arc<H>,
     node_id: NodeId,
+    auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl<H: DataPlaneHandler> DataPlaneServer<H> {
@@ -70,6 +71,24 @@ impl<H: DataPlaneHandler> DataPlaneServer<H> {
             listener,
             handler,
             node_id,
+            auth_provider: None,
+        })
+    }
+
+    /// Bind with an auth provider that enforces authentication on handshake (§8).
+    pub async fn bind_with_auth(
+        addr: SocketAddr,
+        handler: Arc<H>,
+        node_id: NodeId,
+        auth_provider: Arc<dyn AuthProvider>,
+    ) -> Result<Self, ServerError> {
+        let listener = TcpListener::bind(addr).await?;
+        info!(%addr, "data plane server bound (with auth)");
+        Ok(Self {
+            listener,
+            handler,
+            node_id,
+            auth_provider: Some(auth_provider),
         })
     }
 
@@ -97,9 +116,10 @@ impl<H: DataPlaneHandler> DataPlaneServer<H> {
                             debug!(%peer_addr, "accepted connection");
                             let handler = Arc::clone(&self.handler);
                             let node_id = self.node_id;
+                            let auth = self.auth_provider.clone();
                             let token = shutdown.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, handler, node_id, token).await {
+                                if let Err(e) = handle_connection(stream, handler, node_id, auth, token).await {
                                     warn!(%peer_addr, error = %e, "connection error");
                                 }
                             });
@@ -143,14 +163,17 @@ async fn handle_connection<H: DataPlaneHandler>(
     mut stream: TcpStream,
     handler: Arc<H>,
     node_id: NodeId,
+    auth_provider: Option<Arc<dyn AuthProvider>>,
     shutdown: CancellationToken,
 ) -> Result<(), ServerError> {
     // Step 1: Read handshake request
     let frame = read_frame(&mut stream).await?;
     let handshake_req = serde_json::from_slice(&frame)?;
 
-    // Step 2: Negotiate version
-    let handshake_resp = negotiate_version(&handshake_req, node_id);
+    // Step 2: Negotiate version with auth
+    let auth_ref: Option<&dyn AuthProvider> = auth_provider.as_deref();
+    let (handshake_resp, _peer_identity) =
+        negotiate_version_with_auth(&handshake_req, node_id, auth_ref);
     let accepted = handshake_resp.accepted;
 
     // Step 3: Send handshake response
@@ -1129,6 +1152,87 @@ mod tests {
             }
             other => panic!("expected ReadResp, got {other:?}"),
         }
+
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_rejected_without_auth_token_when_auth_required() {
+        use blockyard_common::SharedSecretAuth;
+
+        let handler = make_test_handler();
+        let node_id = NodeId::generate();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let auth: Arc<dyn AuthProvider> = Arc::new(SharedSecretAuth::new("test-server-secret").unwrap());
+        let server = DataPlaneServer::bind_with_auth(addr, handler, node_id, auth)
+            .await
+            .unwrap();
+        let local = server.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let shutdown2 = shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            server.run(shutdown2).await;
+        });
+
+        let mut stream = TcpStream::connect(local).await.unwrap();
+        let req = HandshakeRequest {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            node_id: None,
+            session_id: None,
+            features: vec![],
+            auth_token: None,
+        };
+        let req_bytes = serde_json::to_vec(&req).unwrap();
+        client_write_frame(&mut stream, &req_bytes).await;
+        let resp_bytes = client_read_frame(&mut stream).await;
+        let resp: HandshakeResponse = serde_json::from_slice(&resp_bytes).unwrap();
+        assert!(!resp.accepted, "handshake should be rejected without auth token");
+        assert!(!resp.authenticated);
+        assert!(resp.message.unwrap().contains("no token"));
+
+        shutdown.cancel();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handshake_accepted_with_valid_auth_token() {
+        use blockyard_common::{PeerIdentity, SharedSecretAuth};
+
+        let handler = make_test_handler();
+        let node_id = NodeId::generate();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let shared_auth = SharedSecretAuth::new("test-server-secret-2").unwrap();
+        let sid = SessionId::generate();
+        let peer = PeerIdentity::Client(sid);
+        let token = shared_auth.create_token(&peer, 300_000).unwrap();
+        let auth: Arc<dyn AuthProvider> = Arc::new(shared_auth);
+        let server = DataPlaneServer::bind_with_auth(addr, handler, node_id, Arc::clone(&auth))
+            .await
+            .unwrap();
+        let local = server.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let shutdown2 = shutdown.clone();
+
+        let handle = tokio::spawn(async move {
+            server.run(shutdown2).await;
+        });
+
+        let mut stream = TcpStream::connect(local).await.unwrap();
+        let req = HandshakeRequest {
+            protocol_version: CURRENT_PROTOCOL_VERSION,
+            node_id: None,
+            session_id: Some(sid),
+            features: vec![],
+            auth_token: Some(token),
+        };
+        let req_bytes = serde_json::to_vec(&req).unwrap();
+        client_write_frame(&mut stream, &req_bytes).await;
+        let resp_bytes = client_read_frame(&mut stream).await;
+        let resp: HandshakeResponse = serde_json::from_slice(&resp_bytes).unwrap();
+        assert!(resp.accepted, "handshake should be accepted with valid token");
+        assert!(resp.authenticated);
 
         shutdown.cancel();
         handle.await.unwrap();
