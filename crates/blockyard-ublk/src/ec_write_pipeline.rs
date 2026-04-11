@@ -298,8 +298,7 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         let encoded = encode_data(data, data_chunks, parity_chunks)?;
 
         let extent_id = ExtentId::generate();
-        let extent_version = crate::write_pipeline::EXTENT_VERSION_COUNTER
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let extent_version = crate::write_pipeline::next_extent_version();
         let _checksum = compute_checksum(data);
 
         let acks = self

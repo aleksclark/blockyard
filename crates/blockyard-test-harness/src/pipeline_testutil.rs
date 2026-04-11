@@ -44,6 +44,7 @@ pub fn setup_test_pipeline<D: DataNodeClient, M: MetadataClient>(
     let vol_info = CachedVolumeInfo {
         volume_id,
         size_bytes: 1024 * 1024,
+        block_size: 4096,
         protection: ProtectionPolicy::Replicated {
             replicas: node_ids.len() as u8,
         },

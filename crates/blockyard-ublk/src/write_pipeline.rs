@@ -20,7 +20,25 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use bytes::Bytes;
 
 /// Global atomic counter for generating unique extent versions.
-pub static EXTENT_VERSION_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// Initialized from current timestamp (microseconds) to avoid collisions
+/// across process restarts. Subsequent calls increment monotonically.
+pub static EXTENT_VERSION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Get the next unique extent version, initializing from wall-clock time
+/// on first use to prevent version collisions after restart.
+pub fn next_extent_version() -> u64 {
+    let prev = EXTENT_VERSION_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    if prev == 0 {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        EXTENT_VERSION_COUNTER.store(ts + 1, AtomicOrdering::Relaxed);
+        ts
+    } else {
+        prev
+    }
+}
 
 use blockyard_common::error::Error;
 use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
@@ -176,7 +194,7 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
         }
 
         let extent_id = ExtentId::generate();
-        let extent_version = EXTENT_VERSION_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let extent_version = next_extent_version();
         let checksum = compute_checksum(&request.data);
 
         let acks = self
@@ -933,6 +951,25 @@ mod tests {
         let debug = format!("{:?}", pipeline);
         assert!(debug.contains("WritePipeline"));
         assert!(debug.contains("max_retries"));
+    }
+
+    #[test]
+    fn test_next_extent_version_timestamp_based() {
+        let v1 = next_extent_version();
+        let v2 = next_extent_version();
+
+        assert!(v1 > 1_000_000, "version should be timestamp-based (microseconds), got {v1}");
+        assert!(v2 > v1, "versions must be monotonically increasing");
+    }
+
+    #[test]
+    fn test_next_extent_version_monotonic() {
+        let mut prev = 0u64;
+        for _ in 0..100 {
+            let v = next_extent_version();
+            assert!(v > prev, "version must increase: prev={prev}, got={v}");
+            prev = v;
+        }
     }
 
     #[tokio::test]
