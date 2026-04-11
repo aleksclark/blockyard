@@ -11,6 +11,8 @@ use bytes::Bytes;
 use blockyard_common::error::Error;
 use blockyard_common::{ProtectionPolicy, VolumeId};
 
+use blockyard_client::traits::DataNodeReader;
+
 use crate::ec_write_pipeline::EcWritePipeline;
 use crate::lease_manager::{LeaseManager, LeaseState};
 use crate::metadata_cache::MetadataCache;
@@ -39,7 +41,7 @@ pub struct VolumeConfig {
 ///
 /// The handler checks the write lease before every write and refuses
 /// IO if the lease is lost.
-pub struct ClusterBlockHandler<D: DataNodeClient, M: MetadataClient> {
+pub struct ClusterBlockHandler<D: DataNodeClient + DataNodeReader, M: MetadataClient> {
     volume_config: VolumeConfig,
     write_pipeline: Arc<WritePipeline<D, M>>,
     ec_write_pipeline: Arc<EcWritePipeline<D, M>>,
@@ -51,7 +53,7 @@ pub struct ClusterBlockHandler<D: DataNodeClient, M: MetadataClient> {
     metadata_client: Arc<M>,
 }
 
-impl<D: DataNodeClient, M: MetadataClient> ClusterBlockHandler<D, M> {
+impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<D, M> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         volume_config: VolumeConfig,
@@ -169,29 +171,58 @@ impl<D: DataNodeClient, M: MetadataClient> ClusterBlockHandler<D, M> {
             .metadata_cache
             .find_extent_for_range(&self.volume_config.volume_id, &block_range);
 
-        // For unmapped regions (no extents allocated yet), return zeros.
-        // Block devices present as sparse: unwritten blocks read back as zero.
         let Some((_block_start, extent_mapping)) = mapping else {
             let length = request.length_bytes as usize;
             return Ok(Some(Bytes::from(vec![0u8; length])));
         };
 
         if extent_mapping.replica_locations.is_empty() {
-            // Extent exists but has no replicas — return zeros rather than
-            // failing with EIO, since the data may not have been written yet.
             let length = request.length_bytes as usize;
             return Ok(Some(Bytes::from(vec![0u8; length])));
         }
 
-        let node_id = extent_mapping.replica_locations[0];
-        let _node_addr = self
-            .metadata_cache
-            .get_node(&node_id)
-            .ok_or_else(|| Error::Storage(format!("node {} not found in cache", node_id)))?;
+        let offset_within_extent = request.offset_bytes
+            - (_block_start * self.volume_config.block_size as u64);
+        let length = request.length_bytes as u64;
 
-        let length = request.length_bytes as usize;
-        let data = vec![0u8; length];
-        Ok(Some(Bytes::from(data)))
+        let mut last_error = None;
+        for &node_id in &extent_mapping.replica_locations {
+            let node_addr = self.metadata_cache.get_node(&node_id);
+            if node_addr.is_none() {
+                continue;
+            }
+
+            match self
+                .data_client
+                .read_extent(
+                    node_id,
+                    self.volume_config.volume_id,
+                    extent_mapping.extent_id,
+                    extent_mapping.extent_version,
+                    offset_within_extent,
+                    length,
+                )
+                .await
+            {
+                Ok(result) => {
+                    return Ok(Some(result.data));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        extent_id = %extent_mapping.extent_id,
+                        error = %e,
+                        "read failed, trying next replica"
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        match last_error {
+            Some(e) => Err(Error::Storage(format!("all replicas failed: {e}"))),
+            None => Err(Error::Storage("no reachable replicas".into())),
+        }
     }
 
     async fn handle_flush(&self) -> Result<Option<Bytes>, Error> {
@@ -211,7 +242,9 @@ impl<D: DataNodeClient, M: MetadataClient> ClusterBlockHandler<D, M> {
     }
 }
 
-impl<D: DataNodeClient, M: MetadataClient> BlockHandler for ClusterBlockHandler<D, M> {
+impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> BlockHandler
+    for ClusterBlockHandler<D, M>
+{
     async fn handle_io(&self, request: IoRequest) -> Result<Option<Bytes>, Error> {
         match request.operation {
             IoOperation::Write => self.handle_write(request).await,
@@ -222,7 +255,9 @@ impl<D: DataNodeClient, M: MetadataClient> BlockHandler for ClusterBlockHandler<
     }
 }
 
-impl<D: DataNodeClient, M: MetadataClient> std::fmt::Debug for ClusterBlockHandler<D, M> {
+impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> std::fmt::Debug
+    for ClusterBlockHandler<D, M>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClusterBlockHandler")
             .field("volume_id", &self.volume_config.volume_id)
@@ -237,6 +272,8 @@ mod tests {
     use super::*;
     use crate::metadata_cache::{CachedExtentMapping, CachedVolumeInfo};
     use crate::traits::{CommitRequest, CommittedMapping, WriteAck, WriteAckError};
+    use blockyard_client::error::ReadError;
+    use blockyard_client::types::DataNodeReadResult;
     use blockyard_common::{EpochId, ExtentId, LeaseResponse, NodeId, OperationId, SessionId};
     use std::collections::BTreeMap;
     use std::net::SocketAddr;
@@ -288,6 +325,34 @@ mod tests {
                     success: false,
                     checksum: String::new(),
                     error: Some(WriteAckError::InternalError("mock failure".into())),
+                })
+            }
+        }
+    }
+
+    impl DataNodeReader for MockDataNode {
+        async fn read_extent(
+            &self,
+            _node_id: NodeId,
+            _volume_id: VolumeId,
+            extent_id: ExtentId,
+            extent_version: u64,
+            _offset: u64,
+            length: u64,
+        ) -> Result<DataNodeReadResult, ReadError> {
+            if self.should_succeed.load(Ordering::Relaxed) {
+                let data = vec![0xAB; length as usize];
+                let checksum = blockyard_common::checksum::compute_checksum(&data);
+                Ok(DataNodeReadResult {
+                    extent_id,
+                    extent_version,
+                    checksum,
+                    data: Bytes::from(data),
+                })
+            } else {
+                Err(ReadError::DataNodeReadFailed {
+                    node_id: _node_id,
+                    reason: "mock read failure".into(),
                 })
             }
         }
@@ -430,7 +495,7 @@ mod tests {
         (handler, cache, vid)
     }
 
-    async fn activate_lease<D: DataNodeClient, M: MetadataClient>(
+    async fn activate_lease<D: DataNodeClient + DataNodeReader, M: MetadataClient>(
         handler: &ClusterBlockHandler<D, M>,
     ) {
         handler

@@ -56,7 +56,7 @@ pub enum Command {
     #[command(about = "Mount a volume as a UBLK block device")]
     Mount(MountArgs),
 
-    #[command(about = "Unmount a volume")]
+    #[command(about = "Unmount a volume (sends SIGTERM to the mount process)")]
     Unmount(UnmountArgs),
 }
 

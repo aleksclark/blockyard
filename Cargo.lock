@@ -418,6 +418,8 @@ dependencies = [
  "anyhow",
  "blockyard-cli",
  "blockyard-common",
+ "blockyard-ublk",
+ "bytes",
  "chrono",
  "clap",
  "comfy-table",

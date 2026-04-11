@@ -7,5 +7,6 @@ pub mod cli;
 pub mod client;
 pub mod commands;
 pub mod http_client;
+pub mod mount;
 pub mod output;
 pub mod types;

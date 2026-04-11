@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 blockyard-common = { path = "../blockyard-common" }
+blockyard-ublk = { path = "../blockyard-ublk" }
+bytes.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -26,6 +28,8 @@ uuid.workspace = true
 reqwest.workspace = true
 
 [features]
+default = []
+ublk-kernel = ["blockyard-ublk/ublk-kernel"]
 testutil = ["parking_lot"]
 
 [dependencies.parking_lot]

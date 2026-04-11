@@ -19,9 +19,12 @@ use tokio::sync::Mutex as TokioMutex;
 
 use blockyard_common::error::Error;
 use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
+use blockyard_client::error::ReadError;
+use blockyard_client::traits::DataNodeReader;
+use blockyard_client::types::DataNodeReadResult;
 use blockyard_protocol::messages::{
     CURRENT_PROTOCOL_VERSION, HandshakeRequest, HandshakeResponse, ProtocolMessage,
-    WriteExtentRequest, WriteExtentResponse,
+    ReadExtentRequest, WriteExtentRequest, WriteExtentResponse,
 };
 
 use crate::traits::{DataNodeClient, WriteAck, WriteAckError};
@@ -161,11 +164,124 @@ impl TcpDataNodeClient {
     fn drop_connection(&self, node_id: &NodeId) {
         self.connections.write().remove(&node_id.to_string());
     }
+
+    /// Read extent data from a data node via TCP.
+    pub async fn read_extent(
+        &self,
+        node_id: NodeId,
+        volume_id: VolumeId,
+        extent_id: ExtentId,
+        extent_version: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Bytes, Error> {
+        let result = self
+            .try_read_extent(node_id, volume_id, extent_id, extent_version, offset, length)
+            .await;
+
+        match result {
+            Ok(data) => Ok(data),
+            Err(_) => {
+                self.drop_connection(&node_id);
+                self.try_read_extent(node_id, volume_id, extent_id, extent_version, offset, length)
+                    .await
+            }
+        }
+    }
+
+    async fn try_read_extent(
+        &self,
+        node_id: NodeId,
+        volume_id: VolumeId,
+        extent_id: ExtentId,
+        extent_version: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<Bytes, Error> {
+        let conn = self.get_connection(node_id).await?;
+        let mut stream = conn.stream.lock().await;
+
+        let read_req = ReadExtentRequest {
+            operation_id: OperationId::generate(),
+            session_id: SessionId::generate(),
+            volume_id,
+            extent_id,
+            extent_version,
+            epoch: EpochId::new(0),
+            offset,
+            length,
+        };
+
+        let msg = ProtocolMessage::ReadReq(read_req);
+        let msg_bytes = serde_json::to_vec(&msg)
+            .map_err(|e| Error::Network(format!("failed to serialize read request: {e}")))?;
+
+        write_frame(&mut stream, &msg_bytes).await?;
+
+        let resp_bytes = read_frame(&mut stream).await?;
+        let resp_msg: ProtocolMessage = serde_json::from_slice(&resp_bytes)
+            .map_err(|e| Error::Network(format!("failed to deserialize read response: {e}")))?;
+
+        match resp_msg {
+            ProtocolMessage::ReadResp(resp) => {
+                if !resp.success {
+                    return Err(Error::Storage(format!(
+                        "read failed on node {}: {}",
+                        node_id,
+                        resp.error.unwrap_or_default()
+                    )));
+                }
+
+                if resp.payload_size > 0 {
+                    let mut payload = vec![0u8; resp.payload_size as usize];
+                    stream.read_exact(&mut payload).await.map_err(|e| {
+                        Error::Network(format!("failed to read payload: {e}"))
+                    })?;
+                    Ok(Bytes::from(payload))
+                } else {
+                    Ok(Bytes::new())
+                }
+            }
+            other => Err(Error::Network(format!(
+                "unexpected response type: {other:?}"
+            ))),
+        }
+    }
 }
 
 impl Default for TcpDataNodeClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl DataNodeReader for TcpDataNodeClient {
+    async fn read_extent(
+        &self,
+        node_id: NodeId,
+        volume_id: VolumeId,
+        extent_id: ExtentId,
+        extent_version: u64,
+        offset: u64,
+        length: u64,
+    ) -> Result<DataNodeReadResult, ReadError> {
+        let data = TcpDataNodeClient::read_extent(
+            self, node_id, volume_id, extent_id, extent_version, offset, length,
+        )
+        .await
+        .map_err(|e| ReadError::DataNodeReadFailed {
+            node_id,
+            reason: e.to_string(),
+        })?;
+
+        let checksum = blockyard_common::checksum::compute_checksum(&data);
+
+        Ok(DataNodeReadResult {
+            extent_id,
+            extent_version,
+            checksum,
+            data,
+        })
     }
 }
 
@@ -356,7 +472,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_util::sync::CancellationToken;
 
-    /// Test handler that accepts writes and returns success.
+    /// Test handler that accepts writes and reads.
     #[derive(Debug)]
     struct TestHandler;
 
@@ -381,17 +497,19 @@ mod tests {
             &self,
             request: &ReadExtentRequest,
         ) -> (ReadExtentResponse, Option<Vec<u8>>) {
+            let payload: Vec<u8> = (0..request.length).map(|i| (i % 256) as u8).collect();
+            let checksum = blockyard_common::checksum::compute_checksum(&payload);
             (
                 ReadExtentResponse {
                     operation_id: request.operation_id,
                     extent_id: request.extent_id,
                     extent_version: request.extent_version,
-                    success: false,
-                    checksum: String::new(),
-                    payload_size: 0,
-                    error: Some("not implemented".into()),
+                    success: true,
+                    checksum,
+                    payload_size: payload.len() as u64,
+                    error: None,
                 },
-                None,
+                Some(payload),
             )
         }
     }
@@ -1015,5 +1133,192 @@ mod tests {
 
         shutdown1.cancel();
         shutdown2.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_read_extent_success() {
+        let handler = Arc::new(TestHandler);
+        let (addr, shutdown) = start_test_server(handler).await;
+
+        let client = TcpDataNodeClient::new();
+        let node_id = NodeId::generate();
+        client.register_node(node_id, addr);
+
+        let data = client
+            .read_extent(
+                node_id,
+                VolumeId::generate(),
+                ExtentId::generate(),
+                1,
+                0,
+                256,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(data.len(), 256);
+        let expected: Vec<u8> = (0..256u64).map(|i| (i % 256) as u8).collect();
+        assert_eq!(&data[..], &expected[..]);
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_read_extent_failure() {
+        let handler = Arc::new(FailingHandler {
+            error_msg: "extent not found".into(),
+        });
+        let (addr, shutdown) = start_test_server(handler).await;
+
+        let client = TcpDataNodeClient::new();
+        let node_id = NodeId::generate();
+        client.register_node(node_id, addr);
+
+        let result = client
+            .read_extent(
+                node_id,
+                VolumeId::generate(),
+                ExtentId::generate(),
+                1,
+                0,
+                256,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not implemented"));
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_read_no_address() {
+        let client = TcpDataNodeClient::new();
+        let node_id = NodeId::generate();
+
+        let result = client
+            .read_extent(
+                node_id,
+                VolumeId::generate(),
+                ExtentId::generate(),
+                1,
+                0,
+                256,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no address registered"));
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_read_connection_reuse() {
+        let handler = Arc::new(TestHandler);
+        let (addr, shutdown) = start_test_server(handler).await;
+
+        let client = TcpDataNodeClient::new();
+        let node_id = NodeId::generate();
+        client.register_node(node_id, addr);
+
+        let data1 = client
+            .read_extent(
+                node_id,
+                VolumeId::generate(),
+                ExtentId::generate(),
+                1,
+                0,
+                128,
+            )
+            .await
+            .unwrap();
+        assert_eq!(data1.len(), 128);
+
+        let data2 = client
+            .read_extent(
+                node_id,
+                VolumeId::generate(),
+                ExtentId::generate(),
+                2,
+                0,
+                64,
+            )
+            .await
+            .unwrap();
+        assert_eq!(data2.len(), 64);
+
+        assert_eq!(client.connections.read().len(), 1);
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_write_then_read() {
+        let handler = Arc::new(TestHandler);
+        let (addr, shutdown) = start_test_server(handler).await;
+
+        let client = TcpDataNodeClient::new();
+        let node_id = NodeId::generate();
+        client.register_node(node_id, addr);
+
+        let write_data = Bytes::from_static(b"write before read");
+        let checksum = blockyard_common::checksum::compute_checksum(&write_data);
+        let ack = client
+            .write_extent(
+                node_id,
+                OperationId::generate(),
+                SessionId::generate(),
+                VolumeId::generate(),
+                ExtentId::generate(),
+                1,
+                EpochId::new(1),
+                write_data,
+                checksum,
+            )
+            .await
+            .unwrap();
+        assert!(ack.success);
+
+        let read_data = client
+            .read_extent(
+                node_id,
+                VolumeId::generate(),
+                ExtentId::generate(),
+                1,
+                0,
+                512,
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_data.len(), 512);
+
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_client_data_node_reader_trait() {
+        let handler = Arc::new(TestHandler);
+        let (addr, shutdown) = start_test_server(handler).await;
+
+        let client = TcpDataNodeClient::new();
+        let node_id = NodeId::generate();
+        client.register_node(node_id, addr);
+
+        let result = <TcpDataNodeClient as DataNodeReader>::read_extent(
+            &client,
+            node_id,
+            VolumeId::generate(),
+            ExtentId::generate(),
+            1,
+            0,
+            256,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.data.len(), 256);
+        assert_eq!(result.extent_version, 1);
+        assert!(!result.checksum.is_empty());
+
+        shutdown.cancel();
     }
 }

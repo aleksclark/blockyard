@@ -30,7 +30,7 @@ pub async fn execute(cli: &Cli, client: &impl BlockyardClient) -> Result<String>
         Command::Disk(cmd) => execute_disk(cmd, client, fmt).await,
         Command::Node(cmd) => execute_node(cmd, client, fmt).await,
         Command::Cluster(args) => execute_cluster(&args.subcommand, client, fmt).await,
-        Command::Mount(args) => execute_mount(args, client, fmt).await,
+        Command::Mount(args) => execute_mount(args, client, fmt, &cli.endpoint).await,
         Command::Unmount(args) => execute_unmount(args, client, fmt).await,
     }
 }
@@ -162,8 +162,23 @@ async fn execute_mount(
     args: &crate::cli::MountArgs,
     client: &impl BlockyardClient,
     fmt: OutputFormat,
+    endpoint: &str,
 ) -> Result<String> {
-    let info = client.mount(args.volume_id, args.device.clone()).await?;
+    #[cfg(feature = "ublk-kernel")]
+    let info = crate::mount::execute_mount_kernel(
+        endpoint,
+        args.volume_id,
+        args.device.clone(),
+        client,
+    )
+    .await?;
+
+    #[cfg(not(feature = "ublk-kernel"))]
+    let info = {
+        let _ = endpoint;
+        crate::mount::execute_mount_fallback(args.volume_id, args.device.clone(), client).await?
+    };
+
     format_mount_info(&info, fmt)
 }
 
