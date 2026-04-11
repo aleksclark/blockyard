@@ -185,16 +185,19 @@ impl MetadataCache {
         for n in nodes {
             cluster_map.insert(n.node_id.to_string(), n);
         }
+        let mut inner = self.inner.write();
         let mut vol_map = BTreeMap::new();
-        for v in volumes {
+        for mut v in volumes {
+            if let Some(existing) = inner.volumes.get(&v.volume_id.to_string()) {
+                if v.extent_mappings.is_empty() && !existing.extent_mappings.is_empty() {
+                    v.extent_mappings = existing.extent_mappings.clone();
+                }
+            }
             vol_map.insert(v.volume_id.to_string(), v);
         }
-        let new_inner = CacheInner {
-            epoch,
-            cluster_map,
-            volumes: vol_map,
-        };
-        *self.inner.write() = new_inner;
+        inner.epoch = epoch;
+        inner.cluster_map = cluster_map;
+        inner.volumes = vol_map;
     }
 }
 
@@ -608,5 +611,57 @@ mod tests {
         assert!(cache.find_extent_for_range(&vid, &(0..1)).is_some());
         assert!(cache.find_extent_for_range(&vid, &(1..2)).is_some());
         assert!(cache.find_extent_for_range(&vid, &(2..3)).is_none());
+    }
+
+    #[test]
+    fn test_refresh_preserves_extent_mappings() {
+        let cache = MetadataCache::new();
+        let vid = VolumeId::generate();
+        let eid = ExtentId::generate();
+        let n1 = NodeId::generate();
+
+        cache.set_volume(CachedVolumeInfo {
+            volume_id: vid,
+            size_bytes: 1024 * 1024,
+            block_size: 4096,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+            extent_mappings: BTreeMap::new(),
+        });
+        cache.set_extent_mapping(
+            &vid,
+            0,
+            CachedExtentMapping {
+                extent_id: eid,
+                extent_version: 1,
+                replica_locations: vec![n1],
+                checksums: vec![vec![0xAA]],
+                size_bytes: 4096,
+            },
+        );
+        assert!(cache.get_extent_mapping(&vid, 0).is_some());
+
+        let n2 = NodeId::generate();
+        cache.refresh(
+            EpochId::new(5),
+            vec![NodeAddress {
+                node_id: n2,
+                addr: addr("10.0.0.2:9800"),
+            }],
+            vec![CachedVolumeInfo {
+                volume_id: vid,
+                size_bytes: 1024 * 1024,
+                block_size: 4096,
+                protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_mappings: BTreeMap::new(),
+            }],
+        );
+
+        assert_eq!(cache.current_epoch(), EpochId::new(5));
+        let mapping = cache.get_extent_mapping(&vid, 0);
+        assert!(
+            mapping.is_some(),
+            "refresh must preserve locally-cached extent mappings"
+        );
+        assert_eq!(mapping.unwrap().extent_id, eid);
     }
 }
