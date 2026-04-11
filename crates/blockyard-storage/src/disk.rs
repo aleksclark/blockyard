@@ -318,12 +318,22 @@ impl Default for DiskInventory {
     }
 }
 
-/// Validate that the given path is on an XFS filesystem (§3.3, §5.10.3).
+/// Validate that the given path is on an XFS filesystem (§3.3, §5.10.3, invariant 8).
 ///
-/// In production this would query `statfs` for the magic number.
-/// For testability, we check for the marker file `.blockyard_xfs_ok`
-/// or validate via the real filesystem type.
+/// Returns an error if the filesystem is not XFS. Override mechanisms:
+/// - Marker file `.blockyard_xfs_ok` in the mount path (for dev/testing)
+/// - Environment variable `BLOCKYARD_SKIP_XFS_CHECK=1`
 fn validate_xfs(path: &Path) -> Result<(), StorageError> {
+    if std::env::var("BLOCKYARD_SKIP_XFS_CHECK").map_or(false, |v| v == "1") {
+        debug!(path = %path.display(), "XFS validation: skipped via BLOCKYARD_SKIP_XFS_CHECK");
+        return Ok(());
+    }
+
+    if path.join(".blockyard_xfs_ok").exists() {
+        debug!(path = %path.display(), "XFS validation: accepted via marker file");
+        return Ok(());
+    }
+
     #[cfg(target_os = "linux")]
     {
         let _ = std::fs::metadata(path).map_err(|e| {
@@ -339,23 +349,28 @@ fn validate_xfs(path: &Path) -> Result<(), StorageError> {
             if fs_type == "xfs" {
                 return Ok(());
             }
+            return Err(StorageError::XfsValidation(format!(
+                "{} is not an XFS filesystem (detected: '{}'). \
+                 Use .blockyard_xfs_ok marker file or BLOCKYARD_SKIP_XFS_CHECK=1 to override.",
+                path.display(),
+                fs_type
+            )));
         }
 
-        if path.join(".blockyard_xfs_ok").exists() {
-            return Ok(());
-        }
-
-        debug!(path = %path.display(), "XFS validation: accepting directory as potentially valid");
-        Ok(())
+        Err(StorageError::XfsValidation(format!(
+            "could not determine filesystem type for {}. \
+             Use .blockyard_xfs_ok marker file or BLOCKYARD_SKIP_XFS_CHECK=1 to override.",
+            path.display()
+        )))
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        if path.join(".blockyard_xfs_ok").exists() {
-            return Ok(());
-        }
-        debug!(path = %path.display(), "XFS validation: non-Linux, accepting directory");
-        Ok(())
+        Err(StorageError::XfsValidation(format!(
+            "{} cannot be validated as XFS on non-Linux. \
+             Use .blockyard_xfs_ok marker file or BLOCKYARD_SKIP_XFS_CHECK=1 to override.",
+            path.display()
+        )))
     }
 }
 
@@ -765,6 +780,43 @@ mod tests {
         let path = dir.path();
         std::fs::write(path.join(".blockyard_xfs_ok"), "").unwrap();
         assert!(validate_xfs(path).is_ok());
+    }
+
+    #[test]
+    fn test_validate_xfs_rejects_non_xfs_without_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let result = validate_xfs(path);
+        assert!(result.is_err(), "should reject directory without XFS or marker");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("XFS") || err.contains("xfs"),
+            "error should mention XFS: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_xfs_skip_env_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        // SAFETY: test is single-threaded for this env var; no other test reads
+        // BLOCKYARD_SKIP_XFS_CHECK concurrently.
+        unsafe { std::env::set_var("BLOCKYARD_SKIP_XFS_CHECK", "1") };
+        let result = validate_xfs(path);
+        unsafe { std::env::remove_var("BLOCKYARD_SKIP_XFS_CHECK") };
+        assert!(result.is_ok(), "should accept when env var is set");
+    }
+
+    #[test]
+    fn test_validate_xfs_env_var_not_1_still_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        // SAFETY: test is single-threaded for this env var; no other test reads
+        // BLOCKYARD_SKIP_XFS_CHECK concurrently.
+        unsafe { std::env::set_var("BLOCKYARD_SKIP_XFS_CHECK", "0") };
+        let result = validate_xfs(path);
+        unsafe { std::env::remove_var("BLOCKYARD_SKIP_XFS_CHECK") };
+        assert!(result.is_err(), "env var value '0' should not skip validation");
     }
 
     #[test]
