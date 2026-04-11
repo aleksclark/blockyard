@@ -91,10 +91,23 @@ impl DiskInventory {
         mount_paths: &[PathBuf],
         require_qualification: bool,
     ) -> Result<Vec<DiskId>, StorageError> {
+        self.discover_disks_for_node(mount_paths, require_qualification, None)
+    }
+
+    /// Discover and initialize disks, binding them to the given node.
+    ///
+    /// Sets `node_id` in the on-disk metadata to prevent another node
+    /// from claiming the same disk (§5.10.2).
+    pub fn discover_disks_for_node(
+        &self,
+        mount_paths: &[PathBuf],
+        require_qualification: bool,
+        node_id: Option<blockyard_common::NodeId>,
+    ) -> Result<Vec<DiskId>, StorageError> {
         let mut discovered = Vec::new();
 
         for path in mount_paths {
-            match self.discover_single_disk(path, require_qualification) {
+            match self.discover_single_disk(path, require_qualification, node_id) {
                 Ok(disk_id) => {
                     info!(%disk_id, path = %path.display(), "discovered disk");
                     discovered.push(disk_id);
@@ -113,6 +126,7 @@ impl DiskInventory {
         &self,
         mount_path: &Path,
         require_qualification: bool,
+        node_id: Option<blockyard_common::NodeId>,
     ) -> Result<DiskId, StorageError> {
         if !mount_path.is_dir() {
             return Err(StorageError::DiskNotFound(format!(
@@ -123,7 +137,7 @@ impl DiskInventory {
 
         validate_xfs(mount_path)?;
 
-        let disk_id = read_or_assign_disk_id(mount_path)?;
+        let disk_id = read_or_assign_disk_id(mount_path, node_id)?;
 
         let managed = if require_qualification {
             ManagedDisk::new_qualifying(disk_id, mount_path.to_path_buf())
@@ -384,7 +398,10 @@ fn validate_xfs(path: &Path) -> Result<(), StorageError> {
 }
 
 /// Read or assign a persistent DiskId for the given mount path.
-fn read_or_assign_disk_id(mount_path: &Path) -> Result<DiskId, StorageError> {
+fn read_or_assign_disk_id(
+    mount_path: &Path,
+    node_id: Option<blockyard_common::NodeId>,
+) -> Result<DiskId, StorageError> {
     let id_path = mount_path.join(DISK_ID_FILENAME);
 
     if id_path.exists() {
@@ -408,7 +425,7 @@ fn read_or_assign_disk_id(mount_path: &Path) -> Result<DiskId, StorageError> {
         let disk_id = DiskId::generate();
         let metadata = DiskMetadata {
             disk_id,
-            node_id: None,
+            node_id,
         };
 
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| {
@@ -831,10 +848,10 @@ mod tests {
     #[test]
     fn test_read_or_assign_disk_id_new() {
         let dir = tempfile::tempdir().unwrap();
-        let id = read_or_assign_disk_id(dir.path()).unwrap();
+        let id = read_or_assign_disk_id(dir.path(), None).unwrap();
         assert!(dir.path().join(DISK_ID_FILENAME).exists());
 
-        let id2 = read_or_assign_disk_id(dir.path()).unwrap();
+        let id2 = read_or_assign_disk_id(dir.path(), None).unwrap();
         assert_eq!(id, id2);
     }
 
@@ -842,7 +859,7 @@ mod tests {
     fn test_read_disk_id_corrupt() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(DISK_ID_FILENAME), "not json").unwrap();
-        assert!(read_or_assign_disk_id(dir.path()).is_err());
+        assert!(read_or_assign_disk_id(dir.path(), None).is_err());
     }
 
     #[test]
@@ -854,6 +871,34 @@ mod tests {
         let json = serde_json::to_string(&meta).unwrap();
         let parsed: DiskMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(meta.disk_id, parsed.disk_id);
+    }
+
+    #[test]
+    fn test_read_or_assign_disk_id_sets_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let nid = blockyard_common::NodeId::generate();
+        let _id = read_or_assign_disk_id(dir.path(), Some(nid)).unwrap();
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(DISK_ID_FILENAME)).unwrap();
+        let meta: DiskMetadata = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(meta.node_id, Some(nid));
+    }
+
+    #[test]
+    fn test_discover_disks_for_node_binds_node_id() {
+        let (_dir, path) = setup_disk_dir();
+        let nid = blockyard_common::NodeId::generate();
+        let inventory = DiskInventory::new();
+        let ids = inventory
+            .discover_disks_for_node(&[path.clone()], false, Some(nid))
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let contents =
+            std::fs::read_to_string(path.join(DISK_ID_FILENAME)).unwrap();
+        let meta: DiskMetadata = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(meta.node_id, Some(nid));
     }
 
     #[test]
