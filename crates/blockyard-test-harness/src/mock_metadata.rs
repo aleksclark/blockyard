@@ -65,6 +65,40 @@ impl MetadataClient for TestMetadataClient {
         Ok(epoch)
     }
 
+    fn commit_extent_mappings_batch(
+        &self,
+        requests: Vec<CommitRequest>,
+    ) -> impl std::future::Future<Output = Result<EpochId, blockyard_common::Error>> + Send {
+        let fail = *self.fail_commit.lock();
+        let stale = *self.stale_epoch_on_commit.lock();
+        let epoch = *self.epoch.lock();
+        if !fail && !stale {
+            for request in &requests {
+                if let Some(op_id) = &request.operation_id {
+                    let mapping = CommittedMapping {
+                        extent_id: request.extent_id,
+                        extent_version: request.extent_version,
+                        epoch,
+                        block_range: request.block_range.clone(),
+                        replica_locations: request.replica_locations.clone(),
+                        checksums: request.checksums.clone(),
+                    };
+                    self.committed_ops.lock().insert(*op_id, mapping);
+                }
+                self.committed.lock().push(request.clone());
+            }
+        }
+        async move {
+            if fail {
+                return Err(blockyard_common::Error::Raft("commit failed".to_string()));
+            }
+            if stale {
+                return Err(blockyard_common::Error::Raft("stale epoch".to_string()));
+            }
+            Ok(epoch)
+        }
+    }
+
     async fn lookup_operation(
         &self,
         operation_id: &OperationId,

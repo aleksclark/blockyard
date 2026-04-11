@@ -181,8 +181,8 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
             return Ok(Some(Bytes::from(vec![0u8; length])));
         }
 
-        let offset_within_extent = request.offset_bytes
-            - (_block_start * self.volume_config.block_size as u64);
+        let offset_within_extent =
+            request.offset_bytes - (_block_start * self.volume_config.block_size as u64);
         let length = request.length_bytes as u64;
 
         let mut last_error = None;
@@ -398,6 +398,17 @@ mod tests {
 
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(self.commit_epoch)
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            let epoch = self.commit_epoch;
+            async move {
+                let _ = requests;
+                Ok(epoch)
+            }
         }
 
         async fn acquire_lease(

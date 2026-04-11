@@ -54,10 +54,7 @@ async fn test_mount_write_crash_remount_verify() {
     cluster.kill_node(2).expect("SIGKILL node 2");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    cluster
-        .restart_node(2)
-        .await
-        .expect("restart node 2");
+    cluster.restart_node(2).await.expect("restart node 2");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     for i in 0..3 {
@@ -120,7 +117,9 @@ async fn test_stale_epoch_leader_failover() {
         .unwrap_or(false);
     assert!(pre_ok, "pre-kill write should succeed");
 
-    cluster.kill_node(0).expect("SIGKILL node 0 (likely leader)");
+    cluster
+        .kill_node(0)
+        .expect("SIGKILL node 0 (likely leader)");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     let mut write_succeeded = false;
@@ -129,10 +128,7 @@ async fn test_stale_epoch_leader_failover() {
         if let Ok(mut client) = result {
             let post_data = b"data-after-leader-kill";
             let post_eid = uuid::Uuid::new_v4().to_string();
-            if let Ok(resp) = client
-                .write_extent(&vol_id, &post_eid, 1, post_data)
-                .await
-            {
+            if let Ok(resp) = client.write_extent(&vol_id, &post_eid, 1, post_data).await {
                 let ok = resp
                     .get("WriteResp")
                     .and_then(|r| r.get("success"))

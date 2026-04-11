@@ -57,8 +57,7 @@ async fn run_vm_test(scenario: &str) {
     }
 
     // Build the binaries.
-    let (blockyard_bin, ublk_e2e_bin) =
-        build_ublk_test_binaries().expect("build test binaries");
+    let (blockyard_bin, ublk_e2e_bin) = build_ublk_test_binaries().expect("build test binaries");
 
     // Boot the VM.
     let config = QemuVmConfig {
@@ -92,9 +91,7 @@ async fn run_vm_test(scenario: &str) {
         "/usr/local/bin/ublk-e2e --test {} --blockyard-bin /usr/local/bin/blockyard --cluster-size 3",
         scenario
     );
-    let output = vm
-        .ssh_exec_checked(&cmd)
-        .expect("ublk-e2e test runner");
+    let output = vm.ssh_exec_checked(&cmd).expect("ublk-e2e test runner");
 
     eprintln!("=== ublk-e2e output ===\n{}\n=== end ===", output);
 

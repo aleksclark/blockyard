@@ -9,6 +9,20 @@ use blockyard_common::{
     DiskId, EpochId, ExtentId, LeaseRequest, NodeId, OperationId, ProtectionPolicy, VolumeId,
 };
 
+/// A single extent mapping entry used in both individual and batch commit requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtentMappingEntry {
+    pub volume_id: VolumeId,
+    pub block_range: Range<u64>,
+    pub extent_id: ExtentId,
+    pub extent_version: u64,
+    pub epoch: EpochId,
+    pub replica_locations: Vec<NodeId>,
+    pub checksums: Vec<Vec<u8>>,
+    pub operation_id: Option<OperationId>,
+    pub previous_version: Option<u64>,
+}
+
 /// A request to be applied to the metadata state machine via Raft consensus.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetadataRequest {
@@ -44,6 +58,10 @@ pub enum MetadataRequest {
         /// Previous mapping version for compare-and-swap.
         previous_version: Option<u64>,
     },
+
+    /// Commit multiple extent mappings in a single Raft proposal (batch optimization).
+    /// All mappings are applied atomically — either all succeed or none do.
+    CommitExtentMappingBatch { mappings: Vec<ExtentMappingEntry> },
 
     /// Update the placement map for a set of nodes.
     UpdatePlacementMap {

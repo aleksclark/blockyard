@@ -146,6 +146,26 @@ impl MetadataService {
         }
     }
 
+    /// Commit multiple extent mappings in a single Raft proposal (batch optimization).
+    ///
+    /// All mappings are applied atomically — either all succeed or none do.
+    /// Returns the epoch after all mappings are applied.
+    pub async fn commit_extent_mappings_batch(
+        &self,
+        mappings: Vec<crate::request::ExtentMappingEntry>,
+    ) -> Result<EpochId, Error> {
+        let resp = self
+            .commit(MetadataRequest::CommitExtentMappingBatch { mappings })
+            .await?;
+        match resp {
+            MetadataResponse::Epoch(e) => Ok(e),
+            MetadataResponse::Error(msg) => Err(Error::Raft(msg)),
+            _ => Err(Error::Raft(
+                "unexpected response from commit_extent_mappings_batch".into(),
+            )),
+        }
+    }
+
     /// Acquire a volume write lease (P6.1).
     pub async fn acquire_lease(
         &self,

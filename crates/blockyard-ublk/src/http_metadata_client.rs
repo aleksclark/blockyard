@@ -272,6 +272,54 @@ impl MetadataClient for HttpMetadataClient {
         Ok(EpochId::new(mapping_resp.epoch))
     }
 
+    async fn commit_extent_mappings_batch(
+        &self,
+        requests: Vec<CommitRequest>,
+    ) -> Result<EpochId, Error> {
+        if requests.is_empty() {
+            return self.current_epoch().await;
+        }
+
+        let api_reqs: Vec<ExtentMappingRequest> = requests
+            .into_iter()
+            .map(|request| ExtentMappingRequest {
+                volume_id: request.volume_id,
+                block_range_start: request.block_range.start,
+                block_range_end: request.block_range.end,
+                extent_id: request.extent_id,
+                extent_version: request.extent_version,
+                epoch: request.epoch.as_u64(),
+                replica_locations: request.replica_locations,
+                checksums: request.checksums,
+                operation_id: request.operation_id,
+                previous_version: request.previous_version,
+            })
+            .collect();
+
+        let resp = self
+            .client
+            .post(self.url("/api/v1/extent-mappings/batch"))
+            .json(&api_reqs)
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("failed to commit extent mapping batch: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Raft(format!(
+                "extent mapping batch commit failed (status {status}): {body}"
+            )));
+        }
+
+        let mapping_resp: ExtentMappingResponse = resp
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("failed to parse batch commit response: {e}")))?;
+
+        Ok(EpochId::new(mapping_resp.epoch))
+    }
+
     async fn lookup_operation(
         &self,
         operation_id: &OperationId,

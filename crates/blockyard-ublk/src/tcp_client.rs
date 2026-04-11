@@ -17,11 +17,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as TokioMutex;
 
-use blockyard_common::error::Error;
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
 use blockyard_client::error::ReadError;
 use blockyard_client::traits::DataNodeReader;
 use blockyard_client::types::DataNodeReadResult;
+use blockyard_common::error::Error;
+use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
 use blockyard_protocol::messages::{
     CURRENT_PROTOCOL_VERSION, HandshakeRequest, HandshakeResponse, ProtocolMessage,
     ReadExtentRequest, WriteExtentRequest, WriteExtentResponse,
@@ -176,15 +176,29 @@ impl TcpDataNodeClient {
         length: u64,
     ) -> Result<Bytes, Error> {
         let result = self
-            .try_read_extent(node_id, volume_id, extent_id, extent_version, offset, length)
+            .try_read_extent(
+                node_id,
+                volume_id,
+                extent_id,
+                extent_version,
+                offset,
+                length,
+            )
             .await;
 
         match result {
             Ok(data) => Ok(data),
             Err(_) => {
                 self.drop_connection(&node_id);
-                self.try_read_extent(node_id, volume_id, extent_id, extent_version, offset, length)
-                    .await
+                self.try_read_extent(
+                    node_id,
+                    volume_id,
+                    extent_id,
+                    extent_version,
+                    offset,
+                    length,
+                )
+                .await
             }
         }
     }
@@ -234,9 +248,10 @@ impl TcpDataNodeClient {
 
                 if resp.payload_size > 0 {
                     let mut payload = vec![0u8; resp.payload_size as usize];
-                    stream.read_exact(&mut payload).await.map_err(|e| {
-                        Error::Network(format!("failed to read payload: {e}"))
-                    })?;
+                    stream
+                        .read_exact(&mut payload)
+                        .await
+                        .map_err(|e| Error::Network(format!("failed to read payload: {e}")))?;
                     Ok(Bytes::from(payload))
                 } else {
                     Ok(Bytes::new())
@@ -266,7 +281,13 @@ impl DataNodeReader for TcpDataNodeClient {
         length: u64,
     ) -> Result<DataNodeReadResult, ReadError> {
         let data = TcpDataNodeClient::read_extent(
-            self, node_id, volume_id, extent_id, extent_version, offset, length,
+            self,
+            node_id,
+            volume_id,
+            extent_id,
+            extent_version,
+            offset,
+            length,
         )
         .await
         .map_err(|e| ReadError::DataNodeReadFailed {
@@ -1208,7 +1229,12 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("no address registered"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("no address registered")
+        );
     }
 
     #[tokio::test]

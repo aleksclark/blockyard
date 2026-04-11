@@ -32,6 +32,7 @@ pub mod tcp_client;
 pub mod traits;
 pub mod ublk;
 pub mod watermark;
+pub mod write_batcher;
 pub mod write_pipeline;
 
 pub use ambiguous_write::{AmbiguousWriteOutcome, AmbiguousWriteResolver};
@@ -52,4 +53,5 @@ pub use tcp_client::TcpDataNodeClient;
 pub use traits::{DataNodeClient, MetadataClient};
 pub use ublk::{BlockHandler, IoOperation, IoRequest, UblkDevice};
 pub use watermark::WriteWatermark;
+pub use write_batcher::{CacheUpdate, WriteBatcher, WriteBatcherConfig};
 pub use write_pipeline::{WriteOutcome, WritePipeline, WriteRequest};

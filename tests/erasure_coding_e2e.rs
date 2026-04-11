@@ -75,9 +75,7 @@ async fn test_ec_write_read_roundtrip() {
 async fn test_ec_survives_one_node_loss() {
     let (cluster, vol_id) = setup_ec_cluster().await;
 
-    let extent_ids: Vec<String> = (0..3)
-        .map(|_| uuid::Uuid::new_v4().to_string())
-        .collect();
+    let extent_ids: Vec<String> = (0..3).map(|_| uuid::Uuid::new_v4().to_string()).collect();
 
     for (i, eid) in extent_ids.iter().enumerate() {
         let data = format!("ec-data-{}", i);

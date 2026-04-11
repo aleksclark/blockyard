@@ -182,6 +182,7 @@ impl QuorumHealthMonitor {
 mod tests {
     use super::*;
     use crate::metadata_cache::MetadataCache;
+    use crate::traits::CommitRequest;
     use crate::watermark::WriteWatermark;
     use blockyard_common::EpochId;
     use blockyard_common::error::Error;
@@ -205,6 +206,16 @@ mod tests {
         }
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Ok(EpochId::new(1))
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            async move {
+                let _ = requests;
+                Ok(EpochId::new(1))
+            }
         }
 
         async fn acquire_lease(
@@ -259,6 +270,16 @@ mod tests {
         }
         async fn current_epoch(&self) -> Result<EpochId, Error> {
             Err(Error::Raft("no quorum".into()))
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            async move {
+                let _ = requests;
+                Err(Error::Raft("no quorum".into()))
+            }
         }
 
         async fn acquire_lease(
