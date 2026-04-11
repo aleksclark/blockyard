@@ -48,6 +48,7 @@ pub struct DiskInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum NodeState {
     Online,
     Offline,

@@ -279,7 +279,8 @@ impl<H: BlockHandler> UblkDevice<H> {
                                     let buf_addr = bufs[tag as usize].as_mut_ptr();
                                     q.complete_io_cmd(tag, buf_addr, Ok(UblkIORes::Result(length as i32)));
                                 }
-                                Err(_e) => {
+                                Err(e) => {
+                                    tracing::error!(?e, tag, "ublk IO handler error");
                                     let buf_addr = bufs[tag as usize].as_mut_ptr();
                                     q.complete_io_cmd(tag, buf_addr, Err(LibUblkError::OtherError(-5)));
                                 }
