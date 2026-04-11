@@ -109,8 +109,32 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
                 tracing::debug!(
                     attempt = attempt,
                     operation_id = %operation_id,
-                    "retrying write with same operation ID"
+                    "retrying write — checking if previous attempt was committed"
                 );
+                if let Ok(Some(committed)) =
+                    self.metadata_client.lookup_operation(&operation_id).await
+                {
+                    tracing::info!(
+                        operation_id = %operation_id,
+                        extent_id = %committed.extent_id,
+                        "previous attempt was committed; returning success"
+                    );
+                    self.watermark.advance(committed.epoch);
+                    self.cache.set_extent_mapping(
+                        &request.volume_id,
+                        request.block_range.start,
+                        crate::metadata_cache::CachedExtentMapping {
+                            extent_id: committed.extent_id,
+                            extent_version: committed.extent_version,
+                            replica_locations: committed.replica_locations,
+                            checksums: committed.checksums,
+                            size_bytes: request.data.len() as u64,
+                        },
+                    );
+                    return Ok(WriteOutcome::Committed {
+                        epoch: committed.epoch,
+                    });
+                }
             }
 
             match self.execute_once(&request, operation_id).await {
@@ -1210,6 +1234,127 @@ mod tests {
                     other
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_checks_committed_before_regenerating() {
+        let (cache, vid) = setup_cache_with_volume(1, 3);
+        let cache = Arc::new(cache);
+
+        let data_client = Arc::new(MockDataNode::new(true));
+
+        struct LookupAwareMetadata {
+            commit_epoch: EpochId,
+            committed: parking_lot::Mutex<Option<CommittedMapping>>,
+        }
+        impl MetadataClient for LookupAwareMetadata {
+            async fn refresh_metadata(
+                &self,
+                cache: &MetadataCache,
+            ) -> Result<EpochId, Error> {
+                cache.set_epoch(self.commit_epoch);
+                Ok(self.commit_epoch)
+            }
+            async fn commit_extent_mapping(
+                &self,
+                req: CommitRequest,
+            ) -> Result<EpochId, Error> {
+                *self.committed.lock() = Some(CommittedMapping {
+                    extent_id: req.extent_id,
+                    extent_version: req.extent_version,
+                    epoch: self.commit_epoch,
+                    block_range: req.block_range,
+                    replica_locations: req.replica_locations,
+                    checksums: req.checksums,
+                });
+                Ok(self.commit_epoch)
+            }
+            async fn lookup_operation(
+                &self,
+                _op: &OperationId,
+            ) -> Result<Option<CommittedMapping>, Error> {
+                Ok(self.committed.lock().clone())
+            }
+            async fn current_epoch(&self) -> Result<EpochId, Error> {
+                Ok(self.commit_epoch)
+            }
+            fn commit_extent_mappings_batch(
+                &self,
+                _reqs: Vec<CommitRequest>,
+            ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+                let e = self.commit_epoch;
+                async move { Ok(e) }
+            }
+            async fn acquire_lease(
+                &self,
+                _: VolumeId,
+                _: blockyard_common::SessionId,
+                _: u64,
+                _: u64,
+            ) -> Result<blockyard_common::LeaseResponse, Error> {
+                Ok(blockyard_common::LeaseResponse::Denied {
+                    reason: "mock".into(),
+                })
+            }
+            async fn renew_lease(
+                &self,
+                _: VolumeId,
+                _: blockyard_common::SessionId,
+                _: u64,
+                _: u64,
+            ) -> Result<blockyard_common::LeaseResponse, Error> {
+                Ok(blockyard_common::LeaseResponse::Denied {
+                    reason: "mock".into(),
+                })
+            }
+            async fn release_lease(
+                &self,
+                _: VolumeId,
+                _: blockyard_common::SessionId,
+            ) -> Result<blockyard_common::LeaseResponse, Error> {
+                Ok(blockyard_common::LeaseResponse::Released)
+            }
+        }
+
+        let metadata_client = Arc::new(LookupAwareMetadata {
+            commit_epoch: EpochId::new(1),
+            committed: parking_lot::Mutex::new(None),
+        });
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        stale_handler.set_paused(true);
+
+        let pipeline = WritePipeline::new(
+            data_client,
+            metadata_client.clone(),
+            Arc::clone(&cache),
+            session.clone(),
+            Arc::clone(&watermark),
+            stale_handler.clone(),
+        )
+        .with_max_retries(3);
+
+        let op_id = session.next_operation_id();
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..64,
+            data: Bytes::from(vec![0xBB; 4096]),
+        };
+
+        stale_handler.set_paused(false);
+        let first_result = pipeline.execute_once(&req, op_id).await.unwrap();
+        assert!(matches!(first_result, WriteOutcome::Committed { .. }));
+
+        stale_handler.set_paused(true);
+        let final_result = pipeline.execute_with_op_id(req, op_id).await.unwrap();
+        match final_result {
+            WriteOutcome::Committed { epoch } => {
+                assert_eq!(epoch, EpochId::new(1));
+            }
+            other => panic!("expected Committed from lookup, got {:?}", other),
         }
     }
 }
