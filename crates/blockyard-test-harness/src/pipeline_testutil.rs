@@ -37,6 +37,7 @@ pub fn setup_test_pipeline<D: DataNodeClient, M: MetadataClient>(
         extent_version: 0,
         replica_locations: node_ids.to_vec(),
         checksums: vec![],
+        size_bytes: 4096,
     };
     cache.set_extent_mapping(&volume_id, 0, mapping);
 
