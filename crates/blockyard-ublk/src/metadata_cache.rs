@@ -26,6 +26,7 @@ pub struct CachedExtentMapping {
 pub struct CachedVolumeInfo {
     pub volume_id: VolumeId,
     pub size_bytes: u64,
+    pub block_size: u32,
     pub protection: ProtectionPolicy,
     pub extent_mappings: BTreeMap<u64, CachedExtentMapping>,
 }
@@ -167,7 +168,7 @@ impl MetadataCache {
         // Verify the requested range actually falls within this extent's coverage.
         // The extent covers [block_start, block_start + extent_blocks).
         if mapping.size_bytes > 0 {
-            let block_size = 4096u64; // standard block size
+            let block_size = vol.block_size.max(1) as u64;
             let extent_blocks = mapping.size_bytes.div_ceil(block_size);
             let extent_end_block = block_start + extent_blocks;
             if block_range.start >= extent_end_block {
@@ -273,6 +274,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         };
@@ -295,6 +297,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         };
@@ -312,6 +315,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         };
@@ -344,6 +348,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         };
@@ -370,6 +375,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024 * 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: mappings,
         };
@@ -389,6 +395,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         };
@@ -413,6 +420,7 @@ mod tests {
         let new_volumes = vec![CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 2048,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 2 },
             extent_mappings: BTreeMap::new(),
         }];
@@ -431,6 +439,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: vid1,
             size_bytes: 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
             extent_mappings: BTreeMap::new(),
         };
@@ -469,6 +478,7 @@ mod tests {
         let info = CachedVolumeInfo {
             volume_id: VolumeId::generate(),
             size_bytes: 4096,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         };
@@ -532,5 +542,71 @@ mod tests {
     fn test_remove_volume_not_present() {
         let cache = MetadataCache::new();
         cache.remove_volume(&VolumeId::generate());
+    }
+
+    #[test]
+    fn test_find_extent_inflated_size_no_phantom_match() {
+        let cache = MetadataCache::new();
+        let vid = VolumeId::generate();
+        let eid = ExtentId::generate();
+        let mut mappings = BTreeMap::new();
+        mappings.insert(
+            0,
+            CachedExtentMapping {
+                extent_id: eid,
+                extent_version: 1,
+                replica_locations: vec![NodeId::generate()],
+                checksums: vec![],
+                size_bytes: 4096,
+            },
+        );
+        let info = CachedVolumeInfo {
+            volume_id: vid,
+            size_bytes: 1024 * 1024,
+            block_size: 4096,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+            extent_mappings: mappings,
+        };
+        cache.set_volume(info);
+
+        assert!(cache.find_extent_for_range(&vid, &(0..1)).is_some());
+        assert!(
+            cache.find_extent_for_range(&vid, &(1..2)).is_none(),
+            "block 1 should not match a 4096-byte extent at block 0 (1 block only)"
+        );
+        assert!(
+            cache.find_extent_for_range(&vid, &(128..129)).is_none(),
+            "block 128 must not match; old bug with inflated size_bytes=524288 would match"
+        );
+    }
+
+    #[test]
+    fn test_find_extent_uses_volume_block_size() {
+        let cache = MetadataCache::new();
+        let vid = VolumeId::generate();
+        let eid = ExtentId::generate();
+        let mut mappings = BTreeMap::new();
+        mappings.insert(
+            0,
+            CachedExtentMapping {
+                extent_id: eid,
+                extent_version: 1,
+                replica_locations: vec![NodeId::generate()],
+                checksums: vec![],
+                size_bytes: 8192,
+            },
+        );
+        let info = CachedVolumeInfo {
+            volume_id: vid,
+            size_bytes: 1024 * 1024,
+            block_size: 4096,
+            protection: ProtectionPolicy::Replicated { replicas: 3 },
+            extent_mappings: mappings,
+        };
+        cache.set_volume(info);
+
+        assert!(cache.find_extent_for_range(&vid, &(0..1)).is_some());
+        assert!(cache.find_extent_for_range(&vid, &(1..2)).is_some());
+        assert!(cache.find_extent_for_range(&vid, &(2..3)).is_none());
     }
 }

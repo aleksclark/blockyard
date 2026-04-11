@@ -219,6 +219,7 @@ impl MetadataClient for HttpMetadataClient {
                     cache_volumes.push(crate::metadata_cache::CachedVolumeInfo {
                         volume_id: v.id,
                         size_bytes: v.size_bytes,
+                        block_size: 4096,
                         protection: v.protection,
                         extent_mappings: std::collections::BTreeMap::new(),
                     });

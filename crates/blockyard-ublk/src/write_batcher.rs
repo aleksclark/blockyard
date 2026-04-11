@@ -389,6 +389,7 @@ mod tests {
         cache.set_volume(CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024 * 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         });
@@ -837,6 +838,7 @@ mod tests {
         cache.set_volume(CachedVolumeInfo {
             volume_id: vid,
             size_bytes: 1024 * 1024,
+            block_size: 4096,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
             extent_mappings: BTreeMap::new(),
         });
