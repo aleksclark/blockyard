@@ -292,7 +292,26 @@ impl ExtentStore {
         let meta_json = serde_json::to_string_pretty(&meta).map_err(|e| {
             StorageError::StagingError(format!("failed to serialize extent metadata: {e}"))
         })?;
-        fs::write(&meta_path, &meta_json)?;
+
+        let mut meta_file = File::create(&meta_path).map_err(|e| {
+            StorageError::StagingError(format!(
+                "failed to create metadata file {}: {e}",
+                meta_path.display()
+            ))
+        })?;
+        meta_file.write_all(meta_json.as_bytes()).map_err(|e| {
+            StorageError::StagingError(format!(
+                "failed to write metadata file {}: {e}",
+                meta_path.display()
+            ))
+        })?;
+        meta_file.sync_all().map_err(|e| {
+            StorageError::StagingError(format!(
+                "fsync failed for metadata file {}: {e}",
+                meta_path.display()
+            ))
+        })?;
+        drop(meta_file);
 
         fs::rename(&staged_path, &committed_path).map_err(|e| {
             StorageError::StagingError(format!(
@@ -992,5 +1011,29 @@ mod tests {
         let store = ExtentStore::new(dir.path().to_path_buf(), DiskId::generate());
         let cleaned = store.cleanup_orphaned_staged(0).unwrap();
         assert!(cleaned.is_empty());
+    }
+
+    #[test]
+    fn test_commit_extent_meta_durable_before_rename() {
+        let (_dir, store) = setup_disk();
+        let eid = ExtentId::generate();
+        let data = b"meta durability test";
+
+        let (_, checksum) = store.stage_extent(eid, 1, data).unwrap();
+        let entry = store
+            .commit_extent(eid, 1, &checksum, data.len() as u64, StorageClass::Default)
+            .unwrap();
+
+        let meta_path = extent_meta_path(store.mount_path(), eid, 1);
+        assert!(meta_path.exists(), "metadata sidecar must exist after commit");
+
+        let meta_json = fs::read_to_string(&meta_path).unwrap();
+        let meta: ExtentMeta = serde_json::from_str(&meta_json).unwrap();
+        assert_eq!(meta.extent_id, eid);
+        assert_eq!(meta.version, 1);
+        assert_eq!(meta.checksum, checksum);
+        assert_eq!(meta.size, data.len() as u64);
+
+        assert!(entry.path.exists(), "committed data file must exist");
     }
 }

@@ -71,12 +71,14 @@ impl ManagedDisk {
 #[derive(Debug)]
 pub struct DiskInventory {
     disks: RwLock<HashMap<DiskId, ManagedDisk>>,
+    drain_queue: RwLock<Vec<DiskId>>,
 }
 
 impl DiskInventory {
     pub fn new() -> Self {
         Self {
             disks: RwLock::new(HashMap::new()),
+            drain_queue: RwLock::new(Vec::new()),
         }
     }
 
@@ -91,10 +93,23 @@ impl DiskInventory {
         mount_paths: &[PathBuf],
         require_qualification: bool,
     ) -> Result<Vec<DiskId>, StorageError> {
+        self.discover_disks_for_node(mount_paths, require_qualification, None)
+    }
+
+    /// Discover and initialize disks, binding them to the given node.
+    ///
+    /// Sets `node_id` in the on-disk metadata to prevent another node
+    /// from claiming the same disk (§5.10.2).
+    pub fn discover_disks_for_node(
+        &self,
+        mount_paths: &[PathBuf],
+        require_qualification: bool,
+        node_id: Option<blockyard_common::NodeId>,
+    ) -> Result<Vec<DiskId>, StorageError> {
         let mut discovered = Vec::new();
 
         for path in mount_paths {
-            match self.discover_single_disk(path, require_qualification) {
+            match self.discover_single_disk(path, require_qualification, node_id) {
                 Ok(disk_id) => {
                     info!(%disk_id, path = %path.display(), "discovered disk");
                     discovered.push(disk_id);
@@ -113,6 +128,7 @@ impl DiskInventory {
         &self,
         mount_path: &Path,
         require_qualification: bool,
+        node_id: Option<blockyard_common::NodeId>,
     ) -> Result<DiskId, StorageError> {
         if !mount_path.is_dir() {
             return Err(StorageError::DiskNotFound(format!(
@@ -123,7 +139,7 @@ impl DiskInventory {
 
         validate_xfs(mount_path)?;
 
-        let disk_id = read_or_assign_disk_id(mount_path)?;
+        let disk_id = read_or_assign_disk_id(mount_path, node_id)?;
 
         let managed = if require_qualification {
             ManagedDisk::new_qualifying(disk_id, mount_path.to_path_buf())
@@ -160,6 +176,16 @@ impl DiskInventory {
 
         info!(%disk_id, %old_state, %new_state, "disk state transition");
         disk.state = new_state;
+
+        if new_state == DiskState::Degraded {
+            if disk.state.validate_transition(DiskState::Draining).is_ok() {
+                info!(%disk_id, "auto-evacuating degraded disk → draining");
+                disk.state = DiskState::Draining;
+            }
+            drop(disks);
+            self.drain_queue.write().push(disk_id);
+        }
+
         Ok(old_state)
     }
 
@@ -310,6 +336,21 @@ impl DiskInventory {
             .ok_or_else(|| StorageError::DiskNotFound(format!("unknown disk: {disk_id}")))?;
         Ok(disk.bad_regions.overlaps(offset, length))
     }
+
+    /// Check whether a disk has any quarantined bad regions.
+    pub fn has_bad_regions(&self, disk_id: DiskId) -> Result<bool, StorageError> {
+        let disks = self.disks.read();
+        let disk = disks
+            .get(&disk_id)
+            .ok_or_else(|| StorageError::DiskNotFound(format!("unknown disk: {disk_id}")))?;
+        Ok(disk.bad_regions.count() > 0)
+    }
+
+    /// Take all disks that have been enqueued for drain (auto-evacuation from degraded).
+    pub fn take_drain_queue(&self) -> Vec<DiskId> {
+        let mut queue = self.drain_queue.write();
+        std::mem::take(&mut *queue)
+    }
 }
 
 impl Default for DiskInventory {
@@ -318,12 +359,22 @@ impl Default for DiskInventory {
     }
 }
 
-/// Validate that the given path is on an XFS filesystem (§3.3, §5.10.3).
+/// Validate that the given path is on an XFS filesystem (§3.3, §5.10.3, invariant 8).
 ///
-/// In production this would query `statfs` for the magic number.
-/// For testability, we check for the marker file `.blockyard_xfs_ok`
-/// or validate via the real filesystem type.
+/// Returns an error if the filesystem is not XFS. Override mechanisms:
+/// - Marker file `.blockyard_xfs_ok` in the mount path (for dev/testing)
+/// - Environment variable `BLOCKYARD_SKIP_XFS_CHECK=1`
 fn validate_xfs(path: &Path) -> Result<(), StorageError> {
+    if std::env::var("BLOCKYARD_SKIP_XFS_CHECK").map_or(false, |v| v == "1") {
+        debug!(path = %path.display(), "XFS validation: skipped via BLOCKYARD_SKIP_XFS_CHECK");
+        return Ok(());
+    }
+
+    if path.join(".blockyard_xfs_ok").exists() {
+        debug!(path = %path.display(), "XFS validation: accepted via marker file");
+        return Ok(());
+    }
+
     #[cfg(target_os = "linux")]
     {
         let _ = std::fs::metadata(path).map_err(|e| {
@@ -339,28 +390,36 @@ fn validate_xfs(path: &Path) -> Result<(), StorageError> {
             if fs_type == "xfs" {
                 return Ok(());
             }
+            return Err(StorageError::XfsValidation(format!(
+                "{} is not an XFS filesystem (detected: '{}'). \
+                 Use .blockyard_xfs_ok marker file or BLOCKYARD_SKIP_XFS_CHECK=1 to override.",
+                path.display(),
+                fs_type
+            )));
         }
 
-        if path.join(".blockyard_xfs_ok").exists() {
-            return Ok(());
-        }
-
-        debug!(path = %path.display(), "XFS validation: accepting directory as potentially valid");
-        Ok(())
+        Err(StorageError::XfsValidation(format!(
+            "could not determine filesystem type for {}. \
+             Use .blockyard_xfs_ok marker file or BLOCKYARD_SKIP_XFS_CHECK=1 to override.",
+            path.display()
+        )))
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        if path.join(".blockyard_xfs_ok").exists() {
-            return Ok(());
-        }
-        debug!(path = %path.display(), "XFS validation: non-Linux, accepting directory");
-        Ok(())
+        Err(StorageError::XfsValidation(format!(
+            "{} cannot be validated as XFS on non-Linux. \
+             Use .blockyard_xfs_ok marker file or BLOCKYARD_SKIP_XFS_CHECK=1 to override.",
+            path.display()
+        )))
     }
 }
 
 /// Read or assign a persistent DiskId for the given mount path.
-fn read_or_assign_disk_id(mount_path: &Path) -> Result<DiskId, StorageError> {
+fn read_or_assign_disk_id(
+    mount_path: &Path,
+    node_id: Option<blockyard_common::NodeId>,
+) -> Result<DiskId, StorageError> {
     let id_path = mount_path.join(DISK_ID_FILENAME);
 
     if id_path.exists() {
@@ -384,7 +443,7 @@ fn read_or_assign_disk_id(mount_path: &Path) -> Result<DiskId, StorageError> {
         let disk_id = DiskId::generate();
         let metadata = DiskMetadata {
             disk_id,
-            node_id: None,
+            node_id,
         };
 
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| {
@@ -768,12 +827,49 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_xfs_rejects_non_xfs_without_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let result = validate_xfs(path);
+        assert!(result.is_err(), "should reject directory without XFS or marker");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("XFS") || err.contains("xfs"),
+            "error should mention XFS: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_xfs_skip_env_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        // SAFETY: test is single-threaded for this env var; no other test reads
+        // BLOCKYARD_SKIP_XFS_CHECK concurrently.
+        unsafe { std::env::set_var("BLOCKYARD_SKIP_XFS_CHECK", "1") };
+        let result = validate_xfs(path);
+        unsafe { std::env::remove_var("BLOCKYARD_SKIP_XFS_CHECK") };
+        assert!(result.is_ok(), "should accept when env var is set");
+    }
+
+    #[test]
+    fn test_validate_xfs_env_var_not_1_still_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        // SAFETY: test is single-threaded for this env var; no other test reads
+        // BLOCKYARD_SKIP_XFS_CHECK concurrently.
+        unsafe { std::env::set_var("BLOCKYARD_SKIP_XFS_CHECK", "0") };
+        let result = validate_xfs(path);
+        unsafe { std::env::remove_var("BLOCKYARD_SKIP_XFS_CHECK") };
+        assert!(result.is_err(), "env var value '0' should not skip validation");
+    }
+
+    #[test]
     fn test_read_or_assign_disk_id_new() {
         let dir = tempfile::tempdir().unwrap();
-        let id = read_or_assign_disk_id(dir.path()).unwrap();
+        let id = read_or_assign_disk_id(dir.path(), None).unwrap();
         assert!(dir.path().join(DISK_ID_FILENAME).exists());
 
-        let id2 = read_or_assign_disk_id(dir.path()).unwrap();
+        let id2 = read_or_assign_disk_id(dir.path(), None).unwrap();
         assert_eq!(id, id2);
     }
 
@@ -781,7 +877,7 @@ mod tests {
     fn test_read_disk_id_corrupt() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(DISK_ID_FILENAME), "not json").unwrap();
-        assert!(read_or_assign_disk_id(dir.path()).is_err());
+        assert!(read_or_assign_disk_id(dir.path(), None).is_err());
     }
 
     #[test]
@@ -796,8 +892,66 @@ mod tests {
     }
 
     #[test]
+    fn test_read_or_assign_disk_id_sets_node_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let nid = blockyard_common::NodeId::generate();
+        let _id = read_or_assign_disk_id(dir.path(), Some(nid)).unwrap();
+
+        let contents =
+            std::fs::read_to_string(dir.path().join(DISK_ID_FILENAME)).unwrap();
+        let meta: DiskMetadata = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(meta.node_id, Some(nid));
+    }
+
+    #[test]
+    fn test_discover_disks_for_node_binds_node_id() {
+        let (_dir, path) = setup_disk_dir();
+        let nid = blockyard_common::NodeId::generate();
+        let inventory = DiskInventory::new();
+        let ids = inventory
+            .discover_disks_for_node(&[path.clone()], false, Some(nid))
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let contents =
+            std::fs::read_to_string(path.join(DISK_ID_FILENAME)).unwrap();
+        let meta: DiskMetadata = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(meta.node_id, Some(nid));
+    }
+
+    #[test]
     fn test_default_inventory() {
         let inventory = DiskInventory::default();
         assert!(inventory.list_disks().is_empty());
+    }
+
+    #[test]
+    fn test_degraded_auto_evacuates_to_draining() {
+        let (_dir, path) = setup_disk_dir();
+        let inventory = DiskInventory::new();
+        let ids = inventory.discover_disks(&[path], false).unwrap();
+        let disk_id = ids[0];
+
+        assert!(inventory.take_drain_queue().is_empty());
+
+        inventory
+            .transition_state(disk_id, DiskState::Degraded)
+            .unwrap();
+
+        let state = inventory.get_state(disk_id).unwrap();
+        assert_eq!(
+            state,
+            DiskState::Draining,
+            "degraded disk should auto-transition to draining"
+        );
+
+        let queue = inventory.take_drain_queue();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], disk_id);
+
+        assert!(
+            inventory.take_drain_queue().is_empty(),
+            "drain queue should be emptied after take"
+        );
     }
 }
