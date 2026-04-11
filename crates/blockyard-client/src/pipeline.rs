@@ -860,4 +860,123 @@ mod tests {
 
         assert_eq!(result.extent_version, 5);
     }
+
+    // -----------------------------------------------------------------------
+    // Tests moved from tests/consistency.rs (P9B.3)
+    // Read-your-own-writes and stale mapping rejection.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_read_your_own_writes_watermark_enforced() {
+        let vol = volume();
+        let ext = extent();
+        let data = Bytes::from(vec![77u8; 4096]);
+        let checksum = blake3::hash(&data).to_hex().to_string();
+
+        let m = ExtentMapping {
+            volume_id: vol,
+            extent_id: ext,
+            extent_version: 5,
+            epoch: EpochId::new(1),
+            replicas: vec![crate::types::ReplicaLocation {
+                node_id: node_id(1),
+                is_local: false,
+            }],
+            checksum: checksum.clone(),
+        };
+
+        let meta = MockMetadata::new()
+            .with_mapping(vol, ext, m)
+            .with_watermark(5);
+
+        let reader = MockDataReader::new().with_node_behavior(
+            node_id(1),
+            NodeBehavior::Success {
+                checksum: checksum.clone(),
+                data: data.clone(),
+            },
+        );
+
+        let sid = session();
+        let pipeline = ReadPipeline::new(
+            meta,
+            reader,
+            MockHealthReporter::new(),
+            LatencyAwareSelector::new(),
+            sid,
+        );
+
+        let result = pipeline
+            .read(&ReadRequest {
+                volume_id: vol,
+                extent_id: ext,
+                offset: 0,
+                length: 4096,
+            })
+            .await;
+        assert!(result.is_ok(), "read should succeed: {:?}", result.err());
+        let read_result = result.unwrap();
+        assert_eq!(read_result.data, data);
+        assert_eq!(read_result.extent_version, 5);
+        assert_eq!(read_result.source_node, node_id(1));
+    }
+
+    #[tokio::test]
+    async fn test_ryow_stale_mapping_rejected() {
+        let vol = volume();
+        let ext = extent();
+
+        let stale_mapping = ExtentMapping {
+            volume_id: vol,
+            extent_id: ext,
+            extent_version: 2,
+            epoch: EpochId::new(1),
+            replicas: vec![crate::types::ReplicaLocation {
+                node_id: node_id(1),
+                is_local: false,
+            }],
+            checksum: "abc".to_string(),
+        };
+
+        let still_stale = ExtentMapping {
+            volume_id: vol,
+            extent_id: ext,
+            extent_version: 4,
+            epoch: EpochId::new(1),
+            replicas: vec![crate::types::ReplicaLocation {
+                node_id: node_id(1),
+                is_local: false,
+            }],
+            checksum: "abc".to_string(),
+        };
+
+        let meta = MockMetadata::new()
+            .with_mapping(vol, ext, stale_mapping)
+            .with_refreshed_mapping(vol, ext, still_stale)
+            .with_watermark(10);
+
+        let reader = MockDataReader::new();
+        let pipeline = make_pipeline(meta, reader);
+
+        let result = pipeline
+            .read(&ReadRequest {
+                volume_id: vol,
+                extent_id: ext,
+                offset: 0,
+                length: 4096,
+            })
+            .await;
+        assert!(result.is_err(), "stale mapping should be rejected");
+        match result.unwrap_err() {
+            ReadError::StaleMapping {
+                mapping_version,
+                required_version,
+                ..
+            } => {
+                assert_eq!(mapping_version, 4);
+                assert_eq!(required_version, 10);
+            }
+            other => panic!("expected StaleMapping error, got: {:?}", other),
+        }
+    }
 }

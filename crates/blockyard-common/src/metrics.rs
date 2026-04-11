@@ -1229,4 +1229,129 @@ mod tests {
         assert_eq!(r.gauge(ORPHANED_EXTENT_FILES, &l1), Some(15.0));
         assert_eq!(r.gauge(ORPHANED_EXTENT_FILES, &l2), Some(0.0));
     }
+
+    #[test]
+    fn test_volume_io_metrics_recorded() {
+        let recorder = InMemoryRecorder::new();
+        let vol_str = "vol-io-test-1";
+
+        record_volume_io_success(&recorder, vol_str);
+
+        let labels = Labels::from_pairs(&[("volume_id", vol_str)]);
+        assert_eq!(
+            recorder.counter(VOLUME_IO_SUCCESS_TOTAL, &labels),
+            1,
+            "success counter should be 1 after one successful write"
+        );
+        assert_eq!(
+            recorder.counter(VOLUME_IO_FAILURE_TOTAL, &labels),
+            0,
+            "failure counter should remain 0"
+        );
+
+        record_volume_io_failure(&recorder, vol_str);
+        record_volume_io_failure(&recorder, vol_str);
+
+        assert_eq!(recorder.counter(VOLUME_IO_FAILURE_TOTAL, &labels), 2);
+        assert_eq!(recorder.counter(VOLUME_IO_SUCCESS_TOTAL, &labels), 1);
+    }
+
+    #[test]
+    fn test_disk_state_transition_metrics() {
+        let recorder = InMemoryRecorder::new();
+        let disk_id_str = "disk-transition-1";
+
+        let transitions: &[(&str, &str)] = &[
+            ("healthy", "suspect"),
+            ("suspect", "degraded"),
+            ("degraded", "failed"),
+            ("failed", "removed"),
+            ("healthy", "draining"),
+            ("draining", "removed"),
+        ];
+
+        for (from, to) in transitions {
+            record_disk_state_transition(&recorder, disk_id_str, from, to);
+        }
+
+        let check = |from: &str, to: &str, expected: u64| {
+            let labels = Labels::from_pairs(&[
+                ("disk_id", disk_id_str),
+                ("from_state", from),
+                ("to_state", to),
+            ]);
+            assert_eq!(
+                recorder.counter(DISK_STATE_TRANSITION_TOTAL, &labels),
+                expected,
+                "transition {from} -> {to} should have count {expected}"
+            );
+        };
+
+        check("healthy", "suspect", 1);
+        check("suspect", "degraded", 1);
+        check("degraded", "failed", 1);
+        check("failed", "removed", 1);
+        check("healthy", "draining", 1);
+        check("draining", "removed", 1);
+
+        record_disk_state_transition(&recorder, disk_id_str, "healthy", "suspect");
+        check("healthy", "suspect", 2);
+    }
+
+    #[test]
+    fn test_all_metric_constants_have_helpers() {
+        let recorder = NoopRecorder;
+
+        record_volume_io_success(&recorder, "vol-1");
+        record_volume_io_failure(&recorder, "vol-1");
+
+        set_client_watermark(&recorder, "sess-1", 1);
+        record_stale_epoch_retry(&recorder, "sess-1");
+
+        set_foreground_io_load(&recorder, "node-1", 1);
+        set_background_io_load(&recorder, "node-1", 1);
+
+        record_disk_state_transition(&recorder, "disk-1", "healthy", "suspect");
+
+        record_scrub_finding(&recorder, "node-1", "disk-1");
+        set_scrub_last_completed(&recorder, "node-1", "disk-1", 1.0);
+
+        set_repair_backlog_size(&recorder, "node-1", 1);
+        record_repair_completion(&recorder, "node-1");
+
+        set_orphaned_extent_files(&recorder, "node-1", 1);
+
+        set_metadata_quorum_health(&recorder, "rg-1", true);
+        record_metadata_commit_latency(&recorder, "rg-1", 0.001);
+
+        assert_eq!(
+            ALL_METRIC_NAMES.len(),
+            14,
+            "ALL_METRIC_NAMES should contain all 14 metric constants"
+        );
+
+        let helpers_called = [
+            VOLUME_IO_SUCCESS_TOTAL,
+            VOLUME_IO_FAILURE_TOTAL,
+            CLIENT_WATERMARK_VERSION,
+            CLIENT_STALE_EPOCH_RETRIES_TOTAL,
+            NODE_FOREGROUND_IO_LOAD,
+            NODE_BACKGROUND_IO_LOAD,
+            DISK_STATE_TRANSITION_TOTAL,
+            SCRUB_FINDINGS_TOTAL,
+            SCRUB_LAST_COMPLETED_TIMESTAMP,
+            REPAIR_BACKLOG_SIZE,
+            REPAIR_COMPLETIONS_TOTAL,
+            ORPHANED_EXTENT_FILES,
+            METADATA_QUORUM_HEALTH,
+            METADATA_COMMIT_LATENCY_SECONDS,
+        ];
+
+        for name in ALL_METRIC_NAMES {
+            assert!(
+                helpers_called.contains(name),
+                "metric constant {name} was not exercised by a helper function call"
+            );
+        }
+    }
 }

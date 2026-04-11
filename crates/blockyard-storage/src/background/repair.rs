@@ -1095,4 +1095,70 @@ mod tests {
         let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), handle).await;
         assert!(result.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_repair_metrics_recorded() {
+        use blockyard_common::metrics::{record_repair_completion, set_repair_backlog_size};
+        use blockyard_common::{
+            InMemoryRecorder, Labels, REPAIR_BACKLOG_SIZE, REPAIR_COMPLETIONS_TOTAL,
+        };
+
+        let recorder = InMemoryRecorder::new();
+        let node_id_str = "node-repair-1";
+
+        let worker = RepairWorker::new(RepairConfig::default());
+        let extent_reader = FakeRepairReader::new();
+        let frag_reader = FakeFragmentReader::new();
+        let extent_writer = FakeRepairWriter::new();
+        let ec = FakeEcReconstructor::new(Ok(Bytes::from_static(b"reconstructed")));
+        let limiter = TokenBucket::new(1000, 1000);
+
+        let source_disk = DiskId::generate();
+        let target_disk = DiskId::generate();
+
+        for i in 0..3 {
+            let eid = ExtentId::generate();
+            extent_reader.add(source_disk, eid, vec![i as u8; 64]);
+            worker.enqueue(RepairRequest {
+                extent_id: eid,
+                version: 1,
+                target_disk_id: target_disk,
+                repair_type: RepairType::Replication {
+                    healthy_sources: vec![source_disk],
+                },
+                priority: i,
+            });
+        }
+
+        set_repair_backlog_size(&recorder, node_id_str, worker.queue_len() as u64);
+
+        let node_labels = Labels::from_pairs(&[("node_id", node_id_str)]);
+        assert_eq!(
+            recorder.gauge(REPAIR_BACKLOG_SIZE, &node_labels),
+            Some(3.0),
+            "repair backlog should start at 3"
+        );
+
+        let outcomes = worker
+            .process_all(&extent_reader, &frag_reader, &extent_writer, &ec, &limiter)
+            .await;
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(|o| o.success));
+
+        for _ in &outcomes {
+            record_repair_completion(&recorder, node_id_str);
+        }
+        set_repair_backlog_size(&recorder, node_id_str, worker.queue_len() as u64);
+
+        assert_eq!(
+            recorder.counter(REPAIR_COMPLETIONS_TOTAL, &node_labels),
+            3,
+            "repair completions counter should be 3"
+        );
+        assert_eq!(
+            recorder.gauge(REPAIR_BACKLOG_SIZE, &node_labels),
+            Some(0.0),
+            "repair backlog should be 0 after all processed"
+        );
+    }
 }
