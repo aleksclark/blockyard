@@ -426,25 +426,32 @@ mod tests {
         (req, update)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_single_commit() {
         let (batcher, _metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
+        let batcher = Arc::new(batcher);
+
         let (req, update) = make_commit_request(vid, 0);
 
-        let result = batcher.submit_commit(req, update).await;
-        // Flush manually since no background task
+        // submit_commit blocks until flush, so run them concurrently
+        let b = Arc::clone(&batcher);
+        let submit = tokio::spawn(async move { b.submit_commit(req, update).await });
+
+        // Give submit a moment to push into pending
+        tokio::time::sleep(Duration::from_millis(10)).await;
         batcher.flush().await.unwrap();
-        // submit_commit already returned via flush
-        // But actually submit_commit blocks until flush happens. Let's test differently.
+
+        let result = submit.await.unwrap();
+        assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_flush_empty() {
         let (batcher, _metadata, _cache, _vid) = setup_batcher(true, WriteBatcherConfig::default());
         batcher.flush().await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_flush_with_pending() {
         let (batcher, metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
 
@@ -466,7 +473,7 @@ mod tests {
         assert_eq!(metadata.batch_commit_count.load(Ordering::Relaxed), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_batch_multiple() {
         let (batcher, metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
 
@@ -500,7 +507,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_batch_failure() {
         let (batcher, _metadata, _cache, vid) = setup_batcher(false, WriteBatcherConfig::default());
 
@@ -534,7 +541,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_updates_cache_on_success() {
         let (batcher, _metadata, cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
 
@@ -579,7 +586,7 @@ mod tests {
         assert_eq!(m.extent_version, 7);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_no_cache_update_on_failure() {
         let (batcher, _metadata, cache, vid) = setup_batcher(false, WriteBatcherConfig::default());
 
@@ -651,7 +658,7 @@ mod tests {
         handle.abort();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_max_batch_size_triggers_flush() {
         let config = WriteBatcherConfig {
             flush_interval: Duration::from_secs(60), // Long interval
@@ -750,14 +757,14 @@ mod tests {
         assert_eq!(cloned.mapping.extent_version, 5);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_debug() {
         let (batcher, _, _, _) = setup_batcher(true, WriteBatcherConfig::default());
         let debug = format!("{:?}", batcher);
         assert!(debug.contains("WriteBatcher"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_pending_count() {
         let (batcher, _, _, vid) = setup_batcher(true, WriteBatcherConfig::default());
         assert_eq!(batcher.pending_count(), 0);
@@ -820,7 +827,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_watermark_advances() {
         let watermark = Arc::new(WriteWatermark::new());
         let metadata = Arc::new(MockMetadata::new(true, EpochId::new(10)));

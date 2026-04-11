@@ -536,7 +536,14 @@ pub fn build_ublk_test_binaries() -> anyhow::Result<(PathBuf, PathBuf)> {
     if !blockyard_bin.exists() {
         info!("building blockyard binary (release)...");
         let status = Command::new("cargo")
-            .args(["build", "--release", "--bin", "blockyard"])
+            .args([
+                "build",
+                "--release",
+                "-p",
+                "blockyard",
+                "--bin",
+                "blockyard",
+            ])
             .current_dir(workspace_root)
             .status()
             .context("build blockyard")?;
