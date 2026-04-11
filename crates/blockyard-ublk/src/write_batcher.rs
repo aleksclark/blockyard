@@ -446,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_batcher_flush_with_pending() {
-        let (batcher, _metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
+        let (batcher, metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
 
         // Submit without awaiting (drop receiver)
         let (req, update) = make_commit_request(vid, 0);
@@ -468,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_batcher_batch_multiple() {
-        let (batcher, _metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
+        let (batcher, metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
 
         let mut receivers = Vec::new();
         for i in 0..5 {
@@ -617,7 +617,7 @@ mod tests {
         assert!(cache.get_extent_mapping(&vid, 99).is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_spawn_flush_task() {
         let (batcher, _metadata, _cache, vid) = setup_batcher(
             true,
@@ -775,9 +775,9 @@ mod tests {
         assert_eq!(batcher.pending_count(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_write_batcher_concurrent_submits() {
-        let (batcher, _metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
+        let (batcher, metadata, _cache, vid) = setup_batcher(true, WriteBatcherConfig::default());
         let batcher = Arc::new(batcher);
 
         let mut handles = Vec::new();
