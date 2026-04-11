@@ -71,12 +71,14 @@ impl ManagedDisk {
 #[derive(Debug)]
 pub struct DiskInventory {
     disks: RwLock<HashMap<DiskId, ManagedDisk>>,
+    drain_queue: RwLock<Vec<DiskId>>,
 }
 
 impl DiskInventory {
     pub fn new() -> Self {
         Self {
             disks: RwLock::new(HashMap::new()),
+            drain_queue: RwLock::new(Vec::new()),
         }
     }
 
@@ -174,6 +176,16 @@ impl DiskInventory {
 
         info!(%disk_id, %old_state, %new_state, "disk state transition");
         disk.state = new_state;
+
+        if new_state == DiskState::Degraded {
+            if disk.state.validate_transition(DiskState::Draining).is_ok() {
+                info!(%disk_id, "auto-evacuating degraded disk → draining");
+                disk.state = DiskState::Draining;
+            }
+            drop(disks);
+            self.drain_queue.write().push(disk_id);
+        }
+
         Ok(old_state)
     }
 
@@ -332,6 +344,12 @@ impl DiskInventory {
             .get(&disk_id)
             .ok_or_else(|| StorageError::DiskNotFound(format!("unknown disk: {disk_id}")))?;
         Ok(disk.bad_regions.count() > 0)
+    }
+
+    /// Take all disks that have been enqueued for drain (auto-evacuation from degraded).
+    pub fn take_drain_queue(&self) -> Vec<DiskId> {
+        let mut queue = self.drain_queue.write();
+        std::mem::take(&mut *queue)
     }
 }
 
@@ -905,5 +923,35 @@ mod tests {
     fn test_default_inventory() {
         let inventory = DiskInventory::default();
         assert!(inventory.list_disks().is_empty());
+    }
+
+    #[test]
+    fn test_degraded_auto_evacuates_to_draining() {
+        let (_dir, path) = setup_disk_dir();
+        let inventory = DiskInventory::new();
+        let ids = inventory.discover_disks(&[path], false).unwrap();
+        let disk_id = ids[0];
+
+        assert!(inventory.take_drain_queue().is_empty());
+
+        inventory
+            .transition_state(disk_id, DiskState::Degraded)
+            .unwrap();
+
+        let state = inventory.get_state(disk_id).unwrap();
+        assert_eq!(
+            state,
+            DiskState::Draining,
+            "degraded disk should auto-transition to draining"
+        );
+
+        let queue = inventory.take_drain_queue();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], disk_id);
+
+        assert!(
+            inventory.take_drain_queue().is_empty(),
+            "drain queue should be emptied after take"
+        );
     }
 }
