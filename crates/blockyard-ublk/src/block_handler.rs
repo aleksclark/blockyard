@@ -677,6 +677,7 @@ mod tests {
                 extent_version: 1,
                 replica_locations: nodes,
                 checksums: vec![vec![0xFF]],
+                size_bytes: 4096,
             },
         );
 
@@ -873,6 +874,7 @@ mod tests {
                 extent_version: 1,
                 replica_locations: vec![],
                 checksums: vec![],
+                size_bytes: 4096,
             },
         );
 

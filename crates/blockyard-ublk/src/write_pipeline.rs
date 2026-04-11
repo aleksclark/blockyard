@@ -225,6 +225,7 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
                             .filter(|a| a.success)
                             .map(|a| a.checksum.as_bytes().to_vec())
                             .collect(),
+                        size_bytes: request.data.len() as u64,
                     },
                 );
                 Ok(WriteOutcome::Committed {

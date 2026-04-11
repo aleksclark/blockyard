@@ -18,6 +18,7 @@ pub struct CachedExtentMapping {
     pub extent_version: u64,
     pub replica_locations: Vec<NodeId>,
     pub checksums: Vec<Vec<u8>>,
+    pub size_bytes: u64,
 }
 
 /// Per-volume cached metadata.
@@ -157,10 +158,24 @@ impl MetadataCache {
     ) -> Option<(u64, CachedExtentMapping)> {
         let inner = self.inner.read();
         let vol = inner.volumes.get(&volume_id.to_string())?;
-        vol.extent_mappings
+        let (block_start, mapping) = vol
+            .extent_mappings
             .range(..=block_range.start)
             .next_back()
-            .map(|(k, v)| (*k, v.clone()))
+            .map(|(k, v)| (*k, v.clone()))?;
+
+        // Verify the requested range actually falls within this extent's coverage.
+        // The extent covers [block_start, block_start + extent_blocks).
+        if mapping.size_bytes > 0 {
+            let block_size = 4096u64; // standard block size
+            let extent_blocks = (mapping.size_bytes + block_size - 1) / block_size;
+            let extent_end_block = block_start + extent_blocks;
+            if block_range.start >= extent_end_block {
+                return None; // requested range is beyond this extent
+            }
+        }
+
+        Some((block_start, mapping))
     }
 
     /// Atomically refresh the entire cache with a new snapshot.
@@ -307,6 +322,7 @@ mod tests {
             extent_version: 1,
             replica_locations: vec![n1],
             checksums: vec![vec![0xAA]],
+            size_bytes: 524288,
         };
         cache.set_extent_mapping(&vid, 0, mapping);
 
@@ -346,8 +362,9 @@ mod tests {
             CachedExtentMapping {
                 extent_id: eid,
                 extent_version: 1,
-                replica_locations: vec![],
+                replica_locations: vec![NodeId::generate()],
                 checksums: vec![],
+                size_bytes: 524288,
             },
         );
         let info = CachedVolumeInfo {
@@ -440,6 +457,7 @@ mod tests {
             extent_version: 5,
             replica_locations: vec![NodeId::generate()],
             checksums: vec![vec![1, 2, 3]],
+            size_bytes: 1024,
         };
         let cloned = m.clone();
         assert_eq!(m.extent_id, cloned.extent_id);
@@ -488,6 +506,7 @@ mod tests {
             extent_version: 1,
             replica_locations: vec![],
             checksums: vec![],
+            size_bytes: 0,
         };
         cache.set_extent_mapping(&vid, 0, mapping);
         assert!(cache.get_extent_mapping(&vid, 0).is_none());

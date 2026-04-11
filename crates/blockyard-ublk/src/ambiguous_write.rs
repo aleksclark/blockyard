@@ -85,6 +85,7 @@ impl<M: MetadataClient> AmbiguousWriteResolver<M> {
                         extent_version: mapping.extent_version,
                         replica_locations: mapping.replica_locations.clone(),
                         checksums: mapping.checksums.clone(),
+                        size_bytes: 0,
                     },
                 );
 

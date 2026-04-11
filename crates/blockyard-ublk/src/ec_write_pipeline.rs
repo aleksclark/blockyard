@@ -375,6 +375,7 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
                             .filter(|a| a.success)
                             .map(|a| a.checksum.as_bytes().to_vec())
                             .collect(),
+                        size_bytes: data.len() as u64,
                     },
                 );
                 Ok(WriteOutcome::Committed {

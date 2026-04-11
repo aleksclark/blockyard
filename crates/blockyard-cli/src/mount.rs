@@ -63,7 +63,7 @@ pub async fn execute_mount_kernel(
     let data_client = Arc::new(TcpDataNodeClient::new());
     let metadata_cache = Arc::new(MetadataCache::new());
 
-    metadata_cache.set_epoch(EpochId::new(1));
+    metadata_cache.set_epoch(EpochId::new(0));
 
     for node in &nodes {
         let addr: std::net::SocketAddr = node
