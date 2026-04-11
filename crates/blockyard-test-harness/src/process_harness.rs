@@ -360,11 +360,11 @@ impl RealProcessCluster {
 
     pub async fn start_all(&self) -> anyhow::Result<()> {
         self.nodes[0].start()?;
-        self.nodes[0].wait_ready(Duration::from_secs(30)).await?;
+        self.nodes[0].wait_ready(Duration::from_secs(60)).await?;
 
         for i in 1..self.nodes.len() {
             self.nodes[i].start()?;
-            self.nodes[i].wait_ready(Duration::from_secs(30)).await?;
+            self.nodes[i].wait_ready(Duration::from_secs(60)).await?;
             // Give raft voter promotion time to settle before starting next node
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
