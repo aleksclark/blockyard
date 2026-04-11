@@ -165,8 +165,39 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
     }
 
     async fn handle_read(&self, request: IoRequest) -> Result<Option<Bytes>, Error> {
-        let block_range = request.block_range(self.volume_config.block_size as u64);
+        let block_size = self.volume_config.block_size as u64;
+        let block_range = request.block_range(block_size);
+        let total_length = request.length_bytes as usize;
 
+        // For multi-block reads, read each block separately and concatenate.
+        // Each block may map to a different extent (write pipeline creates one
+        // extent per write, and writes are typically single-block).
+        let num_blocks = (block_range.end - block_range.start) as usize;
+
+        if num_blocks <= 1 {
+            // Single-block read — fast path
+            return self.read_single_block(&request, block_range.start, block_size).await;
+        }
+
+        // Multi-block read: stitch together data from individual extents
+        let mut result_buf = Vec::with_capacity(total_length);
+        for block_num in block_range.start..block_range.end {
+            let block_data = self.read_single_block_data(block_num, block_size).await?;
+            result_buf.extend_from_slice(&block_data);
+        }
+
+        // Trim to exact requested length (in case of rounding)
+        result_buf.truncate(total_length);
+        Ok(Some(Bytes::from(result_buf)))
+    }
+
+    async fn read_single_block(
+        &self,
+        request: &IoRequest,
+        block_num: u64,
+        block_size: u64,
+    ) -> Result<Option<Bytes>, Error> {
+        let block_range = block_num..block_num + 1;
         let mapping = self
             .metadata_cache
             .find_extent_for_range(&self.volume_config.volume_id, &block_range);
@@ -182,8 +213,50 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
         }
 
         let offset_within_extent =
-            request.offset_bytes - (_block_start * self.volume_config.block_size as u64);
+            request.offset_bytes - (_block_start * block_size);
         let length = request.length_bytes as u64;
+
+        self.read_from_replicas(&extent_mapping, offset_within_extent, length)
+            .await
+    }
+
+    async fn read_single_block_data(
+        &self,
+        block_num: u64,
+        block_size: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let block_range = block_num..block_num + 1;
+        let mapping = self
+            .metadata_cache
+            .find_extent_for_range(&self.volume_config.volume_id, &block_range);
+
+        let Some((_block_start, extent_mapping)) = mapping else {
+            return Ok(vec![0u8; block_size as usize]);
+        };
+
+        if extent_mapping.replica_locations.is_empty() {
+            return Ok(vec![0u8; block_size as usize]);
+        }
+
+        let offset_within_extent = (block_num - _block_start) * block_size;
+        let length = block_size;
+
+        match self
+            .read_from_replicas(&extent_mapping, offset_within_extent, length)
+            .await
+        {
+            Ok(Some(data)) => Ok(data.to_vec()),
+            Ok(None) => Ok(vec![0u8; block_size as usize]),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn read_from_replicas(
+        &self,
+        extent_mapping: &crate::metadata_cache::CachedExtentMapping,
+        offset: u64,
+        length: u64,
+    ) -> Result<Option<Bytes>, Error> {
 
         let mut last_error = None;
         for &node_id in &extent_mapping.replica_locations {
@@ -199,7 +272,7 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
                     self.volume_config.volume_id,
                     extent_mapping.extent_id,
                     extent_mapping.extent_version,
-                    offset_within_extent,
+                    offset,
                     length,
                 )
                 .await
