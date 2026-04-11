@@ -259,7 +259,7 @@ impl<H: BlockHandler> UblkDevice<H> {
 
                             let data = if io_op == IoOperation::Write {
                                 let buf = &bufs[tag as usize];
-                                Some(Bytes::copy_from_slice(buf.as_slice()))
+                                Some(Bytes::copy_from_slice(&buf.as_slice()[..length as usize]))
                             } else {
                                 None
                             };
@@ -786,6 +786,54 @@ mod tests {
             },
         );
         assert!(dev.device_path().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_write_data_length_matches_length_bytes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        struct CaptureHandler {
+            captured_len: StdArc<AtomicUsize>,
+        }
+
+        impl BlockHandler for CaptureHandler {
+            async fn handle_io(&self, request: IoRequest) -> Result<Option<Bytes>, Error> {
+                if request.operation == IoOperation::Write {
+                    if let Some(ref data) = request.data {
+                        self.captured_len.store(data.len(), Ordering::SeqCst);
+                        assert_eq!(
+                            data.len(),
+                            request.length_bytes as usize,
+                            "write data length must equal length_bytes, not the full buffer"
+                        );
+                    }
+                }
+                Ok(None)
+            }
+        }
+
+        let captured = StdArc::new(AtomicUsize::new(0));
+        let dev = UblkDevice::new(
+            CaptureHandler {
+                captured_len: StdArc::clone(&captured),
+            },
+            UblkDeviceConfig {
+                device_size_bytes: 1024 * 1024,
+                ..Default::default()
+            },
+        );
+        dev.start().await.unwrap();
+
+        let req = IoRequest {
+            operation: IoOperation::Write,
+            offset_bytes: 0,
+            length_bytes: 4096,
+            data: Some(Bytes::from(vec![0xAA; 4096])),
+            tag: 1,
+        };
+        dev.submit_io(req).await.unwrap();
+        assert_eq!(captured.load(Ordering::SeqCst), 4096);
     }
 
     #[cfg(feature = "ublk-kernel")]
