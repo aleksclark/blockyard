@@ -74,7 +74,12 @@ fn main() -> anyhow::Result<()> {
     let scenario = TestScenario::from_str(&test_name)?;
     let blockyard_bin = blockyard_bin.context("--blockyard-bin is required")?;
 
-    eprintln!("[ublk-e2e] test={:?} cluster_size={} binary={}", scenario, cluster_size, blockyard_bin.display());
+    eprintln!(
+        "[ublk-e2e] test={:?} cluster_size={} binary={}",
+        scenario,
+        cluster_size,
+        blockyard_bin.display()
+    );
 
     // Ensure ublk_drv is loaded.
     let modprobe = Command::new("modprobe").arg("ublk_drv").status();
@@ -90,9 +95,7 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("build tokio runtime")?;
 
-    rt.block_on(async move {
-        run_scenario(scenario, &blockyard_bin, cluster_size).await
-    })
+    rt.block_on(async move { run_scenario(scenario, &blockyard_bin, cluster_size).await })
 }
 
 async fn run_scenario(
@@ -124,10 +127,7 @@ async fn run_scenario(
         )
         .await
         .context("create volume")?;
-    let vol_id = vol["id"]
-        .as_str()
-        .context("volume id")?
-        .to_string();
+    let vol_id = vol["id"].as_str().context("volume id")?.to_string();
     eprintln!("[ublk-e2e] created volume: {}", vol_id);
 
     // Acquire a write lease.
@@ -146,12 +146,8 @@ async fn run_scenario(
     let data_addr = cluster.node(0).data_addr();
 
     // Create real TCP data client and HTTP metadata client.
-    let metadata_client = std::sync::Arc::new(
-        blockyard_ublk::HttpMetadataClient::new(mgmt_url),
-    );
-    let data_client = std::sync::Arc::new(
-        blockyard_ublk::TcpDataNodeClient::new(),
-    );
+    let metadata_client = std::sync::Arc::new(blockyard_ublk::HttpMetadataClient::new(mgmt_url));
+    let data_client = std::sync::Arc::new(blockyard_ublk::TcpDataNodeClient::new());
 
     // Populate metadata cache with node addresses.
     let metadata_cache = std::sync::Arc::new(blockyard_ublk::MetadataCache::new());
@@ -162,14 +158,21 @@ async fn run_scenario(
 
     // Register node addresses with the TCP data client so it knows where to send writes.
     for node in metadata_cache.list_nodes() {
-        eprintln!("[ublk-e2e] registering data node {} at {}", node.node_id, node.addr);
+        eprintln!(
+            "[ublk-e2e] registering data node {} at {}",
+            node.node_id, node.addr
+        );
         data_client.register_node(node.node_id, node.addr);
     }
-    eprintln!("[ublk-e2e] metadata cache populated, {} nodes registered", metadata_cache.list_nodes().len());
+    eprintln!(
+        "[ublk-e2e] metadata cache populated, {} nodes registered",
+        metadata_cache.list_nodes().len()
+    );
 
     // Set up client session, lease manager, etc.
     let volume_id: blockyard_common::VolumeId = vol_id.parse().context("parse volume id")?;
-    let session_id_typed: blockyard_common::SessionId = session_id.parse().context("parse session id")?;
+    let session_id_typed: blockyard_common::SessionId =
+        session_id.parse().context("parse session id")?;
 
     let session = std::sync::Arc::new(blockyard_ublk::session::ClientSession::new(volume_id));
     let lease_manager = std::sync::Arc::new(blockyard_ublk::LeaseManager::new(
@@ -285,7 +288,12 @@ async fn run_mount_write_read(device_path: &str) -> anyhow::Result<()> {
         std::fs::write(&path, data).context(format!("write {}", name))?;
         let hash = blake3::hash(data);
         checksums.push((name.to_string(), hash.to_hex().to_string()));
-        eprintln!("[ublk-e2e] wrote {} ({} bytes, hash={})", name, data.len(), checksums.last().unwrap().1);
+        eprintln!(
+            "[ublk-e2e] wrote {} ({} bytes, hash={})",
+            name,
+            data.len(),
+            checksums.last().unwrap().1
+        );
     }
 
     // Sync and unmount.
@@ -312,7 +320,9 @@ async fn run_mount_write_read(device_path: &str) -> anyhow::Result<()> {
         if actual_hash != *expected_hash {
             bail!(
                 "checksum mismatch for {}: expected={} actual={}",
-                name, expected_hash, actual_hash
+                name,
+                expected_hash,
+                actual_hash
             );
         }
         eprintln!("[ublk-e2e] verified {} checksum OK", name);
@@ -379,7 +389,10 @@ async fn run_node_failure(
     }
 
     if write_errors > 0 {
-        eprintln!("[ublk-e2e] WARNING: {} write errors after node failure", write_errors);
+        eprintln!(
+            "[ublk-e2e] WARNING: {} write errors after node failure",
+            write_errors
+        );
         // We allow some errors — the test checks that the filesystem is still consistent.
     }
 

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use blockyard_common::checksum::compute_checksum as blake3_checksum;
 use blockyard_common::{DiskId, EpochId, ExtentId, NodeId, OperationId, SessionId, VolumeId};
 use blockyard_protocol::messages::{
     CURRENT_PROTOCOL_VERSION, HandshakeRequest, HandshakeResponse, ProtocolMessage,
@@ -16,7 +17,6 @@ use blockyard_protocol::messages::{
 };
 use blockyard_protocol::server::{DataPlaneHandler, DataPlaneServer};
 use parking_lot::RwLock;
-use blockyard_common::checksum::compute_checksum as blake3_checksum;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;

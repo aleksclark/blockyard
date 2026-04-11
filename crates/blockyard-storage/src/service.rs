@@ -7,8 +7,7 @@ use std::collections::HashMap;
 
 use blockyard_common::{
     DiskId, DiskState, EpochId, ExtentId, LeaseVersion, OperationId, PeerIdentity, SessionId,
-    VolumeAcl, VolumeId,
-    checksum::compute_checksum,
+    VolumeAcl, VolumeId, checksum::compute_checksum,
 };
 use blockyard_protocol::{
     ReadExtentRequest, ReadExtentResponse, WriteExtentRequest, WriteExtentResponse,

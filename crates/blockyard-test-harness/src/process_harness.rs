@@ -50,12 +50,15 @@ impl ProcessNode {
         let offset = index as u16 * 100;
         let data_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset).parse().unwrap();
         // Gossip (UDP) and mgmt API (TCP) share the same port number — no conflict.
-        let gossip_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
-        let mgmt_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
-        let raft_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 10).parse().unwrap();
+        let gossip_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset + 1)
+            .parse()
+            .unwrap();
+        let mgmt_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset + 1)
+            .parse()
+            .unwrap();
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset + 10)
+            .parse()
+            .unwrap();
 
         let temp_dir = TempDir::new().expect("create temp dir");
         let data_dir = temp_dir.path().to_path_buf();
@@ -84,12 +87,15 @@ impl ProcessNode {
     ) -> Self {
         let offset = index as u16 * 100;
         let data_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset).parse().unwrap();
-        let gossip_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
-        let mgmt_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 1).parse().unwrap();
-        let raft_addr: SocketAddr =
-            format!("127.0.0.1:{}", base_port + offset + 10).parse().unwrap();
+        let gossip_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset + 1)
+            .parse()
+            .unwrap();
+        let mgmt_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset + 1)
+            .parse()
+            .unwrap();
+        let raft_addr: SocketAddr = format!("127.0.0.1:{}", base_port + offset + 10)
+            .parse()
+            .unwrap();
 
         Self {
             index,
@@ -249,7 +255,11 @@ impl ProcessNode {
         let seed_nodes_str = if self.seed_nodes.is_empty() {
             "[]".to_string()
         } else {
-            let seeds: Vec<String> = self.seed_nodes.iter().map(|s| format!("\"{}\"", s)).collect();
+            let seeds: Vec<String> = self
+                .seed_nodes
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect();
             format!("[{}]", seeds.join(", "))
         };
 
@@ -327,11 +337,18 @@ impl RealProcessCluster {
             let seed_nodes = if i == 0 {
                 vec![]
             } else {
-                vec![format!("127.0.0.1:{}", base_port + 1)
-                    .parse::<SocketAddr>()
-                    .unwrap()]
+                vec![
+                    format!("127.0.0.1:{}", base_port + 1)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                ]
             };
-            nodes.push(ProcessNode::new(i, base_port, binary_path.clone(), seed_nodes));
+            nodes.push(ProcessNode::new(
+                i,
+                base_port,
+                binary_path.clone(),
+                seed_nodes,
+            ));
         }
 
         Self {
@@ -343,15 +360,11 @@ impl RealProcessCluster {
 
     pub async fn start_all(&self) -> anyhow::Result<()> {
         self.nodes[0].start()?;
-        self.nodes[0]
-            .wait_ready(Duration::from_secs(30))
-            .await?;
+        self.nodes[0].wait_ready(Duration::from_secs(30)).await?;
 
         for i in 1..self.nodes.len() {
             self.nodes[i].start()?;
-            self.nodes[i]
-                .wait_ready(Duration::from_secs(30))
-                .await?;
+            self.nodes[i].wait_ready(Duration::from_secs(30)).await?;
             // Give raft voter promotion time to settle before starting next node
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -368,10 +381,7 @@ impl RealProcessCluster {
         let expected_nodes = self.nodes.len() as u32;
 
         while start.elapsed() < timeout {
-            let url = format!(
-                "{}/api/v1/cluster/status",
-                self.nodes[0].mgmt_url()
-            );
+            let url = format!("{}/api/v1/cluster/status", self.nodes[0].mgmt_url());
             if let Ok(resp) = client.get(&url).send().await {
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
                     if let Some(count) = body.get("node_count").and_then(|v| v.as_u64()) {
@@ -413,9 +423,11 @@ impl RealProcessCluster {
         let seed_nodes = if index == 0 {
             vec![]
         } else {
-            vec![format!("127.0.0.1:{}", self.base_port + 1)
-                .parse::<SocketAddr>()
-                .unwrap()]
+            vec![
+                format!("127.0.0.1:{}", self.base_port + 1)
+                    .parse::<SocketAddr>()
+                    .unwrap(),
+            ]
         };
 
         let _ = self.nodes[index].kill();
@@ -548,8 +560,7 @@ fn walkdir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 impl Drop for RealProcessCluster {
     fn drop(&mut self) {
         for node in &self.nodes {
-            if node.state() == ProcessNodeState::Running
-                || node.state() == ProcessNodeState::Paused
+            if node.state() == ProcessNodeState::Running || node.state() == ProcessNodeState::Paused
             {
                 let _ = node.kill();
             }
@@ -574,6 +585,8 @@ pub async fn build_binary() -> anyhow::Result<PathBuf> {
     let status = Command::new("cargo")
         .arg("build")
         .arg("--release")
+        .arg("-p")
+        .arg("blockyard")
         .arg("--bin")
         .arg("blockyard")
         .current_dir(workspace_root)
@@ -610,7 +623,7 @@ pub fn unique_base_port() -> u16 {
     let mut contents = String::new();
     let _ = file.read_to_string(&mut contents);
     let mut port: u16 = contents.trim().parse().unwrap_or(20000);
-    if port < 20000 || port > 60000 {
+    if !(20000..=60000).contains(&port) {
         port = 20000;
     }
     let result = port;

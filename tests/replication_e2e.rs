@@ -132,7 +132,11 @@ async fn test_read_after_write_consistency() {
             .and_then(|r| r.get("success"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        assert!(r_success, "read-after-write should succeed for extent {}", i);
+        assert!(
+            r_success,
+            "read-after-write should succeed for extent {}",
+            i
+        );
         assert_eq!(
             payload,
             data.as_bytes(),
@@ -199,10 +203,7 @@ async fn test_node_rejoin_data_consistent() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    cluster
-        .restart_node(2)
-        .await
-        .expect("restart node 2");
+    cluster.restart_node(2).await.expect("restart node 2");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     let mut r_before = TcpDataClient::connect(cluster.node(2).data_addr())

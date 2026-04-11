@@ -46,7 +46,11 @@ async fn test_cluster_auth_basic_operations() {
         .and_then(|r| r.get("success"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    assert!(success, "write with valid connection should succeed: {:?}", resp);
+    assert!(
+        success,
+        "write with valid connection should succeed: {:?}",
+        resp
+    );
 
     let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
         .await
@@ -77,8 +81,5 @@ async fn test_cluster_auth_basic_operations() {
         .and_then(|r| r.get("success"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    assert!(
-        !read2_ok,
-        "reading non-existent extent should not succeed"
-    );
+    assert!(!read2_ok, "reading non-existent extent should not succeed");
 }

@@ -106,8 +106,7 @@ impl QemuVm {
         let ssh_key_path = work.join("id_ed25519");
         let ssh_pub_path = work.join("id_ed25519.pub");
         generate_ssh_keypair(&ssh_key_path)?;
-        let pub_key = std::fs::read_to_string(&ssh_pub_path)
-            .context("read public key")?;
+        let pub_key = std::fs::read_to_string(&ssh_pub_path).context("read public key")?;
 
         // Create cloud-init seed ISO.
         let seed_iso = work.join("seed.iso");
@@ -144,8 +143,14 @@ impl QemuVm {
         cmd.args(["-m", &format!("{}M", config.memory_mb)]);
         cmd.args(["-smp", &config.cpus.to_string()]);
         cmd.args(["-nographic"]);
-        cmd.args(["-drive", &format!("file={},format=qcow2,if=virtio", overlay.display())]);
-        cmd.args(["-drive", &format!("file={},format=raw,if=virtio", seed_iso.display())]);
+        cmd.args([
+            "-drive",
+            &format!("file={},format=qcow2,if=virtio", overlay.display()),
+        ]);
+        cmd.args([
+            "-drive",
+            &format!("file={},format=raw,if=virtio", seed_iso.display()),
+        ]);
 
         // Build netdev with port forwards.
         let mut hostfwd = format!("hostfwd=tcp::{}-:22", ssh_port);
@@ -159,8 +164,7 @@ impl QemuVm {
         cmd.args(["-serial", "mon:stdio"]);
 
         // Redirect stdout/stderr to log files.
-        let qemu_log = std::fs::File::create(work.join("qemu.log"))
-            .context("create qemu.log")?;
+        let qemu_log = std::fs::File::create(work.join("qemu.log")).context("create qemu.log")?;
         let qemu_err = qemu_log.try_clone()?;
 
         cmd.stdout(Stdio::from(qemu_log));
@@ -182,7 +186,10 @@ impl QemuVm {
     /// Poll until SSH is reachable, up to `timeout`.
     pub fn wait_ready(&self, timeout: Duration) -> anyhow::Result<()> {
         let start = Instant::now();
-        info!(ssh_port = self.ssh_port, "waiting for VM SSH to become ready");
+        info!(
+            ssh_port = self.ssh_port,
+            "waiting for VM SSH to become ready"
+        );
 
         while start.elapsed() < timeout {
             match self.ssh_exec_raw("echo ready") {
@@ -222,7 +229,7 @@ impl QemuVm {
     pub fn ssh_exec_checked(&self, cmd: &str) -> anyhow::Result<String> {
         let output = Command::new("ssh")
             .args(self.ssh_base_args())
-            .arg(&format!("root@127.0.0.1"))
+            .arg("root@127.0.0.1")
             .arg(cmd)
             .output()
             .context("ssh exec")?;
@@ -255,7 +262,7 @@ impl QemuVm {
         let status = Command::new("scp")
             .args(self.scp_base_args())
             .arg(local)
-            .arg(&format!("root@127.0.0.1:{}", remote))
+            .arg(format!("root@127.0.0.1:{}", remote))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .status()
@@ -271,7 +278,7 @@ impl QemuVm {
     pub fn scp_from(&self, remote: &str, local: &Path) -> anyhow::Result<()> {
         let status = Command::new("scp")
             .args(self.scp_base_args())
-            .arg(&format!("root@127.0.0.1:{}", remote))
+            .arg(format!("root@127.0.0.1:{}", remote))
             .arg(local)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -397,7 +404,10 @@ pub fn download_cloud_image() -> anyhow::Result<PathBuf> {
         return Ok(image_path);
     }
 
-    info!(url = CLOUD_IMAGE_URL, "downloading cloud image (this may take a while)...");
+    info!(
+        url = CLOUD_IMAGE_URL,
+        "downloading cloud image (this may take a while)..."
+    );
     let status = Command::new("curl")
         .args(["-fSL", "-o"])
         .arg(&image_path)
@@ -505,8 +515,7 @@ runcmd:
 
 /// Pick a free TCP port by binding to port 0 and reading back the assigned port.
 fn pick_free_port() -> anyhow::Result<u16> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .context("bind to port 0")?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").context("bind to port 0")?;
     let port = listener.local_addr()?.port();
     Ok(port)
 }

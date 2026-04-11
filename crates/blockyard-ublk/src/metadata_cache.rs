@@ -168,7 +168,7 @@ impl MetadataCache {
         // The extent covers [block_start, block_start + extent_blocks).
         if mapping.size_bytes > 0 {
             let block_size = 4096u64; // standard block size
-            let extent_blocks = (mapping.size_bytes + block_size - 1) / block_size;
+            let extent_blocks = mapping.size_bytes.div_ceil(block_size);
             let extent_end_block = block_start + extent_blocks;
             if block_range.start >= extent_end_block {
                 return None; // requested range is beyond this extent

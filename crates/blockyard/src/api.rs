@@ -409,10 +409,7 @@ async fn cluster_join(
     tokio::spawn(async move {
         // Give the joining node time to start its Raft RPC server
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if let Err(e) = raft_for_promote
-            .change_membership(new_members, false)
-            .await
-        {
+        if let Err(e) = raft_for_promote.change_membership(new_members, false).await {
             tracing::warn!(error = %e, "deferred change_membership failed (may already be a member)");
         } else {
             tracing::info!("voter promotion complete for raft_id={}", raft_id);
@@ -804,10 +801,7 @@ mod tests {
     fn test_join_response_serde() {
         let mut peers = std::collections::HashMap::new();
         peers.insert(1u64, "10.0.0.1:9810".to_string());
-        let resp = JoinResponse {
-            raft_id: 5,
-            peers,
-        };
+        let resp = JoinResponse { raft_id: 5, peers };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: JoinResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.raft_id, 5);

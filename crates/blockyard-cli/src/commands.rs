@@ -165,13 +165,9 @@ async fn execute_mount(
     endpoint: &str,
 ) -> Result<String> {
     #[cfg(feature = "ublk-kernel")]
-    let info = crate::mount::execute_mount_kernel(
-        endpoint,
-        args.volume_id,
-        args.device.clone(),
-        client,
-    )
-    .await?;
+    let info =
+        crate::mount::execute_mount_kernel(endpoint, args.volume_id, args.device.clone(), client)
+            .await?;
 
     #[cfg(not(feature = "ublk-kernel"))]
     let info = {

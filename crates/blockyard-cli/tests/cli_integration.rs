@@ -450,7 +450,7 @@ async fn test_node_inspect_json_output() {
 
     let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["address"], "10.0.0.1:9800");
-    assert_eq!(parsed["state"], "Online");
+    assert_eq!(parsed["state"], "online");
     assert_eq!(parsed["disk_count"], 4);
     assert_eq!(parsed["volume_count"], 10);
 }
