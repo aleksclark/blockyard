@@ -339,17 +339,19 @@ impl BlockyardNode {
         let gossip = Arc::new(GossipService::new(node_id, config.gossip.clone()));
 
         // Register gossip callbacks to keep PeerRegistry updated.
-        // IMPORTANT: We use the raft address from the state machine (ClusterNode.addr),
-        // NOT the gossip member_addr. The gossip address is the gossip bind port, but
-        // the PeerRegistry maps raft_id → raft RPC address for TCP transport.
+        // IMPORTANT: The state machine stores the data plane address (listen_addr),
+        // but the PeerRegistry needs the raft RPC address. Derive it by adding 10
+        // to the port, matching the convention in raft_bind_addr().
         let peer_reg_join = peer_registry.clone();
         let sm_ref_join = metadata.sm_data().clone();
         gossip.on_member_join(Box::new(move |member_node_id, _gossip_addr| {
             let data = sm_ref_join.read();
             if let Some(&raft_nid) = data.node_raft_map.get(&member_node_id) {
-                // Use the raft address stored in the state machine, not the gossip address
+                // Derive raft address from data plane address stored in state machine
                 if let Some(node_entry) = data.nodes.get(&member_node_id.to_string()) {
-                    if let Ok(raft_addr) = node_entry.addr.parse::<SocketAddr>() {
+                    if let Ok(mut data_addr) = node_entry.addr.parse::<SocketAddr>() {
+                        data_addr.set_port(data_addr.port() + 10);
+                        let raft_addr = data_addr;
                         peer_reg_join.register(raft_nid, raft_addr);
                         tracing::debug!(
                             node_id = %member_node_id,
