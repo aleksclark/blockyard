@@ -1394,4 +1394,280 @@ mod tests {
             other => panic!("expected Committed from lookup, got {:?}", other),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // InMemoryDataNode — stores data for roundtrip verification.
+    // -----------------------------------------------------------------------
+
+    use std::collections::HashMap;
+    use parking_lot::Mutex;
+
+    struct InMemoryPipelineDataNode {
+        store: Mutex<HashMap<(ExtentId, u64), Vec<u8>>>,
+    }
+
+    impl InMemoryPipelineDataNode {
+        fn new() -> Self {
+            Self {
+                store: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn read_stored(&self, extent_id: ExtentId, version: u64) -> Option<Vec<u8>> {
+            self.store.lock().get(&(extent_id, version)).cloned()
+        }
+
+        fn stored_count(&self) -> usize {
+            self.store.lock().len()
+        }
+    }
+
+    impl DataNodeClient for InMemoryPipelineDataNode {
+        async fn write_extent(
+            &self,
+            node_id: NodeId,
+            _operation_id: OperationId,
+            _session_id: blockyard_common::SessionId,
+            _volume_id: VolumeId,
+            extent_id: ExtentId,
+            extent_version: u64,
+            _epoch: EpochId,
+            data: Bytes,
+            checksum: String,
+        ) -> Result<WriteAck, Error> {
+            self.store
+                .lock()
+                .insert((extent_id, extent_version), data.to_vec());
+            Ok(WriteAck {
+                node_id,
+                success: true,
+                checksum,
+                error: None,
+            })
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // InMemoryPipelineMetadata — records commits with checksums.
+    // -----------------------------------------------------------------------
+
+    struct InMemoryPipelineMetadata {
+        epoch: EpochId,
+        committed: Mutex<Vec<CommitRequest>>,
+    }
+
+    impl InMemoryPipelineMetadata {
+        fn new(epoch: EpochId) -> Self {
+            Self {
+                epoch,
+                committed: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn last_commit(&self) -> Option<CommitRequest> {
+            self.committed.lock().last().cloned()
+        }
+    }
+
+    impl MetadataClient for InMemoryPipelineMetadata {
+        async fn refresh_metadata(
+            &self,
+            cache: &crate::metadata_cache::MetadataCache,
+        ) -> Result<EpochId, Error> {
+            let new_epoch = EpochId::new(self.epoch.as_u64() + 1);
+            cache.set_epoch(new_epoch);
+            Ok(new_epoch)
+        }
+
+        async fn commit_extent_mapping(
+            &self,
+            request: CommitRequest,
+        ) -> Result<EpochId, Error> {
+            self.committed.lock().push(request);
+            Ok(self.epoch)
+        }
+
+        async fn lookup_operation(
+            &self,
+            _operation_id: &OperationId,
+        ) -> Result<Option<CommittedMapping>, Error> {
+            Ok(None)
+        }
+
+        async fn current_epoch(&self) -> Result<EpochId, Error> {
+            Ok(self.epoch)
+        }
+
+        fn commit_extent_mappings_batch(
+            &self,
+            requests: Vec<CommitRequest>,
+        ) -> impl std::future::Future<Output = Result<EpochId, Error>> + Send {
+            let epoch = self.epoch;
+            async move {
+                let _ = requests;
+                Ok(epoch)
+            }
+        }
+
+        async fn acquire_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn renew_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+            _: u64,
+            _: u64,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Denied {
+                reason: "mock".into(),
+            })
+        }
+
+        async fn release_lease(
+            &self,
+            _: blockyard_common::VolumeId,
+            _: blockyard_common::SessionId,
+        ) -> Result<blockyard_common::LeaseResponse, Error> {
+            Ok(blockyard_common::LeaseResponse::Released)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Write pipeline roundtrip tests (data integrity).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pipeline_roundtrip_data_integrity() {
+        let (cache, vid) = setup_cache_with_volume(1, 3);
+        let cache = Arc::new(cache);
+        let data_client = Arc::new(InMemoryPipelineDataNode::new());
+        let metadata_client = Arc::new(InMemoryPipelineMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        stale_handler.set_paused(true);
+
+        let pipeline = WritePipeline::new(
+            data_client,
+            metadata_client.clone(),
+            Arc::clone(&cache),
+            session.clone(),
+            Arc::clone(&watermark),
+            stale_handler.clone(),
+        )
+        .with_max_retries(3);
+
+        let op_id = session.next_operation_id();
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..64,
+            data: Bytes::from(vec![0xBB; 4096]),
+        };
+
+        stale_handler.set_paused(false);
+        let first_result = pipeline.execute_once(&req, op_id).await.unwrap();
+        assert!(matches!(first_result, WriteOutcome::Committed { .. }));
+
+        stale_handler.set_paused(true);
+        let final_result = pipeline.execute_with_op_id(req, op_id).await.unwrap();
+        match final_result {
+            WriteOutcome::Committed { epoch } => {
+                assert_eq!(epoch, EpochId::new(1));
+            }
+            other => panic!("expected Committed from lookup, got {:?}", other),
+        }
+
+        let pipeline = WritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            watermark,
+            stale_handler,
+        );
+
+        let pattern: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..1,
+            data: Bytes::from(pattern.clone()),
+        };
+        let result = pipeline.execute(req).await.unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        let commit = metadata_client.last_commit().expect("should have a commit");
+        let stored = data_client
+            .read_stored(commit.extent_id, commit.extent_version)
+            .expect("data should be stored in InMemoryDataNode");
+        assert_eq!(
+            stored, pattern,
+            "data stored on data node must match original write data"
+        );
+
+        assert!(
+            data_client.stored_count() >= 1,
+            "at least one extent should be stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_checksum_matches_data() {
+        let (cache, vid) = setup_cache_with_volume(1, 3);
+        let cache = Arc::new(cache);
+        let data_client = Arc::new(InMemoryPipelineDataNode::new());
+        let metadata_client = Arc::new(InMemoryPipelineMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = WritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            watermark,
+            stale_handler,
+        );
+
+        let pattern: Vec<u8> = (0..8192).map(|i| ((i * 7) % 256) as u8).collect();
+        let expected_checksum = compute_checksum(&pattern);
+
+        let req = WriteRequest {
+            volume_id: vid,
+            block_range: 0..2,
+            data: Bytes::from(pattern.clone()),
+        };
+        let result = pipeline.execute(req).await.unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        let commit = metadata_client.last_commit().expect("should have a commit");
+
+        for checksum_bytes in &commit.checksums {
+            let checksum_str = std::str::from_utf8(checksum_bytes).unwrap();
+            assert_eq!(
+                checksum_str, expected_checksum,
+                "checksum in commit must match computed checksum of original data"
+            );
+        }
+
+        let stored = data_client
+            .read_stored(commit.extent_id, commit.extent_version)
+            .unwrap();
+        let stored_checksum = compute_checksum(&stored);
+        assert_eq!(
+            stored_checksum, expected_checksum,
+            "checksum of stored data must match original"
+        );
+    }
 }
