@@ -1559,7 +1559,7 @@ mod tests {
         stale_handler.set_paused(true);
 
         let pipeline = WritePipeline::new(
-            data_client,
+            data_client.clone(),
             metadata_client.clone(),
             Arc::clone(&cache),
             session.clone(),
@@ -1579,7 +1579,7 @@ mod tests {
         let first_result = pipeline.execute_once(&req, op_id).await.unwrap();
         assert!(matches!(first_result, WriteOutcome::Committed { .. }));
 
-        stale_handler.set_paused(true);
+        // Re-execute with same op_id to verify idempotent retry returns Committed.
         let final_result = pipeline.execute_with_op_id(req, op_id).await.unwrap();
         match final_result {
             WriteOutcome::Committed { epoch } => {

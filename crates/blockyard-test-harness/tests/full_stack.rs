@@ -35,11 +35,13 @@ struct RealHandler(DataNodeService);
 
 impl DataPlaneHandler for RealHandler {
     fn handle_write(&self, request: &WriteExtentRequest, payload: &[u8]) -> WriteExtentResponse {
-        self.0.handle_write(request, payload)
+        let caller = blockyard_common::PeerIdentity::Node(NodeId::generate());
+        self.0.handle_write(request, payload, &caller)
     }
 
     fn handle_read(&self, request: &ReadExtentRequest) -> (ReadExtentResponse, Option<Vec<u8>>) {
-        self.0.handle_read(request)
+        let caller = blockyard_common::PeerIdentity::Node(NodeId::generate());
+        self.0.handle_read(request, &caller)
     }
 }
 
