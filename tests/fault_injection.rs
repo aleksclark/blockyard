@@ -156,10 +156,7 @@ async fn test_raft_leader_failover() {
 
     let mut new_leader_found = false;
     for i in 1..3 {
-        let url = format!(
-            "{}/api/v1/cluster/status",
-            cluster.node(i).mgmt_url()
-        );
+        let url = format!("{}/api/v1/cluster/status", cluster.node(i).mgmt_url());
         if let Ok(resp) = client.get(&url).send().await {
             if resp.status().is_success() {
                 new_leader_found = true;
@@ -172,10 +169,7 @@ async fn test_raft_leader_failover() {
                     )
                     .await;
                 if vol_result.is_err() {
-                    let url2 = format!(
-                        "{}/api/v1/volumes",
-                        cluster.node(i).mgmt_url()
-                    );
+                    let url2 = format!("{}/api/v1/volumes", cluster.node(i).mgmt_url());
                     let body = serde_json::json!({
                         "name": "failover-vol",
                         "size_bytes": 1024 * 1024,
@@ -369,14 +363,17 @@ async fn test_write_lease_mutual_exclusion() {
     let session_a = uuid::Uuid::new_v4().to_string();
     let session_b = uuid::Uuid::new_v4().to_string();
 
-    let resp_a = cluster.acquire_lease(&vol_id, &session_a).await.expect("lease A");
-    let resp_b = cluster.acquire_lease(&vol_id, &session_b).await.expect("lease B");
+    let resp_a = cluster
+        .acquire_lease(&vol_id, &session_a)
+        .await
+        .expect("lease A");
+    let resp_b = cluster
+        .acquire_lease(&vol_id, &session_b)
+        .await
+        .expect("lease B");
 
     let a_ok = resp_a.status().is_success();
     let b_ok = resp_b.status().is_success();
 
-    assert!(
-        a_ok || b_ok,
-        "at least one session should get the lease"
-    );
+    assert!(a_ok || b_ok, "at least one session should get the lease");
 }

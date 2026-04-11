@@ -277,12 +277,20 @@ impl<H: BlockHandler> UblkDevice<H> {
                                         }
                                     }
                                     let buf_addr = bufs[tag as usize].as_mut_ptr();
-                                    q.complete_io_cmd(tag, buf_addr, Ok(UblkIORes::Result(length as i32)));
+                                    q.complete_io_cmd(
+                                        tag,
+                                        buf_addr,
+                                        Ok(UblkIORes::Result(length as i32)),
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::error!(?e, tag, "ublk IO handler error");
                                     let buf_addr = bufs[tag as usize].as_mut_ptr();
-                                    q.complete_io_cmd(tag, buf_addr, Err(LibUblkError::OtherError(-5)));
+                                    q.complete_io_cmd(
+                                        tag,
+                                        buf_addr,
+                                        Err(LibUblkError::OtherError(-5)),
+                                    );
                                 }
                             }
                         }
@@ -290,9 +298,9 @@ impl<H: BlockHandler> UblkDevice<H> {
 
                     let queue = UblkQueue::new(qid as u16, dev)
                         .unwrap()
-                        .submit_fetch_commands_unified(
-                            libublk::io::BufDescList::Slices(Some(&bufs)),
-                        )
+                        .submit_fetch_commands_unified(libublk::io::BufDescList::Slices(Some(
+                            &bufs,
+                        )))
                         .expect("submit_fetch_commands_unified");
                     queue.wait_and_handle_io(io_handler);
                 };

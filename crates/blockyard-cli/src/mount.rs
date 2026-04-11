@@ -38,6 +38,7 @@ pub async fn execute_mount_kernel(
     use anyhow::Context;
 
     use blockyard_common::{EpochId, SessionId};
+    use blockyard_ublk::HttpMetadataClient;
     use blockyard_ublk::block_handler::{ClusterBlockHandler, VolumeConfig};
     use blockyard_ublk::lease_manager::LeaseManager;
     use blockyard_ublk::metadata_cache::{CachedVolumeInfo, MetadataCache};
@@ -46,7 +47,6 @@ pub async fn execute_mount_kernel(
     use blockyard_ublk::tcp_client::TcpDataNodeClient;
     use blockyard_ublk::ublk::{UblkDevice, UblkDeviceConfig};
     use blockyard_ublk::watermark::WriteWatermark;
-    use blockyard_ublk::HttpMetadataClient;
 
     const LEASE_TTL: Duration = Duration::from_secs(30);
 
@@ -96,12 +96,12 @@ pub async fn execute_mount_kernel(
                                 .get("block_start")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0);
-                            let block_end = entry
-                                .get("block_end")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let extent_id_str =
-                                entry.get("extent_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let block_end =
+                                entry.get("block_end").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let extent_id_str = entry
+                                .get("extent_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             let extent_id: blockyard_common::ExtentId = match extent_id_str.parse()
                             {
                                 Ok(id) => id,
@@ -129,7 +129,9 @@ pub async fn execute_mount_kernel(
                                             let s = v.as_str()?;
                                             let bytes: Vec<u8> = (0..s.len())
                                                 .step_by(2)
-                                                .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+                                                .filter_map(|i| {
+                                                    u8::from_str_radix(&s[i..i + 2], 16).ok()
+                                                })
                                                 .collect();
                                             Some(bytes)
                                         })
@@ -151,7 +153,10 @@ pub async fn execute_mount_kernel(
                             );
                             loaded += 1;
                         }
-                        tracing::info!(count = loaded, "loaded extent mappings from metadata server");
+                        tracing::info!(
+                            count = loaded,
+                            "loaded extent mappings from metadata server"
+                        );
                     }
                 }
             }

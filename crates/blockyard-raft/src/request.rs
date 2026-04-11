@@ -69,4 +69,7 @@ pub enum MetadataRequest {
 
     /// Deregister a disk from the cluster metadata.
     DeregisterDisk { disk_id: DiskId },
+
+    /// Remove all expired leases from the state machine.
+    CleanupExpiredLeases { now_ms: u64 },
 }

@@ -181,8 +181,8 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
             return Ok(Some(Bytes::from(vec![0u8; length])));
         }
 
-        let offset_within_extent = request.offset_bytes
-            - (_block_start * self.volume_config.block_size as u64);
+        let offset_within_extent =
+            request.offset_bytes - (_block_start * self.volume_config.block_size as u64);
         let length = request.length_bytes as u64;
 
         let mut last_error = None;

@@ -24,6 +24,9 @@ pub enum MetadataResponse {
 
     /// A disk was registered (or updated) in the cluster metadata.
     DiskRegistered,
+
+    /// Number of expired leases that were cleaned up.
+    LeasesCleanedUp(usize),
 }
 
 impl MetadataResponse {

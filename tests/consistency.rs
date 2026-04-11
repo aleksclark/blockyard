@@ -9,9 +9,7 @@
 
 use std::time::Duration;
 
-use blockyard_common::{
-    ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId,
-};
+use blockyard_common::{ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
 use blockyard_test_harness::process_harness::{
     RealProcessCluster, TcpDataClient, build_binary, unique_base_port,
 };
@@ -198,7 +196,11 @@ async fn test_majority_ack_required() {
         .and_then(|r| r.get("success"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    assert!(ok2, "write should succeed with 2/3 nodes (majority): {:?}", resp2);
+    assert!(
+        ok2,
+        "write should succeed with 2/3 nodes (majority): {:?}",
+        resp2
+    );
 
     cluster.resume_node(2).expect("SIGCONT node 2");
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -252,10 +254,7 @@ async fn test_read_your_own_writes() {
         let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
             .await
             .expect("connect reader");
-        let (read_resp, payload) = reader
-            .read_extent(&vol_id, &eid, 1)
-            .await
-            .expect("read");
+        let (read_resp, payload) = reader.read_extent(&vol_id, &eid, 1).await.expect("read");
         let r_ok = read_resp
             .get("ReadResp")
             .and_then(|r| r.get("success"))
@@ -327,11 +326,7 @@ async fn test_bounded_staleness() {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if read_ok {
-                    assert_eq!(
-                        payload, data,
-                        "surviving node {} should have the data",
-                        i
-                    );
+                    assert_eq!(payload, data, "surviving node {} should have the data", i);
                 }
             }
         }
@@ -442,10 +437,7 @@ async fn test_write_watermark_prevents_stale_read() {
     let mut reader = TcpDataClient::connect(cluster.node(0).data_addr())
         .await
         .expect("connect reader");
-    let (read_resp, payload) = reader
-        .read_extent(&vol_id, &eid, 1)
-        .await
-        .expect("read");
+    let (read_resp, payload) = reader.read_extent(&vol_id, &eid, 1).await.expect("read");
     let read_ok = read_resp
         .get("ReadResp")
         .and_then(|r| r.get("success"))
