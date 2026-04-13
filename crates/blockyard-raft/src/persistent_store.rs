@@ -692,6 +692,7 @@ mod tests {
                 volume_id: vid,
                 size_bytes: 1024,
                 protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
             },
         );
 
@@ -714,6 +715,7 @@ mod tests {
                     volume_id: vid,
                     size_bytes: 4096,
                     protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
                 },
             );
             sm.apply(vec![entry]).await.unwrap();
@@ -738,6 +740,7 @@ mod tests {
                 volume_id: vid,
                 size_bytes: 4096,
                 protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
             },
         );
         sm.apply(vec![entry]).await.unwrap();
@@ -768,6 +771,7 @@ mod tests {
                     volume_id: vid,
                     size_bytes: 1024,
                     protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
                 },
             );
             sm.apply(vec![entry]).await.unwrap();
@@ -827,6 +831,7 @@ mod tests {
                     volume_id: vid,
                     size_bytes: 1024,
                     protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
                 },
             ),
             make_normal(
@@ -874,6 +879,7 @@ mod tests {
                         volume_id: vid,
                         size_bytes: 1024,
                         protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
                     },
                 );
                 sm_w.apply(vec![entry]).await.unwrap();
@@ -903,6 +909,7 @@ mod tests {
                     volume_id: vid,
                     size_bytes: 2048,
                     protection: ProtectionPolicy::Replicated { replicas: 2 },
+                extent_size: 524288,
                 },
             );
             sm.apply(vec![entry]).await.unwrap();
@@ -1001,6 +1008,7 @@ mod tests {
                     volume_id: vid,
                     size_bytes: 1024 * i,
                     protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
                 },
             );
             sm.apply(vec![entry]).await.unwrap();
@@ -1042,6 +1050,7 @@ mod tests {
                     volume_id: vid1,
                     size_bytes: 1024,
                     protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
                 },
             );
             sm.apply(vec![entry]).await.unwrap();
@@ -1058,6 +1067,7 @@ mod tests {
                     volume_id: vid2,
                     size_bytes: 2048,
                     protection: ProtectionPolicy::Replicated { replicas: 2 },
+                extent_size: 524288,
                 },
             );
             sm.apply(vec![entry]).await.unwrap();

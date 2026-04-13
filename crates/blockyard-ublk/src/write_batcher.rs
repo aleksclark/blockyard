@@ -25,6 +25,8 @@ use crate::watermark::WriteWatermark;
 pub struct CacheUpdate {
     pub volume_id: blockyard_common::VolumeId,
     pub block_start: u64,
+    pub block_range: Option<std::ops::Range<u64>>,
+    pub block_size: u64,
     pub mapping: CachedExtentMapping,
 }
 
@@ -153,11 +155,20 @@ impl<M: MetadataClient> WriteBatcher<M> {
             Ok(epoch) => {
                 self.watermark.advance(*epoch);
                 for commit in &commits {
-                    self.cache.set_extent_mapping(
-                        &commit.cache_update.volume_id,
-                        commit.cache_update.block_start,
-                        commit.cache_update.mapping.clone(),
-                    );
+                    if let Some(ref block_range) = commit.cache_update.block_range {
+                        self.cache.set_extent_mapping_range(
+                            &commit.cache_update.volume_id,
+                            block_range,
+                            commit.cache_update.block_size,
+                            commit.cache_update.mapping.clone(),
+                        );
+                    } else {
+                        self.cache.set_extent_mapping(
+                            &commit.cache_update.volume_id,
+                            commit.cache_update.block_start,
+                            commit.cache_update.mapping.clone(),
+                        );
+                    }
                 }
             }
             Err(_) => {}
@@ -229,11 +240,20 @@ impl<M: MetadataClient> WriteBatcher<M> {
                     Ok(epoch) => {
                         watermark.advance(*epoch);
                         for commit in &commits {
-                            cache.set_extent_mapping(
-                                &commit.cache_update.volume_id,
-                                commit.cache_update.block_start,
-                                commit.cache_update.mapping.clone(),
-                            );
+                            if let Some(ref block_range) = commit.cache_update.block_range {
+                                cache.set_extent_mapping_range(
+                                    &commit.cache_update.volume_id,
+                                    block_range,
+                                    commit.cache_update.block_size,
+                                    commit.cache_update.mapping.clone(),
+                                );
+                            } else {
+                                cache.set_extent_mapping(
+                                    &commit.cache_update.volume_id,
+                                    commit.cache_update.block_start,
+                                    commit.cache_update.mapping.clone(),
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -416,14 +436,17 @@ mod tests {
         let update = CacheUpdate {
             volume_id: vid,
             block_start,
-            mapping: CachedExtentMapping {
-                extent_id: eid,
-                extent_version: 1,
-                replica_locations: vec![nid],
-                checksums: vec![vec![0xAA]],
-                size_bytes: 4096,
-            },
-        };
+            block_range: None,
+            block_size: 4096,
+           mapping: CachedExtentMapping {
+               extent_id: eid,
+               extent_version: 1,
+               replica_locations: vec![nid],
+               checksums: vec![vec![0xAA]],
+               size_bytes: 4096,
+                extent_offset: 0,
+           },
+       };
         (req, update)
     }
 
@@ -564,16 +587,19 @@ mod tests {
                     previous_version: None,
                 },
                 result_tx: tx,
-                cache_update: CacheUpdate {
-                    volume_id: vid,
-                    block_start: 42,
-                    mapping: CachedExtentMapping {
-                        extent_id: eid,
-                        extent_version: 7,
-                        replica_locations: vec![nid],
-                        checksums: vec![vec![0xBB]],
-                        size_bytes: 4096,
-                    },
+               cache_update: CacheUpdate {
+                   volume_id: vid,
+                   block_start: 42,
+                    block_range: None,
+                    block_size: 4096,
+                  mapping: CachedExtentMapping {
+                       extent_id: eid,
+                       extent_version: 7,
+                       replica_locations: vec![nid],
+                       checksums: vec![vec![0xBB]],
+                       size_bytes: 4096,
+                        extent_offset: 0,
+                   },
                 },
             });
         }
@@ -607,16 +633,19 @@ mod tests {
                     previous_version: None,
                 },
                 result_tx: tx,
-                cache_update: CacheUpdate {
-                    volume_id: vid,
-                    block_start: 99,
-                    mapping: CachedExtentMapping {
-                        extent_id: ExtentId::generate(),
-                        extent_version: 1,
-                        replica_locations: vec![],
-                        checksums: vec![],
-                        size_bytes: 4096,
-                    },
+               cache_update: CacheUpdate {
+                   volume_id: vid,
+                   block_start: 99,
+                    block_range: None,
+                    block_size: 4096,
+                  mapping: CachedExtentMapping {
+                       extent_id: ExtentId::generate(),
+                       extent_version: 1,
+                       replica_locations: vec![],
+                       checksums: vec![],
+                       size_bytes: 4096,
+                        extent_offset: 0,
+                   },
                 },
             });
         }
@@ -725,16 +754,19 @@ mod tests {
 
     #[test]
     fn test_cache_update_debug() {
-        let update = CacheUpdate {
-            volume_id: VolumeId::generate(),
-            block_start: 0,
-            mapping: CachedExtentMapping {
-                extent_id: ExtentId::generate(),
-                extent_version: 1,
-                replica_locations: vec![],
-                checksums: vec![],
-                size_bytes: 4096,
-            },
+       let update = CacheUpdate {
+           volume_id: VolumeId::generate(),
+           block_start: 0,
+            block_range: None,
+            block_size: 4096,
+          mapping: CachedExtentMapping {
+               extent_id: ExtentId::generate(),
+               extent_version: 1,
+               replica_locations: vec![],
+               checksums: vec![],
+               size_bytes: 4096,
+                extent_offset: 0,
+           },
         };
         let debug = format!("{:?}", update);
         assert!(debug.contains("CacheUpdate"));
@@ -742,16 +774,19 @@ mod tests {
 
     #[test]
     fn test_cache_update_clone() {
-        let update = CacheUpdate {
-            volume_id: VolumeId::generate(),
-            block_start: 42,
-            mapping: CachedExtentMapping {
-                extent_id: ExtentId::generate(),
-                extent_version: 5,
-                replica_locations: vec![NodeId::generate()],
-                checksums: vec![vec![1, 2, 3]],
-                size_bytes: 8192,
-            },
+       let update = CacheUpdate {
+           volume_id: VolumeId::generate(),
+           block_start: 42,
+            block_range: None,
+            block_size: 4096,
+          mapping: CachedExtentMapping {
+               extent_id: ExtentId::generate(),
+               extent_version: 5,
+               replica_locations: vec![NodeId::generate()],
+               checksums: vec![vec![1, 2, 3]],
+               size_bytes: 8192,
+                extent_offset: 0,
+           },
         };
         let cloned = update.clone();
         assert_eq!(cloned.block_start, 42);

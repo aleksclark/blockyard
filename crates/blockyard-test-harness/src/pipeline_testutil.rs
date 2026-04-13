@@ -32,13 +32,14 @@ pub fn setup_test_pipeline<D: DataNodeClient, M: MetadataClient>(
     }
 
     let ext_id = ExtentId::generate();
-    let mapping = CachedExtentMapping {
-        extent_id: ext_id,
-        extent_version: 0,
-        replica_locations: node_ids.to_vec(),
-        checksums: vec![],
-        size_bytes: 4096,
-    };
+   let mapping = CachedExtentMapping {
+       extent_id: ext_id,
+       extent_version: 0,
+       replica_locations: node_ids.to_vec(),
+       checksums: vec![],
+       size_bytes: 4096,
+        extent_offset: 0,
+   };
     cache.set_extent_mapping(&volume_id, 0, mapping);
 
     let vol_info = CachedVolumeInfo {

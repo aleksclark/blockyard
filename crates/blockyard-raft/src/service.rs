@@ -79,12 +79,14 @@ impl MetadataService {
         volume_id: VolumeId,
         size_bytes: u64,
         protection: ProtectionPolicy,
+        extent_size: u64,
     ) -> Result<(), Error> {
         let resp = self
             .commit(MetadataRequest::CreateVolume {
                 volume_id,
                 size_bytes,
                 protection,
+                extent_size,
             })
             .await?;
         check_response(resp)

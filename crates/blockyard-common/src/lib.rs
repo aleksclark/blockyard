@@ -12,6 +12,7 @@ pub mod error;
 pub mod id;
 pub mod lease;
 pub mod metrics;
+pub mod placement;
 pub mod protection;
 
 pub use auth::{
@@ -34,4 +35,5 @@ pub use metrics::{
     SCRUB_FINDINGS_TOTAL, SCRUB_LAST_COMPLETED_TIMESTAMP, VOLUME_IO_FAILURE_TOTAL,
     VOLUME_IO_SUCCESS_TOTAL,
 };
+pub use placement::PlacementEngine;
 pub use protection::ProtectionPolicy;

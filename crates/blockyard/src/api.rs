@@ -31,11 +31,19 @@ struct CreateVolumeRequest {
     size_bytes: u64,
     #[serde(default = "default_protection")]
     protection: ProtectionPolicy,
+    #[serde(default = "default_extent_size")]
+    extent_size: Option<u64>,
 }
 
 fn default_protection() -> ProtectionPolicy {
     ProtectionPolicy::Replicated { replicas: 3 }
 }
+
+fn default_extent_size() -> Option<u64> {
+    None
+}
+
+const DEFAULT_EXTENT_SIZE: u64 = 524288;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum VolumeState {
@@ -51,6 +59,7 @@ struct VolumeInfo {
     name: String,
     size_bytes: u64,
     protection: ProtectionPolicy,
+    extent_size: u64,
     state: VolumeState,
     replica_nodes: Vec<NodeId>,
     created_at: chrono::DateTime<Utc>,
@@ -118,6 +127,7 @@ pub async fn start_management_api(
         .route("/api/v1/cluster/status", get(cluster_status))
         .route("/api/v1/cluster/join", post(cluster_join))
         .route("/api/v1/disks", get(list_disks))
+        .route("/api/v1/disks/register", post(register_disk))
         .route("/api/v1/extent-mappings", post(commit_extent_mapping))
         .route(
             "/api/v1/extent-mappings/batch",
@@ -151,9 +161,10 @@ async fn create_volume(
     Json(req): Json<CreateVolumeRequest>,
 ) -> impl IntoResponse {
     let volume_id = VolumeId::generate();
+    let extent_size = req.extent_size.unwrap_or(DEFAULT_EXTENT_SIZE);
     match state
         .metadata
-        .create_volume(volume_id, req.size_bytes, req.protection)
+        .create_volume(volume_id, req.size_bytes, req.protection, extent_size)
         .await
     {
         Ok(()) => {
@@ -162,6 +173,7 @@ async fn create_volume(
                 name: req.name,
                 size_bytes: req.size_bytes,
                 protection: req.protection,
+                extent_size,
                 state: VolumeState::Healthy,
                 replica_nodes: vec![],
                 created_at: Utc::now(),
@@ -226,6 +238,7 @@ async fn list_volumes(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             name: String::new(),
             size_bytes: v.size_bytes,
             protection: v.protection,
+            extent_size: v.extent_size,
             state: VolumeState::Healthy,
             replica_nodes: vec![],
             created_at: Utc::now(),
@@ -256,6 +269,7 @@ async fn inspect_volume(
                 name: String::new(),
                 size_bytes: v.size_bytes,
                 protection: v.protection,
+                extent_size: v.extent_size,
                 state: VolumeState::Healthy,
                 replica_nodes: vec![],
                 created_at: Utc::now(),
@@ -361,6 +375,59 @@ async fn list_disks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::to_value(&infos).unwrap())
 }
 
+/// POST /api/v1/disks/register
+///
+/// Register a disk with the cluster metadata. This must be called on the leader.
+/// Non-leader nodes can HTTP POST to the leader to register their disks.
+async fn register_disk(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let disk_id_str = req.get("disk_id").and_then(|v| v.as_str()).unwrap_or("");
+    let node_id_str = req.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+    let capacity_bytes = req
+        .get("capacity_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let disk_id: blockyard_common::DiskId = match disk_id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid disk_id"})),
+            )
+                .into_response()
+        }
+    };
+    let node_id: blockyard_common::NodeId = match node_id_str.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid node_id"})),
+            )
+                .into_response()
+        }
+    };
+
+    match state
+        .metadata
+        .register_disk(disk_id, node_id, capacity_bytes)
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(%disk_id, %node_id, capacity_bytes, "disk registered via API");
+            Json(serde_json::json!({"status": "ok"})).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// POST /api/v1/cluster/join
 ///
 /// Allows a new node to join the cluster. The leader registers the node
@@ -440,13 +507,24 @@ async fn cluster_join(
 
     // Step 4: Build the peer map for the response so the joining node
     // can pre-populate its own PeerRegistry immediately.
+    // IMPORTANT: The state machine stores data plane addresses (port 9800),
+    // but the PeerRegistry needs raft RPC addresses (port + 10).
+    // Derive the raft address from the data address using the same convention
+    // as raft_bind_addr() in node.rs.
     let mut peers = std::collections::HashMap::new();
     {
         let sm_data = state.metadata.sm_data();
         let data = sm_data.read();
         for node_entry in data.nodes.values() {
             if let Some(&peer_raft_id) = data.node_raft_map.get(&node_entry.node_id) {
-                peers.insert(peer_raft_id, node_entry.addr.clone());
+                // Derive raft addr: same IP, port + 10
+                let raft_addr = if let Ok(mut addr) = node_entry.addr.parse::<std::net::SocketAddr>() {
+                    addr.set_port(addr.port() + 10);
+                    addr.to_string()
+                } else {
+                    node_entry.addr.clone()
+                };
+                peers.insert(peer_raft_id, raft_addr);
             }
         }
     }
@@ -768,6 +846,7 @@ mod tests {
             name: "test".into(),
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+            extent_size: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: CreateVolumeRequest = serde_json::from_str(&json).unwrap();
@@ -792,6 +871,7 @@ mod tests {
             name: "vol".into(),
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+            extent_size: 524288,
             state: VolumeState::Healthy,
             replica_nodes: vec![],
             created_at: Utc::now(),

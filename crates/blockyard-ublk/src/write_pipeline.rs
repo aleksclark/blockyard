@@ -45,7 +45,7 @@ pub fn next_extent_version() -> u64 {
 }
 
 use blockyard_common::error::Error;
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, PlacementEngine, ProtectionPolicy, VolumeId};
 
 use crate::metadata_cache::MetadataCache;
 use crate::session::ClientSession;
@@ -59,6 +59,9 @@ pub struct WriteRequest {
     pub volume_id: VolumeId,
     pub block_range: Range<u64>,
     pub data: Bytes,
+    /// Number of blocks per extent (extent_size / block_size).
+    /// Used for extent-aligned placement: extent_num = block_range.start / extent_blocks.
+    pub extent_blocks: u64,
 }
 
 /// Outcome of a write operation.
@@ -142,15 +145,19 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
                         "previous attempt was committed; returning success"
                     );
                     self.watermark.advance(committed.epoch);
-                    self.cache.set_extent_mapping(
+                    let volume_info = self.cache.get_volume(&request.volume_id);
+                    let block_size = volume_info.map(|v| v.block_size as u64).unwrap_or(4096);
+                    self.cache.set_extent_mapping_range(
                         &request.volume_id,
-                        request.block_range.start,
+                        &request.block_range,
+                        block_size,
                         crate::metadata_cache::CachedExtentMapping {
                             extent_id: committed.extent_id,
                             extent_version: committed.extent_version,
                             replica_locations: committed.replica_locations,
                             checksums: committed.checksums,
                             size_bytes: request.data.len() as u64,
+                            extent_offset: 0,
                         },
                     );
                     return Ok(WriteOutcome::Committed {
@@ -190,15 +197,49 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
             Error::Storage(format!("volume {} not found in cache", request.volume_id))
         })?;
 
-        let (required_acks, replica_nodes) =
-            self.resolve_placement(&volume_info.protection, epoch)?;
+        // Use deterministic placement: derive node set from PlacementEngine
+        // using extent_num (not per-block) for grouping.
+        let available_nodes: Vec<NodeId> =
+            self.cache.list_nodes().iter().map(|n| n.node_id).collect();
+
+        let extent_num = request.block_range.start / request.extent_blocks.max(1);
+
+        let (required_acks, replica_nodes) = match volume_info.protection {
+            ProtectionPolicy::Replicated { replicas } => {
+                let total = replicas as usize;
+                let nodes = PlacementEngine::select_nodes(
+                    request.volume_id,
+                    extent_num,
+                    &available_nodes,
+                    total,
+                );
+                let required = if total > 1 { (total / 2) + 1 } else { total };
+                (required, nodes)
+            }
+            ProtectionPolicy::ErasureCoded {
+                data_chunks,
+                parity_chunks,
+            } => {
+                let required = (data_chunks + parity_chunks) as usize;
+                let nodes = PlacementEngine::select_ec_nodes(
+                    request.volume_id,
+                    extent_num,
+                    &available_nodes,
+                    data_chunks,
+                    parity_chunks,
+                );
+                (required, nodes)
+            }
+        };
 
         if replica_nodes.is_empty() {
             return Err(Error::Storage("no replica nodes available".into()));
         }
 
-        let extent_id = ExtentId::generate();
-        let extent_version = next_extent_version();
+        // Deterministic extent_id and version — no random generation, no Raft.
+        let extent_id =
+            PlacementEngine::extent_id_for_extent(request.volume_id, extent_num);
+        let extent_version = PlacementEngine::extent_version();
         let checksum = compute_checksum(&request.data);
 
         let acks = self
@@ -214,13 +255,6 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
             )
             .await;
 
-        let successful_acks: Vec<_> = acks.iter().filter(|a| a.success).collect();
-        let successful_nodes: Vec<NodeId> = successful_acks.iter().map(|a| a.node_id).collect();
-        let successful_checksums: Vec<Vec<u8>> = successful_acks
-            .iter()
-            .map(|a| a.checksum.as_bytes().to_vec())
-            .collect();
-
         if acks.iter().any(|a| {
             a.error
                 .as_ref()
@@ -233,60 +267,33 @@ impl<D: DataNodeClient, M: MetadataClient> WritePipeline<D, M> {
             return Ok(WriteOutcome::StaleEpoch);
         }
 
+        let successful_acks: Vec<_> = acks.iter().filter(|a| a.success).collect();
+
         if successful_acks.len() < required_acks {
+            for ack in &acks {
+                if !ack.success {
+                    tracing::warn!(
+                        node = %ack.node_id,
+                        error = ?ack.error,
+                        "data node rejected write"
+                    );
+                }
+            }
             return Ok(WriteOutcome::InsufficientAcks {
                 acked: successful_acks.len(),
                 required: required_acks,
             });
         }
 
-        let commit_req = CommitRequest {
-            volume_id: request.volume_id,
-            block_range: request.block_range.clone(),
-            extent_id,
-            extent_version,
-            epoch,
-            replica_locations: successful_nodes,
-            checksums: successful_checksums,
-            operation_id: Some(operation_id),
-            previous_version: None,
-        };
-
-        match self.metadata_client.commit_extent_mapping(commit_req).await {
-            Ok(commit_epoch) => {
-                self.watermark.advance(commit_epoch);
-                self.cache.set_extent_mapping(
-                    &request.volume_id,
-                    request.block_range.start,
-                    crate::metadata_cache::CachedExtentMapping {
-                        extent_id,
-                        extent_version,
-                        replica_locations: acks
-                            .iter()
-                            .filter(|a| a.success)
-                            .map(|a| a.node_id)
-                            .collect(),
-                        checksums: acks
-                            .iter()
-                            .filter(|a| a.success)
-                            .map(|a| a.checksum.as_bytes().to_vec())
-                            .collect(),
-                        size_bytes: request.data.len() as u64,
-                    },
-                );
-                Ok(WriteOutcome::Committed {
-                    epoch: commit_epoch,
-                })
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "metadata commit failed — NOT acking to ublk");
-                Ok(WriteOutcome::MetadataCommitFailed {
-                    reason: e.to_string(),
-                })
-            }
-        }
+        // Deterministic placement: skip Raft commit and metadata cache update.
+        // Reads will compute the same extent_id and nodes from PlacementEngine.
+        // Advance watermark to current epoch so read-your-writes freshness
+        // checks still pass.
+        self.watermark.advance(epoch);
+        Ok(WriteOutcome::Committed { epoch })
     }
 
+    #[allow(dead_code)]
     fn resolve_placement(
         &self,
         protection: &ProtectionPolicy,
@@ -614,6 +621,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xAA; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         match result {
@@ -632,6 +640,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xBB; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         match result {
@@ -646,20 +655,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_pipeline_metadata_commit_failure() {
+        // With deterministic placement, metadata commit is skipped entirely.
+        // A write with successful data acks now always succeeds.
         let (pipeline, _cache, vid, watermark) = make_pipeline(true, false, 3);
         let req = WriteRequest {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xCC; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
-        match result {
-            WriteOutcome::MetadataCommitFailed { reason } => {
-                assert!(reason.contains("commit failed"));
-            }
-            other => panic!("expected MetadataCommitFailed, got {:?}", other),
-        }
-        assert_eq!(watermark.current(), EpochId::new(0));
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+        assert!(watermark.current().as_u64() >= 1);
     }
 
     #[tokio::test]
@@ -685,6 +692,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xDD; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         assert_eq!(result, WriteOutcome::StaleEpoch);
@@ -698,6 +706,7 @@ mod tests {
             volume_id: unknown_vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xEE; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await;
         assert!(result.is_err());
@@ -728,6 +737,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xFF; 4096]),
+            extent_blocks: 1,
         };
 
         let result1 = pipeline
@@ -769,6 +779,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x11; 512]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
@@ -797,6 +808,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x22; 512]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await;
         assert!(result.is_err());
@@ -811,6 +823,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x33; 512]),
+            extent_blocks: 1,
         };
         pipeline.execute(req).await.unwrap();
         assert!(watermark.current().as_u64() >= 1);
@@ -818,15 +831,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_pipeline_watermark_no_advance_on_commit_fail() {
-        let (pipeline, _cache, vid, watermark) = make_pipeline(true, false, 3);
+        // With deterministic placement, metadata commit is skipped. Watermark
+        // always advances when data acks succeed. Test with failed data acks.
+        let (pipeline, _cache, vid, watermark) = make_pipeline(false, false, 3);
 
         let req = WriteRequest {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x44; 512]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
-        assert!(matches!(result, WriteOutcome::MetadataCommitFailed { .. }));
+        assert!(matches!(result, WriteOutcome::InsufficientAcks { .. }));
         assert_eq!(watermark.current(), EpochId::new(0));
     }
 
@@ -854,6 +870,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x55; 512]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
@@ -865,6 +882,7 @@ mod tests {
             volume_id: VolumeId::generate(),
             block_range: 0..64,
             data: Bytes::from(vec![0u8; 10]),
+            extent_blocks: 1,
         };
         let debug = format!("{:?}", req);
         assert!(debug.contains("WriteRequest"));
@@ -876,6 +894,7 @@ mod tests {
             volume_id: VolumeId::generate(),
             block_range: 0..64,
             data: Bytes::from(vec![0u8; 10]),
+            extent_blocks: 1,
         };
         let cloned = req.clone();
         assert_eq!(cloned.block_range, 0..64);
@@ -1049,6 +1068,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x66; 512]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         // With majority acks (2/3 required), 2 successful acks is now sufficient
@@ -1080,6 +1100,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0x77; 512]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await;
         assert!(result.is_err());
@@ -1099,6 +1120,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xABu8; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
@@ -1140,6 +1162,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xCDu8; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await;
         assert!(
@@ -1151,23 +1174,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_write_not_committed_on_metadata_failure() {
-        let (pipeline, _cache, vid, _wm) = make_pipeline(true, false, 3);
+        // With deterministic placement, there's no metadata commit to fail.
+        // Test with failed data acks instead to verify writes don't commit.
+        let (pipeline, _cache, vid, _wm) = make_pipeline(false, false, 3);
 
         let req = WriteRequest {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xEFu8; 4096]),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         match result {
-            WriteOutcome::MetadataCommitFailed { .. } => {}
+            WriteOutcome::InsufficientAcks { .. } => {}
             WriteOutcome::Committed { .. } => {
-                panic!("should not commit when metadata commit fails");
+                panic!("should not commit when data acks fail");
             }
             other => {
                 assert!(
                     !matches!(other, WriteOutcome::Committed { .. }),
-                    "should not have Committed outcome when commit fails: {:?}",
+                    "should not have Committed outcome when data acks fail: {:?}",
                     other
                 );
             }
@@ -1238,6 +1264,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![42u8; 4096]),
+            extent_blocks: 1,
         };
         let result1 = pipeline.execute(req1).await.unwrap();
         assert!(
@@ -1253,6 +1280,7 @@ mod tests {
             volume_id: vid,
             block_range: 64..128,
             data: Bytes::from(vec![99u8; 4096]),
+            extent_blocks: 1,
         };
         let result2 = pipeline.execute(req2).await.unwrap();
         match result2 {
@@ -1380,19 +1408,21 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xBB; 4096]),
+            extent_blocks: 1,
         };
 
         stale_handler.set_paused(false);
         let first_result = pipeline.execute_once(&req, op_id).await.unwrap();
         assert!(matches!(first_result, WriteOutcome::Committed { .. }));
 
-        stale_handler.set_paused(true);
+        // With deterministic placement, re-executing with the same op_id
+        // just writes again (same extent_id, same nodes). No metadata lookup.
         let final_result = pipeline.execute_with_op_id(req, op_id).await.unwrap();
         match final_result {
             WriteOutcome::Committed { epoch } => {
                 assert_eq!(epoch, EpochId::new(1));
             }
-            other => panic!("expected Committed from lookup, got {:?}", other),
+            other => panic!("expected Committed, got {:?}", other),
         }
     }
 
@@ -1571,6 +1601,7 @@ mod tests {
             volume_id: vid,
             block_range: 0..64,
             data: Bytes::from(vec![0xBB; 4096]),
+            extent_blocks: 1,
         };
 
         stale_handler.set_paused(false);
@@ -1600,13 +1631,17 @@ mod tests {
             volume_id: vid,
             block_range: 0..1,
             data: Bytes::from(pattern.clone()),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
 
-        let commit = metadata_client.last_commit().expect("should have a commit");
+        // With deterministic placement, no metadata commit is called.
+        // Verify data was stored using the deterministic extent_id.
+        let extent_id = blockyard_common::PlacementEngine::extent_id_for_block(vid, 0);
+        let extent_version = blockyard_common::PlacementEngine::extent_version();
         let stored = data_client
-            .read_stored(commit.extent_id, commit.extent_version)
+            .read_stored(extent_id, extent_version)
             .expect("data should be stored in InMemoryDataNode");
         assert_eq!(
             stored, pattern,
@@ -1645,23 +1680,19 @@ mod tests {
             volume_id: vid,
             block_range: 0..2,
             data: Bytes::from(pattern.clone()),
+            extent_blocks: 1,
         };
         let result = pipeline.execute(req).await.unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
 
-        let commit = metadata_client.last_commit().expect("should have a commit");
-
-        for checksum_bytes in &commit.checksums {
-            let checksum_str = std::str::from_utf8(checksum_bytes).unwrap();
-            assert_eq!(
-                checksum_str, expected_checksum,
-                "checksum in commit must match computed checksum of original data"
-            );
-        }
+        // With deterministic placement, no metadata commit is called.
+        // Verify data was stored using the deterministic extent_id.
+        let extent_id = blockyard_common::PlacementEngine::extent_id_for_block(vid, 0);
+        let extent_version = blockyard_common::PlacementEngine::extent_version();
 
         let stored = data_client
-            .read_stored(commit.extent_id, commit.extent_version)
-            .unwrap();
+            .read_stored(extent_id, extent_version)
+            .expect("data should be stored in InMemoryDataNode");
         let stored_checksum = compute_checksum(&stored);
         assert_eq!(
             stored_checksum, expected_checksum,

@@ -442,19 +442,20 @@ impl DataNodeService {
         } else {
             let start = request.offset as usize;
             let end = (request.offset + request.length) as usize;
-            if end > data.len() {
-                return (
-                    self.read_error(
-                        request,
-                        format!(
-                            "read range [{start}, {end}) exceeds extent size {}",
-                            data.len()
-                        ),
-                    ),
-                    None,
-                );
+            if start >= data.len() {
+                // Requested range starts beyond stored data — return zeros.
+                // This happens when extents are partially written (e.g., only
+                // the first block of a multi-block extent was written).
+                vec![0u8; end - start]
+            } else if end > data.len() {
+                // Requested range partially overlaps stored data — return
+                // stored bytes + zero padding for the rest.
+                let mut result = data[start..].to_vec();
+                result.resize(end - start, 0);
+                result
+            } else {
+                data[start..end].to_vec()
             }
-            data[start..end].to_vec()
         };
 
         let response = ReadExtentResponse {
@@ -1063,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_range_out_of_bounds() {
+    fn test_read_range_out_of_bounds_returns_zero_padded() {
         let (_dir, service, disk_id) = setup_service();
         let eid = ExtentId::generate();
         let data = b"short";
@@ -1079,12 +1080,25 @@ mod tests {
         );
         service.handle_write(&write_req, data, &test_node_identity());
 
+        // Overlapping read: starts within stored data, extends beyond
         let mut read_req = make_read_request(eid, 1, EpochId::new(1));
         read_req.offset = 0;
         read_req.length = 1000;
-        let (resp, _) = service.handle_read(&read_req, &test_node_identity());
-        assert!(!resp.success);
-        assert!(resp.error.unwrap().contains("exceeds extent size"));
+        let (resp, payload) = service.handle_read(&read_req, &test_node_identity());
+        assert!(resp.success, "read should succeed with zero-padding: {:?}", resp.error);
+        let payload = payload.unwrap();
+        assert_eq!(payload.len(), 1000);
+        assert_eq!(&payload[..5], b"short");
+        assert!(payload[5..].iter().all(|&b| b == 0), "remaining bytes should be zero");
+
+        // Fully beyond: starts past stored data
+        read_req.offset = 100;
+        read_req.length = 200;
+        let (resp2, payload2) = service.handle_read(&read_req, &test_node_identity());
+        assert!(resp2.success, "read beyond extent should succeed: {:?}", resp2.error);
+        let payload2 = payload2.unwrap();
+        assert_eq!(payload2.len(), 200);
+        assert!(payload2.iter().all(|&b| b == 0), "all bytes should be zero");
     }
 
     #[test]

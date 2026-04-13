@@ -19,6 +19,9 @@ pub struct CachedExtentMapping {
     pub replica_locations: Vec<NodeId>,
     pub checksums: Vec<Vec<u8>>,
     pub size_bytes: u64,
+    /// Byte offset within the stored extent where this block's data begins.
+    /// For per-block mappings, this is `(block_idx - original_block_range.start) * block_size`.
+    pub extent_offset: u64,
 }
 
 /// Per-volume cached metadata.
@@ -29,6 +32,17 @@ pub struct CachedVolumeInfo {
     pub block_size: u32,
     pub protection: ProtectionPolicy,
     pub extent_mappings: BTreeMap<u64, CachedExtentMapping>,
+}
+
+impl CachedVolumeInfo {
+    /// Number of blocks per extent (defaults to 1 when block_size is 0).
+    pub fn extent_blocks(&self) -> u64 {
+        // CachedVolumeInfo has no extent_size field; use 1 block per extent
+        // as the backward-compatible default.  Callers that need the real
+        // extent grouping must obtain it from VolumeConfig (which carries
+        // extent_size).
+        1
+    }
 }
 
 /// Node address in the cluster map.
@@ -146,6 +160,38 @@ impl MetadataCache {
         let mut inner = self.inner.write();
         if let Some(vol) = inner.volumes.get_mut(&volume_id.to_string()) {
             vol.extent_mappings.insert(block_start, mapping);
+        }
+    }
+
+    /// Store per-block extent mapping entries for a range of blocks.
+    ///
+    /// Instead of storing a single mapping for the entire range, this stores
+    /// one mapping per block, each with `size_bytes = block_size` and the
+    /// appropriate `extent_offset`. This prevents partial overwrites from
+    /// shadowing blocks that belong to the original multi-block extent.
+    pub fn set_extent_mapping_range(
+        &self,
+        volume_id: &VolumeId,
+        block_range: &Range<u64>,
+        block_size: u64,
+        base_mapping: CachedExtentMapping,
+    ) {
+        let mut inner = self.inner.write();
+        if let Some(vol) = inner.volumes.get_mut(&volume_id.to_string()) {
+            for block_idx in block_range.start..block_range.end {
+                let extent_offset = (block_idx - block_range.start) * block_size;
+                vol.extent_mappings.insert(
+                    block_idx,
+                    CachedExtentMapping {
+                        extent_id: base_mapping.extent_id,
+                        extent_version: base_mapping.extent_version,
+                        replica_locations: base_mapping.replica_locations.clone(),
+                        checksums: base_mapping.checksums.clone(),
+                        size_bytes: block_size,
+                        extent_offset,
+                    },
+                );
+            }
         }
     }
 
@@ -330,6 +376,7 @@ mod tests {
             replica_locations: vec![n1],
             checksums: vec![vec![0xAA]],
             size_bytes: 524288,
+            extent_offset: 0,
         };
         cache.set_extent_mapping(&vid, 0, mapping);
 
@@ -373,6 +420,7 @@ mod tests {
                 replica_locations: vec![NodeId::generate()],
                 checksums: vec![],
                 size_bytes: 524288,
+                extent_offset: 0,
             },
         );
         let info = CachedVolumeInfo {
@@ -470,6 +518,7 @@ mod tests {
             replica_locations: vec![NodeId::generate()],
             checksums: vec![vec![1, 2, 3]],
             size_bytes: 1024,
+            extent_offset: 0,
         };
         let cloned = m.clone();
         assert_eq!(m.extent_id, cloned.extent_id);
@@ -520,6 +569,7 @@ mod tests {
             replica_locations: vec![],
             checksums: vec![],
             size_bytes: 0,
+            extent_offset: 0,
         };
         cache.set_extent_mapping(&vid, 0, mapping);
         assert!(cache.get_extent_mapping(&vid, 0).is_none());
@@ -561,6 +611,7 @@ mod tests {
                 replica_locations: vec![NodeId::generate()],
                 checksums: vec![],
                 size_bytes: 4096,
+                extent_offset: 0,
             },
         );
         let info = CachedVolumeInfo {
@@ -597,6 +648,7 @@ mod tests {
                 replica_locations: vec![NodeId::generate()],
                 checksums: vec![],
                 size_bytes: 8192,
+                extent_offset: 0,
             },
         );
         let info = CachedVolumeInfo {
@@ -636,6 +688,7 @@ mod tests {
                 replica_locations: vec![n1],
                 checksums: vec![vec![0xAA]],
                 size_bytes: 4096,
+                extent_offset: 0,
             },
         );
         assert!(cache.get_extent_mapping(&vid, 0).is_some());

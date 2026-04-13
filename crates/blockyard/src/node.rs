@@ -403,7 +403,40 @@ impl BlockyardNode {
                     info!(%disk_id, capacity_bytes, "registered disk with cluster");
                 }
                 Err(e) => {
-                    warn!(%disk_id, error = %e, "failed to register disk (may not be leader)");
+                    warn!(%disk_id, error = %e, "failed to register disk via raft, trying HTTP forward to seed");
+                    // Try to register via HTTP to any seed node's management API
+                    let mut registered = false;
+                    for seed in &config.gossip.seed_nodes {
+                        // seed is "ip:port" where port is gossip/mgmt port
+                        let url = format!("http://{}/api/v1/disks/register", seed);
+                        let client = reqwest::Client::new();
+                        let resp = client
+                            .post(&url)
+                            .json(&serde_json::json!({
+                                "disk_id": disk_id.to_string(),
+                                "node_id": node_id.to_string(),
+                                "capacity_bytes": capacity_bytes,
+                            }))
+                            .timeout(std::time::Duration::from_secs(5))
+                            .send()
+                            .await;
+                        match resp {
+                            Ok(r) if r.status().is_success() => {
+                                info!(%disk_id, %seed, "registered disk via HTTP forward");
+                                registered = true;
+                                break;
+                            }
+                            Ok(r) => {
+                                warn!(%disk_id, %seed, status = %r.status(), "HTTP disk register failed");
+                            }
+                            Err(e) => {
+                                warn!(%disk_id, %seed, error = %e, "HTTP disk register request failed");
+                            }
+                        }
+                    }
+                    if !registered {
+                        warn!(%disk_id, "disk registration failed on all paths");
+                    }
                 }
             }
         }
@@ -917,6 +950,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
 
         sm.apply_request(&blockyard_raft::MetadataRequest::Lease(

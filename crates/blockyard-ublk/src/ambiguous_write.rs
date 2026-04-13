@@ -80,13 +80,14 @@ impl<M: MetadataClient> AmbiguousWriteResolver<M> {
                 self.cache.set_extent_mapping(
                     &volume_id,
                     mapping.block_range.start,
-                    CachedExtentMapping {
-                        extent_id: mapping.extent_id,
-                        extent_version: mapping.extent_version,
-                        replica_locations: mapping.replica_locations.clone(),
-                        checksums: mapping.checksums.clone(),
-                        size_bytes: 0,
-                    },
+                   CachedExtentMapping {
+                       extent_id: mapping.extent_id,
+                       extent_version: mapping.extent_version,
+                       replica_locations: mapping.replica_locations.clone(),
+                       checksums: mapping.checksums.clone(),
+                       size_bytes: 0,
+                        extent_offset: 0,
+                   },
                 );
 
                 self.watermark.advance(mapping.epoch);

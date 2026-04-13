@@ -95,13 +95,14 @@ impl<M: MetadataClient> CrashRecoveryResolver<M> {
                     self.cache.set_extent_mapping(
                         &volume_id,
                         mapping.block_range.start,
-                        CachedExtentMapping {
-                            extent_id: mapping.extent_id,
-                            extent_version: mapping.extent_version,
-                            replica_locations: mapping.replica_locations.clone(),
-                            checksums: mapping.checksums.clone(),
-                            size_bytes: 0,
-                        },
+                       CachedExtentMapping {
+                           extent_id: mapping.extent_id,
+                           extent_version: mapping.extent_version,
+                           replica_locations: mapping.replica_locations.clone(),
+                           checksums: mapping.checksums.clone(),
+                           size_bytes: 0,
+                            extent_offset: 0,
+                       },
                     );
 
                     committed_ops.insert(*op_id);

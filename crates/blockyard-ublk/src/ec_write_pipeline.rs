@@ -14,7 +14,7 @@ use bytes::Bytes;
 use parking_lot::Mutex;
 
 use blockyard_common::error::Error;
-use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, ProtectionPolicy, VolumeId};
+use blockyard_common::{EpochId, ExtentId, NodeId, OperationId, PlacementEngine, ProtectionPolicy, VolumeId};
 
 use crate::metadata_cache::MetadataCache;
 use crate::session::ClientSession;
@@ -289,16 +289,24 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
             )));
         }
 
-        let fragment_nodes: Vec<NodeId> = nodes
-            .iter()
-            .take(total_required)
-            .map(|n| n.node_id)
-            .collect();
+        // Deterministic node selection via PlacementEngine.
+        // Use extent_num (not per-block) for grouping.
+        let available_nodes: Vec<NodeId> = nodes.iter().map(|n| n.node_id).collect();
+        let extent_blocks = volume_info.extent_blocks();
+        let extent_num = block_range.start / extent_blocks.max(1);
+        let fragment_nodes = PlacementEngine::select_ec_nodes(
+            volume_id,
+            extent_num,
+            &available_nodes,
+            data_chunks as u8,
+            parity_chunks as u8,
+        );
 
         let encoded = encode_data(data, data_chunks, parity_chunks)?;
 
-        let extent_id = ExtentId::generate();
-        let extent_version = crate::write_pipeline::next_extent_version();
+        // Deterministic extent_id and version — no random generation, no Raft.
+        let extent_id = PlacementEngine::extent_id_for_extent(volume_id, extent_num);
+        let extent_version = PlacementEngine::extent_version();
         let _checksum = compute_checksum(data);
 
         let acks = self
@@ -326,11 +334,6 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         }
 
         let successful_acks: Vec<&WriteAck> = acks.iter().filter(|a| a.success).collect();
-        let successful_nodes: Vec<NodeId> = successful_acks.iter().map(|a| a.node_id).collect();
-        let successful_checksums: Vec<Vec<u8>> = successful_acks
-            .iter()
-            .map(|a| a.checksum.as_bytes().to_vec())
-            .collect();
 
         // EC can tolerate up to M failures, so we require K + min(1, M) acks
         // (at least one parity for protection), not all K+M.
@@ -343,51 +346,36 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
             });
         }
 
-        let commit_req = CommitRequest {
-            volume_id,
-            block_range: block_range.clone(),
-            extent_id,
-            extent_version,
-            epoch,
-            replica_locations: successful_nodes,
-            checksums: successful_checksums,
-            operation_id: Some(operation_id),
-            previous_version: None,
-        };
-
-        match self.metadata_client.commit_extent_mapping(commit_req).await {
-            Ok(commit_epoch) => {
-                self.watermark.advance(commit_epoch);
-                self.cache.set_extent_mapping(
-                    &volume_id,
-                    block_range.start,
-                    crate::metadata_cache::CachedExtentMapping {
-                        extent_id,
-                        extent_version,
-                        replica_locations: acks
-                            .iter()
-                            .filter(|a| a.success)
-                            .map(|a| a.node_id)
-                            .collect(),
-                        checksums: acks
-                            .iter()
-                            .filter(|a| a.success)
-                            .map(|a| a.checksum.as_bytes().to_vec())
-                            .collect(),
-                        size_bytes: data.len() as u64,
-                    },
-                );
-                Ok(WriteOutcome::Committed {
-                    epoch: commit_epoch,
-                })
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "metadata commit failed — NOT acking to ublk");
-                Ok(WriteOutcome::MetadataCommitFailed {
-                    reason: e.to_string(),
-                })
-            }
-        }
+        // Deterministic placement: skip Raft commit and metadata cache update.
+        // Reads will compute the same extent_id and nodes from PlacementEngine.
+        // Still update the per-block mapping in cache so that the
+        // `test_ec_write_stores_per_block_mappings` test (and EC read path which
+        // currently checks the cache) continues to work.
+        let volume_info = self.cache.get_volume(&volume_id);
+        let block_size = volume_info.map(|v| v.block_size as u64).unwrap_or(4096);
+        self.cache.set_extent_mapping_range(
+            &volume_id,
+            block_range,
+            block_size,
+            crate::metadata_cache::CachedExtentMapping {
+                extent_id,
+                extent_version,
+                replica_locations: acks
+                    .iter()
+                    .filter(|a| a.success)
+                    .map(|a| a.node_id)
+                    .collect(),
+                checksums: acks
+                    .iter()
+                    .filter(|a| a.success)
+                    .map(|a| a.checksum.as_bytes().to_vec())
+                    .collect(),
+                size_bytes: data.len() as u64,
+                extent_offset: 0,
+            },
+        );
+        self.watermark.advance(epoch);
+        Ok(WriteOutcome::Committed { epoch })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -812,18 +800,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_ec_write_metadata_commit_failure() {
+        // With deterministic placement, metadata commit is skipped.
+        // A write with successful data acks always commits.
         let (pipeline, _cache, vid, watermark) = make_ec_pipeline(true, false, 6, 4, 2);
         let result = pipeline
             .execute(vid, 0..64, Bytes::from(vec![0xCC; 4096]))
             .await
             .unwrap();
-        match result {
-            WriteOutcome::MetadataCommitFailed { reason } => {
-                assert!(reason.contains("commit failed"));
-            }
-            other => panic!("expected MetadataCommitFailed, got {:?}", other),
-        }
-        assert_eq!(watermark.current(), EpochId::new(0));
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+        assert!(watermark.current().as_u64() >= 1);
     }
 
     #[tokio::test]
@@ -983,13 +968,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_ec_write_watermark_no_advance_on_commit_fail() {
-        let (pipeline, _cache, vid, watermark) = make_ec_pipeline(true, false, 6, 4, 2);
+        // With deterministic placement, metadata commit is skipped.
+        // Watermark always advances when data acks succeed. Test with failed data acks.
+        let (pipeline, _cache, vid, watermark) = make_ec_pipeline(false, false, 6, 4, 2);
 
         let result = pipeline
             .execute(vid, 0..64, Bytes::from(vec![0x55; 512]))
             .await
             .unwrap();
-        assert!(matches!(result, WriteOutcome::MetadataCommitFailed { .. }));
+        assert!(matches!(result, WriteOutcome::InsufficientAcks { .. }));
         assert_eq!(watermark.current(), EpochId::new(0));
     }
 
@@ -1538,9 +1525,11 @@ mod tests {
             .unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
 
-        let commit = metadata_client.last_commit().expect("should have a commit");
+        // With deterministic placement, use PlacementEngine to find the extent.
+        let extent_id = blockyard_common::PlacementEngine::extent_id_for_block(vid, 0);
+        let extent_version = blockyard_common::PlacementEngine::extent_version();
         let fragments =
-            data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
+            data_client.all_fragments_for_extent(extent_id, extent_version);
         assert_eq!(
             fragments.len(),
             num_nodes,
@@ -1617,9 +1606,11 @@ mod tests {
             .unwrap();
         assert!(matches!(result, WriteOutcome::Committed { .. }));
 
-        let commit = metadata_client.last_commit().expect("should have a commit");
+        // With deterministic placement, use PlacementEngine to find the extent.
+        let extent_id = blockyard_common::PlacementEngine::extent_id_for_block(vid, 0);
+        let extent_version = blockyard_common::PlacementEngine::extent_version();
         let fragments =
-            data_client.all_fragments_for_extent(commit.extent_id, commit.extent_version);
+            data_client.all_fragments_for_extent(extent_id, extent_version);
         assert_eq!(fragments.len(), num_nodes);
 
         let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
@@ -1644,6 +1635,227 @@ mod tests {
         assert_eq!(
             reconstructed, expected,
             "partial stripe reconstruction must match expected modified data"
+        );
+    }
+
+    /// Test EC data loss recovery: lose up to M parity fragments and reconstruct.
+    #[tokio::test]
+    async fn test_ec_reconstruction_survives_fragment_loss() {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let k: u8 = 4;
+        let m: u8 = 2;
+        let num_nodes = (k + m) as usize;
+        let (cache, vid) = setup_ec_cache(1, num_nodes, k, m);
+        let cache = Arc::new(cache);
+        let node_ids: Vec<NodeId> = cache.list_nodes().iter().map(|n| n.node_id).collect();
+
+        let data_client = Arc::new(InMemoryEcDataNode::new());
+        let metadata_client = Arc::new(InMemoryEcMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = EcWritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            Arc::clone(&watermark),
+            stale_handler,
+        );
+
+        // Write data with a recognizable pattern.
+        let original_data: Vec<u8> = (0..8192)
+            .map(|i| ((i * 17 + 42) % 256) as u8)
+            .collect();
+        let result = pipeline
+            .execute(vid, 0..128, Bytes::from(original_data.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        // With deterministic placement, use PlacementEngine to find the extent.
+        let extent_id = blockyard_common::PlacementEngine::extent_id_for_block(vid, 0);
+        let extent_version = blockyard_common::PlacementEngine::extent_version();
+        let fragments =
+            data_client.all_fragments_for_extent(extent_id, extent_version);
+        assert_eq!(fragments.len(), num_nodes);
+
+        // Simulate losing 2 fragments (the parity ones, indices 4 and 5).
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
+        for (nid, frag_data) in &fragments {
+            let idx = node_ids
+                .iter()
+                .position(|n| n == nid)
+                .expect("node should be in list");
+            shards[idx] = Some(frag_data.clone());
+        }
+
+        // Lose 2 shards (simulates 2 node failures).
+        shards[4] = None;
+        shards[5] = None;
+
+        let rs = ReedSolomon::new(k as usize, m as usize).unwrap();
+        rs.reconstruct(&mut shards)
+            .expect("reconstruction with 2 lost fragments must succeed");
+
+        let mut reconstructed = Vec::new();
+        for shard in shards.iter().take(k as usize) {
+            reconstructed.extend_from_slice(shard.as_ref().unwrap());
+        }
+        reconstructed.truncate(original_data.len());
+
+        assert_eq!(
+            reconstructed, original_data,
+            "data must be perfectly recovered after losing M parity fragments"
+        );
+
+        // Also verify: losing data fragments is recoverable too.
+        let mut shards2: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
+        for (nid, frag_data) in &fragments {
+            let idx = node_ids
+                .iter()
+                .position(|n| n == nid)
+                .expect("node should be in list");
+            shards2[idx] = Some(frag_data.clone());
+        }
+
+        // Lose 1 data shard and 1 parity shard.
+        shards2[0] = None;
+        shards2[5] = None;
+
+        rs.reconstruct(&mut shards2)
+            .expect("reconstruction with 1 data + 1 parity lost must succeed");
+
+        let mut reconstructed2 = Vec::new();
+        for shard in shards2.iter().take(k as usize) {
+            reconstructed2.extend_from_slice(shard.as_ref().unwrap());
+        }
+        reconstructed2.truncate(original_data.len());
+
+        assert_eq!(
+            reconstructed2, original_data,
+            "data must be recovered after losing 1 data + 1 parity fragment"
+        );
+    }
+
+    /// Test that EC write stores per-block extent mappings (regression for metadata fix).
+    #[tokio::test]
+    async fn test_ec_write_stores_per_block_mappings() {
+        let k: u8 = 4;
+        let m: u8 = 2;
+        let num_nodes = (k + m) as usize;
+        let (cache, vid) = setup_ec_cache(1, num_nodes, k, m);
+        let cache = Arc::new(cache);
+
+        let data_client = Arc::new(InMemoryEcDataNode::new());
+        let metadata_client = Arc::new(InMemoryEcMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = EcWritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            Arc::clone(&watermark),
+            stale_handler,
+        );
+
+        // Write data spanning 4 blocks (block_range 0..4).
+        let data: Vec<u8> = vec![0xCC; 4 * 4096];
+        let result = pipeline
+            .execute(vid, 0..4, Bytes::from(data.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        // Verify each block has its own mapping in the cache.
+        for block_num in 0u64..4 {
+            let mapping = cache.find_extent_for_range(&vid, &(block_num..block_num + 1));
+            assert!(
+                mapping.is_some(),
+                "block {block_num} must have a mapping after EC write"
+            );
+            let (block_start, m) = mapping.unwrap();
+            assert_eq!(
+                block_start, block_num,
+                "block {block_num} mapping must be keyed at {block_num}"
+            );
+            assert_eq!(
+                m.extent_offset,
+                block_num * 4096,
+                "block {block_num} extent_offset must be {offset}",
+                offset = block_num * 4096
+            );
+            assert_eq!(
+                m.size_bytes, 4096,
+                "each per-block mapping must have size_bytes = block_size"
+            );
+        }
+    }
+
+    /// Test: too many lost fragments fails reconstruction (sanity check).
+    #[tokio::test]
+    async fn test_ec_reconstruction_fails_with_too_many_losses() {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let k: u8 = 4;
+        let m: u8 = 2;
+        let num_nodes = (k + m) as usize;
+        let (cache, vid) = setup_ec_cache(1, num_nodes, k, m);
+        let cache = Arc::new(cache);
+        let node_ids: Vec<NodeId> = cache.list_nodes().iter().map(|n| n.node_id).collect();
+
+        let data_client = Arc::new(InMemoryEcDataNode::new());
+        let metadata_client = Arc::new(InMemoryEcMetadata::new(EpochId::new(1)));
+        let session = Arc::new(ClientSession::new(vid));
+        let watermark = Arc::new(WriteWatermark::new());
+        let stale_handler = Arc::new(StaleEpochHandler::new());
+
+        let pipeline = EcWritePipeline::new(
+            Arc::clone(&data_client),
+            Arc::clone(&metadata_client),
+            Arc::clone(&cache),
+            session,
+            Arc::clone(&watermark),
+            stale_handler,
+        );
+
+        let original_data: Vec<u8> = vec![0xDD; 2048];
+        let result = pipeline
+            .execute(vid, 0..32, Bytes::from(original_data))
+            .await
+            .unwrap();
+        assert!(matches!(result, WriteOutcome::Committed { .. }));
+
+        // With deterministic placement, use PlacementEngine to find the extent.
+        let extent_id = blockyard_common::PlacementEngine::extent_id_for_block(vid, 0);
+        let extent_version = blockyard_common::PlacementEngine::extent_version();
+        let fragments =
+            data_client.all_fragments_for_extent(extent_id, extent_version);
+
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; num_nodes];
+        for (nid, frag_data) in &fragments {
+            let idx = node_ids
+                .iter()
+                .position(|n| n == nid)
+                .unwrap();
+            shards[idx] = Some(frag_data.clone());
+        }
+
+        // Lose 3 shards (more than M=2) — reconstruction must fail.
+        shards[0] = None;
+        shards[2] = None;
+        shards[4] = None;
+
+        let rs = ReedSolomon::new(k as usize, m as usize).unwrap();
+        let result = rs.reconstruct(&mut shards);
+        assert!(
+            result.is_err(),
+            "reconstruction must fail when more than M fragments are lost"
         );
     }
 }

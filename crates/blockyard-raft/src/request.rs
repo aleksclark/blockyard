@@ -37,6 +37,9 @@ pub enum MetadataRequest {
         volume_id: VolumeId,
         size_bytes: u64,
         protection: ProtectionPolicy,
+        /// Extent size in bytes. Multiple blocks are grouped into one extent.
+        /// Default: 524288 (512KB = 128 blocks at 4096 block_size).
+        extent_size: u64,
     },
 
     /// Delete a volume and all its extent mappings.

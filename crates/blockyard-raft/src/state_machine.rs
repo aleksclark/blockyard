@@ -23,7 +23,15 @@ pub struct VolumeMetadata {
     pub volume_id: VolumeId,
     pub size_bytes: u64,
     pub protection: ProtectionPolicy,
+    /// Extent size in bytes. Multiple blocks are grouped into one extent.
+    /// Default: 524288 (512KB = 128 blocks at 4096 block_size).
+    #[serde(default = "default_extent_size")]
+    pub extent_size: u64,
     pub created_at_epoch: EpochId,
+}
+
+fn default_extent_size() -> u64 {
+    524288
 }
 
 /// A committed extent mapping (§4.5.2).
@@ -166,6 +174,7 @@ impl MetadataStateMachineData {
                 volume_id,
                 size_bytes,
                 protection,
+                extent_size,
             } => {
                 let key = volume_id.to_string();
                 if self.volumes.contains_key(&key) {
@@ -180,6 +189,7 @@ impl MetadataStateMachineData {
                         volume_id: *volume_id,
                         size_bytes: *size_bytes,
                         protection: *protection,
+                        extent_size: *extent_size,
                         created_at_epoch: self.epoch,
                     },
                 );
@@ -734,6 +744,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024 * 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         assert!(!resp.is_error());
         let vol = sm.get_volume(&vid).unwrap();
@@ -750,11 +761,13 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         let resp = sm.apply_request(&MetadataRequest::CreateVolume {
             volume_id: vid,
             size_bytes: 2048,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         assert!(resp.is_error());
     }
@@ -767,6 +780,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 0 },
+                extent_size: 524288,
         });
         assert!(resp.is_error());
     }
@@ -779,6 +793,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         let resp = sm.apply_request(&MetadataRequest::DeleteVolume { volume_id: vid });
         assert!(!resp.is_error());
@@ -805,6 +820,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
             volume_id: vid,
@@ -861,6 +877,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024 * 1024,
             protection: ProtectionPolicy::Replicated { replicas: 2 },
+                extent_size: 524288,
         });
 
         let resp = sm.apply_request(&MetadataRequest::CommitExtentMapping {
@@ -893,6 +910,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::AdvanceEpoch);
 
@@ -941,6 +959,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
             volume_id: vid,
@@ -982,6 +1001,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
             volume_id: vid,
@@ -1019,6 +1039,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
 
         let resp = sm.apply_request(&MetadataRequest::CommitExtentMapping {
@@ -1045,6 +1066,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
 
         let resp = sm.apply_request(&MetadataRequest::CommitExtentMapping {
@@ -1072,6 +1094,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
             volume_id: vid,
@@ -1106,6 +1129,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
             volume_id: vid,
@@ -1138,11 +1162,13 @@ mod tests {
             volume_id: v1,
             size_bytes: 100,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::CreateVolume {
             volume_id: v2,
             size_bytes: 200,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         assert_eq!(sm.list_volumes().len(), 2);
     }
@@ -1206,6 +1232,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
 
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
@@ -1248,6 +1275,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
         assert_eq!(
             sm.get_volume(&vid).unwrap().created_at_epoch,
@@ -1271,6 +1299,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
         sm.apply_request(&MetadataRequest::AdvanceEpoch);
 
@@ -1313,6 +1342,7 @@ mod tests {
                 data_chunks: 4,
                 parity_chunks: 2,
             },
+            extent_size: 524288,
         });
         assert!(!resp.is_error());
         let vol = sm.get_volume(&vid).unwrap();
@@ -1336,6 +1366,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024 * 1024,
             protection: ProtectionPolicy::Replicated { replicas: 1 },
+                extent_size: 524288,
         });
 
         sm.apply_request(&MetadataRequest::CommitExtentMapping {
@@ -1376,6 +1407,7 @@ mod tests {
             volume_id: vid,
             size_bytes: 1024,
             protection: ProtectionPolicy::Replicated { replicas: 3 },
+                extent_size: 524288,
         });
     }
 
