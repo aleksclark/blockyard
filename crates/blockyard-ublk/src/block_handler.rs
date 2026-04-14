@@ -412,11 +412,22 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
     ) -> Result<Vec<u8>, Error> {
         use reed_solomon_erasure::galois_8::ReedSolomon;
 
-        // Deterministic placement: compute extent_id and fragment nodes
+        // Deterministic placement: compute extent_id and fragment nodes.
+        //
+        // The write path in handle_write aligns writes to VolumeConfig.extent_blocks()
+        // (128) boundaries, then passes the aligned block_range to ec_write_pipeline.
+        // The EC pipeline computes extent_num = block_range.start / CachedVolumeInfo.extent_blocks()
+        // where CachedVolumeInfo.extent_blocks() is hardcoded to 1 (see metadata_cache.rs).
+        // So extent_num = block_range.start = aligned start block.
+        //
+        // On read, we must reverse this: align block_num down to the extent boundary,
+        // use that as extent_num, and compute block_offset within the extent.
         let volume_id = self.volume_config.volume_id;
-        let extent_blocks = self.volume_config.extent_blocks();
-        let (extent_num, block_offset) =
-            PlacementEngine::block_to_extent(block_num, extent_blocks);
+        let extent_blocks = self.volume_config.extent_blocks(); // 128 (real value)
+        let aligned_start = (block_num / extent_blocks) * extent_blocks;
+        let block_offset = block_num - aligned_start;
+        // EC pipeline uses CachedVolumeInfo.extent_blocks() = 1, so extent_num = aligned_start / 1
+        let extent_num = aligned_start;
         let extent_id = PlacementEngine::extent_id_for_extent(volume_id, extent_num);
         let extent_version = PlacementEngine::extent_version();
 

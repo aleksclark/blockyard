@@ -1880,4 +1880,119 @@ mod tests {
             "reconstruction must fail when more than M fragments are lost"
         );
     }
+
+    /// Verify encode_data roundtrips correctly through Reed-Solomon reconstruct.
+    ///
+    /// This mimics the exact code paths in ec_write_pipeline (encode) and
+    /// block_handler::read_ec_block_data (decode).
+    #[test]
+    fn test_encode_data_roundtrip_4k_block() {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let data_chunks = 2usize;
+        let parity_chunks = 1usize;
+        let block_size = 4096usize;
+
+        // Simulate ext4 superblock-like data (non-zero, non-trivial pattern)
+        let mut original = vec![0u8; block_size];
+        for i in 0..block_size {
+            original[i] = (i % 256) as u8;
+        }
+
+        // === ENCODE (ec_write_pipeline::encode_data) ===
+        let encoded = encode_data(&original, data_chunks, parity_chunks).unwrap();
+        assert_eq!(encoded.fragments.len(), 3);
+        assert_eq!(encoded.original_data_len, block_size);
+
+        // Each fragment should be 2048 bytes
+        for frag in &encoded.fragments {
+            assert_eq!(frag.data.len(), 2048, "fragment {} wrong size", frag.index);
+        }
+
+        // === DECODE (block_handler::read_ec_block_data path) ===
+        // Simulate: each node returns its fragment
+        let total_fragments = data_chunks + parity_chunks;
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_fragments];
+        for frag in &encoded.fragments {
+            shards[frag.index] = Some(frag.data.to_vec());
+        }
+
+        let rs = ReedSolomon::new(data_chunks, parity_chunks).unwrap();
+        rs.reconstruct(&mut shards).unwrap();
+
+        // Concatenate data shards
+        let mut reconstructed = Vec::new();
+        for shard in shards.iter().take(data_chunks) {
+            if let Some(data) = shard {
+                reconstructed.extend_from_slice(data);
+            }
+        }
+
+        // block_offset=0, extract block_size bytes
+        let block_offset = 0usize;
+        let offset = block_offset * block_size;
+        let end = std::cmp::min(offset + block_size, reconstructed.len());
+        let block_data = &reconstructed[offset..end];
+
+        assert_eq!(block_data, &original[..], "EC roundtrip produced different data");
+    }
+
+    /// Test roundtrip with extent_blocks > 1 (multi-block extent).
+    /// The write groups 128 blocks into one extent. On read, block_offset
+    /// selects the correct 4K slice from the reconstructed data.
+    #[test]
+    fn test_encode_data_roundtrip_multi_block_extent() {
+        use reed_solomon_erasure::galois_8::ReedSolomon;
+
+        let data_chunks = 2usize;
+        let parity_chunks = 1usize;
+        let block_size = 4096usize;
+        let extent_blocks = 128usize;
+        let extent_size = block_size * extent_blocks; // 524288 bytes
+
+        // Create a full extent of data
+        let mut original = vec![0u8; extent_size];
+        for i in 0..extent_size {
+            original[i] = ((i * 7 + 13) % 256) as u8;
+        }
+
+        let encoded = encode_data(&original, data_chunks, parity_chunks).unwrap();
+        assert_eq!(encoded.fragments.len(), 3);
+
+        // Each fragment = 524288 / 2 = 262144 bytes
+        for frag in &encoded.fragments {
+            assert_eq!(frag.data.len(), extent_size / data_chunks);
+        }
+
+        // Decode
+        let total_fragments = data_chunks + parity_chunks;
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_fragments];
+        for frag in &encoded.fragments {
+            shards[frag.index] = Some(frag.data.to_vec());
+        }
+
+        let rs = ReedSolomon::new(data_chunks, parity_chunks).unwrap();
+        rs.reconstruct(&mut shards).unwrap();
+
+        let mut reconstructed = Vec::new();
+        for shard in shards.iter().take(data_chunks) {
+            if let Some(data) = shard {
+                reconstructed.extend_from_slice(data);
+            }
+        }
+
+        // Extract block 0
+        let block_data_0 = &reconstructed[0..block_size];
+        assert_eq!(block_data_0, &original[0..block_size]);
+
+        // Extract block 64 (middle)
+        let offset_64 = 64 * block_size;
+        let block_data_64 = &reconstructed[offset_64..offset_64 + block_size];
+        assert_eq!(block_data_64, &original[offset_64..offset_64 + block_size]);
+
+        // Extract block 127 (last)
+        let offset_127 = 127 * block_size;
+        let block_data_127 = &reconstructed[offset_127..offset_127 + block_size];
+        assert_eq!(block_data_127, &original[offset_127..offset_127 + block_size]);
+    }
 }
