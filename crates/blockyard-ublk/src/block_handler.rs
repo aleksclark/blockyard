@@ -412,18 +412,13 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
     ) -> Result<Vec<u8>, Error> {
         use reed_solomon_erasure::galois_8::ReedSolomon;
 
-        let block_range = block_num..block_num + 1;
-        let mapping = self
-            .metadata_cache
-            .find_extent_for_range(&self.volume_config.volume_id, &block_range);
-
-        let Some((_block_start, extent_mapping)) = mapping else {
-            return Ok(vec![0u8; block_size as usize]);
-        };
-
-        if extent_mapping.replica_locations.is_empty() {
-            return Ok(vec![0u8; block_size as usize]);
-        }
+        // Deterministic placement: compute extent_id and fragment nodes
+        let volume_id = self.volume_config.volume_id;
+        let extent_blocks = self.volume_config.extent_blocks();
+        let (extent_num, block_offset) =
+            PlacementEngine::block_to_extent(block_num, extent_blocks);
+        let extent_id = PlacementEngine::extent_id_for_extent(volume_id, extent_num);
+        let extent_version = PlacementEngine::extent_version();
 
         let (data_chunks, parity_chunks) = match self.volume_config.protection {
             ProtectionPolicy::ErasureCoded {
@@ -433,16 +428,30 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
             _ => return Err(Error::Storage("EC read called on non-EC volume".into())),
         };
 
-        // Read all fragments in parallel. replica_locations[i] = node holding fragment i
+        let total_fragments = data_chunks + parity_chunks;
+        let available_nodes: Vec<blockyard_common::NodeId> =
+            self.metadata_cache.list_nodes().iter().map(|n| n.node_id).collect();
+        let fragment_nodes = PlacementEngine::select_nodes(
+            volume_id,
+            extent_num,
+            &available_nodes,
+            total_fragments,
+        );
+
+        if fragment_nodes.is_empty() {
+            return Ok(vec![0u8; block_size as usize]);
+        }
+
+        // Read all fragments in parallel. fragment_nodes[i] = node holding fragment i
         let mut join_set = tokio::task::JoinSet::new();
-        for (frag_idx, &node_id) in extent_mapping.replica_locations.iter().enumerate() {
+        for (frag_idx, &node_id) in fragment_nodes.iter().enumerate() {
             let client = Arc::clone(&self.data_client);
             let volume_id = self.volume_config.volume_id;
-            let extent_id = extent_mapping.extent_id;
-            let extent_version = extent_mapping.extent_version;
+            let eid = extent_id;
+            let ever = extent_version;
             join_set.spawn(async move {
                 let result = client
-                    .read_extent(node_id, volume_id, extent_id, extent_version, 0, 0)
+                    .read_extent(node_id, volume_id, eid, ever, 0, 0)
                     .await;
                 (frag_idx, result)
             });
@@ -470,6 +479,13 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
             }
         }
 
+        // If ALL fragments failed (e.g., unwritten block — extent not found
+        // on any node), return zeros rather than attempting reconstruction.
+        let present_count = shards.iter().filter(|s| s.is_some()).count();
+        if present_count == 0 {
+            return Ok(vec![0u8; block_size as usize]);
+        }
+
         // Reconstruct
         let rs = ReedSolomon::new(data_chunks, parity_chunks)
             .map_err(|e| Error::Storage(format!("Reed-Solomon init failed: {e}")))?;
@@ -485,8 +501,8 @@ impl<D: DataNodeClient + DataNodeReader, M: MetadataClient> ClusterBlockHandler<
             }
         }
 
-        // Extract the requested block using extent_offset
-        let offset = extent_mapping.extent_offset as usize;
+        // Extract the requested block using block_offset from deterministic placement
+        let offset = (block_offset * block_size) as usize;
         let end = std::cmp::min(offset + block_size as usize, reconstructed.len());
         if offset >= reconstructed.len() {
             return Ok(vec![0u8; block_size as usize]);

@@ -70,11 +70,17 @@ impl ExtentIndex {
 
     pub fn insert(&self, entry: LocalExtentEntry) -> Result<(), StorageError> {
         let mut entries = self.entries.write();
-        if entries.contains_key(&entry.extent_id) {
-            return Err(StorageError::ExtentExists(format!(
-                "extent {} already indexed",
-                entry.extent_id
-            )));
+        // Upsert: if the extent already exists (overwrite via deterministic
+        // placement), replace the entry so the checksum and metadata reflect
+        // the latest committed data.  This matches commit_extent() which
+        // atomically replaces the on-disk file via rename(2).
+        if let Some(existing) = entries.get(&entry.extent_id) {
+            tracing::debug!(
+                extent_id = %entry.extent_id,
+                old_checksum = %existing.checksum,
+                new_checksum = %entry.checksum,
+                "updating extent index entry (overwrite)"
+            );
         }
         entries.insert(entry.extent_id, entry);
         Ok(())
@@ -264,11 +270,17 @@ impl ExtentStore {
             )));
         }
 
+        // For block device workloads with deterministic placement, the same
+        // (extent_id, version) may be written multiple times (overwrite).
+        // Allow atomic replacement: the new staged data supersedes the old
+        // committed file.  This is safe because the caller already verified
+        // the payload checksum, and the rename below is atomic on POSIX.
         if committed_path.exists() {
-            return Err(StorageError::ImmutabilityViolation(format!(
-                "committed extent already exists: {}",
-                committed_path.display()
-            )));
+            tracing::debug!(
+                %extent_id,
+                version,
+                "overwriting previously committed extent (deterministic placement)"
+            );
         }
 
         if let Some(parent) = committed_path.parent() {
@@ -664,10 +676,18 @@ mod tests {
             .commit_extent(eid, 1, &checksum, data.len() as u64, StorageClass::Default)
             .unwrap();
 
-        let (_, checksum2) = store.stage_extent(eid, 1, data).unwrap();
+        // Second commit with same (extent_id, version) should succeed
+        // (overwrites are allowed for deterministic placement / block device workloads)
+        let data2 = b"updated";
+        let (_, checksum2) = store.stage_extent(eid, 1, data2).unwrap();
         let result =
-            store.commit_extent(eid, 1, &checksum2, data.len() as u64, StorageClass::Default);
-        assert!(result.is_err());
+            store.commit_extent(eid, 1, &checksum2, data2.len() as u64, StorageClass::Default);
+        assert!(result.is_ok(), "overwrite of committed extent should succeed");
+
+        // Verify the new data is what we read back
+        let (read_data, read_checksum) = store.read_extent(eid, 1).unwrap();
+        assert_eq!(read_data, data2.to_vec());
+        assert_eq!(read_checksum, checksum2);
     }
 
     #[test]
@@ -811,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extent_index_duplicate_insert() {
+    fn test_extent_index_duplicate_insert_upserts() {
         let index = ExtentIndex::new();
         let eid = ExtentId::generate();
         let entry = LocalExtentEntry {
@@ -825,7 +845,18 @@ mod tests {
         };
 
         index.insert(entry.clone()).unwrap();
-        assert!(index.insert(entry).is_err());
+
+        // Second insert with updated checksum should upsert (not error)
+        let updated = LocalExtentEntry {
+            checksum: "xyz".into(),
+            size: 4096,
+            ..entry
+        };
+        index.insert(updated).unwrap();
+
+        let got = index.get(eid).unwrap();
+        assert_eq!(got.checksum, "xyz");
+        assert_eq!(got.size, 4096);
     }
 
     #[test]

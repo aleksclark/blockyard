@@ -612,6 +612,12 @@ impl DataNodeService {
     }
 
     fn write_error(&self, request: &WriteExtentRequest, message: String) -> WriteExtentResponse {
+        warn!(
+            op_id = %request.operation_id,
+            extent_id = %request.extent_id,
+            error = %message,
+            "write request failed"
+        );
         let disk_id = request.target_disk_id.unwrap_or_else(DiskId::generate);
         let record = OperationRecord {
             operation_id: request.operation_id,

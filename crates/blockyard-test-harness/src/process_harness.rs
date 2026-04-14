@@ -160,6 +160,9 @@ impl ProcessNode {
         std::fs::create_dir_all(&self.data_dir)?;
         let disk_path = self.data_dir.join("disk0");
         std::fs::create_dir_all(&disk_path)?;
+        // Write the XFS marker so disk validation passes in test environments
+        // (tests use tmpfs, not real XFS)
+        std::fs::write(disk_path.join(".blockyard_xfs_ok"), "")?;
 
         let config_path = self.data_dir.join("config.toml");
         let config_toml = self.generate_config();
@@ -538,6 +541,134 @@ impl RealProcessCluster {
 
     pub fn base_port(&self) -> u16 {
         self.base_port
+    }
+
+    /// Wipe raft state on a node while preserving data files (disk0/committed/).
+    ///
+    /// This simulates a scenario where raft metadata is lost but extent data
+    /// remains on disk — forcing the node through the recovery code path.
+    pub fn wipe_raft_state(&self, node_index: usize) -> anyhow::Result<()> {
+        let data_dir = self.nodes[node_index].data_dir();
+        let raft_db = data_dir.join("raft.db");
+        let raft_sm_db = data_dir.join("raft-sm.db");
+        for path in [&raft_db, &raft_sm_db] {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+                info!("wiped raft state: {}", path.display());
+            }
+        }
+        // Also remove WAL/SHM files for SQLite-backed stores
+        for suffix in &["-wal", "-shm"] {
+            for base in &[&raft_db, &raft_sm_db] {
+                let wal_path = PathBuf::from(format!("{}{}", base.display(), suffix));
+                if wal_path.exists() {
+                    std::fs::remove_file(&wal_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Pre-seed committed extent files on a node's disk to simulate stale data.
+    ///
+    /// Creates fake committed extent files that will conflict with deterministic
+    /// placement when a volume writes to the same block offsets. This tests that
+    /// the ExtentStore handles overwrites of pre-existing committed extents
+    /// (the "immutability violation" bug).
+    ///
+    /// Returns the number of files created.
+    pub fn pre_seed_extent_files(
+        &self,
+        node_index: usize,
+        extent_ids: &[&str],
+        version: u64,
+        data: &[u8],
+    ) -> anyhow::Result<usize> {
+        let disk_dir = self.nodes[node_index].data_dir().join("disk0");
+        let committed_dir = disk_dir.join("committed");
+        let mut count = 0;
+        for id_str in extent_ids {
+            let prefix = &id_str[..8.min(id_str.len())];
+            let dir = committed_dir.join(prefix);
+            std::fs::create_dir_all(&dir)?;
+            let file_path = dir.join(format!("{}_v{}", id_str, version));
+            std::fs::write(&file_path, data)?;
+            info!("seeded extent file: {}", file_path.display());
+
+            // Also write a minimal .meta sidecar so recovery picks it up
+            let meta_path = dir.join(format!("{}_v{}.meta", id_str, version));
+            let meta = serde_json::json!({
+                "extent_id": id_str,
+                "disk_id": "00000000-0000-0000-0000-000000000000",
+                "version": version,
+                "checksum": "stale-seed-checksum",
+                "size": data.len(),
+                "storage_class": "Default",
+                "committed_at": 0
+            });
+            std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Count committed extent files across all disks on a node.
+    pub fn count_committed_extents(&self, node_index: usize) -> anyhow::Result<usize> {
+        let disk_dir = self.nodes[node_index].data_dir().join("disk0");
+        let committed_dir = disk_dir.join("committed");
+        if !committed_dir.exists() {
+            return Ok(0);
+        }
+        let files = walkdir(&committed_dir)?;
+        // Count only extent data files (not .meta sidecars)
+        Ok(files.iter().filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            name.contains("_v") && !name.ends_with(".meta")
+        }).count())
+    }
+
+    /// Restart all nodes in the cluster. Kills each node, then starts them
+    /// in sequence (node 0 first since it's the bootstrap/leader).
+    ///
+    /// Preserves data directories (extent files + raft state) across restarts,
+    /// exercising the raft recovery code path.
+    pub async fn restart_all_nodes(&mut self) -> anyhow::Result<()> {
+        // Kill all nodes first (reverse order — followers before leader)
+        for i in (0..self.nodes.len()).rev() {
+            let _ = self.nodes[i].kill();
+        }
+        // Small delay to let ports free up
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Restart with preserved data dirs (node 0 first — it's the bootstrap node)
+        for i in 0..self.nodes.len() {
+            let old_data_dir = self.nodes[i].data_dir().to_path_buf();
+            let seed_nodes = if i == 0 {
+                vec![]
+            } else {
+                vec![
+                    format!("127.0.0.1:{}", self.base_port + 1)
+                        .parse::<SocketAddr>()
+                        .unwrap(),
+                ]
+            };
+            self.nodes[i] = ProcessNode::with_existing_data_dir(
+                i,
+                self.base_port,
+                self.binary_path.clone(),
+                seed_nodes,
+                old_data_dir,
+            );
+            self.nodes[i].start()?;
+            self.nodes[i]
+                .wait_ready(Duration::from_secs(30))
+                .await?;
+            // Give raft time to settle between node starts
+            if i < self.nodes.len() - 1 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -309,6 +309,19 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         let extent_version = PlacementEngine::extent_version();
         let _checksum = compute_checksum(data);
 
+        tracing::info!(
+            %volume_id,
+            extent_num,
+            %extent_id,
+            extent_blocks,
+            data_chunks,
+            parity_chunks,
+            node_count = fragment_nodes.len(),
+            nodes = ?fragment_nodes.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+            fragment_count = encoded.fragments.len(),
+            "EC write: dispatching fragments to nodes"
+        );
+
         let acks = self
             .transmit_fragments(
                 &fragment_nodes,
@@ -340,6 +353,15 @@ impl<D: DataNodeClient, M: MetadataClient> EcWritePipeline<D, M> {
         let min_parity = std::cmp::min(1, parity_chunks);
         let required_acks = data_chunks + min_parity;
         if successful_acks.len() < required_acks {
+            for ack in &acks {
+                if !ack.success {
+                    tracing::warn!(
+                        node = %ack.node_id,
+                        error = ?ack.error,
+                        "EC data node rejected write"
+                    );
+                }
+            }
             return Ok(WriteOutcome::InsufficientAcks {
                 acked: successful_acks.len(),
                 required: required_acks,

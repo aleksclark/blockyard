@@ -229,7 +229,12 @@ impl BlockyardNode {
                 for node_entry in data.nodes.values() {
                     if let Some(raft_nid) = data.node_raft_map.get(&node_entry.node_id) {
                         if *raft_nid != existing_raft_id {
-                            if let Ok(addr) = node_entry.addr.parse::<SocketAddr>() {
+                            // State machine stores data plane addresses (port 9800).
+                            // PeerRegistry needs raft RPC addresses (port + 10).
+                            // Derive the raft address using the same convention as
+                            // raft_bind_addr() and the join response handler.
+                            if let Ok(mut addr) = node_entry.addr.parse::<SocketAddr>() {
+                                addr.set_port(addr.port() + 10);
                                 peer_registry.register(*raft_nid, addr);
                             }
                         }

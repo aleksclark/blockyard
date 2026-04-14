@@ -371,6 +371,13 @@ impl TcpDataNodeClient {
         data: &Bytes,
         checksum: &str,
     ) -> Result<WriteAck, Error> {
+        tracing::debug!(
+            %node_id,
+            %volume_id,
+            %extent_id,
+            data_len = data.len(),
+            "try_write_extent: getting connection"
+        );
         let conn = self.get_connection(node_id).await?;
         let mut stream = conn.stream.lock().await;
 
@@ -425,6 +432,13 @@ fn convert_write_response(node_id: NodeId, resp: WriteExtentResponse) -> WriteAc
         None
     } else {
         let err_msg = resp.error.unwrap_or_default();
+        tracing::warn!(
+            %node_id,
+            op_id = %resp.operation_id,
+            extent_id = %resp.extent_id,
+            server_error = %err_msg,
+            "server returned failure for write"
+        );
         if err_msg.contains("stale") || err_msg.contains("epoch") {
             Some(WriteAckError::StaleEpoch)
         } else if err_msg.contains("disk") || err_msg.contains("unavailable") {
